@@ -293,8 +293,11 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
     Message.objects.create(conversation=conversation, sender="customer", text=message_text, instagram_message_id=instagram_message_id)
     conversation.last_message_at = timezone.now()
     conversation.save(update_fields=["last_message_at", "updated_at"])
-    if conversation.status != "ai":
+    if conversation.status == "closed":
         return None
+    if conversation.status != "ai":
+        conversation.status = "ai"
+        conversation.save(update_fields=["status", "updated_at"])
     result = ai_reply(conversation)
     customer = conversation.customer
     changed = []
