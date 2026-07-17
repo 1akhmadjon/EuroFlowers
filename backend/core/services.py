@@ -35,6 +35,11 @@ def instagram_credentials():
     return integration, integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
 
 
+def openai_api_key():
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    return (integration.extra or {}).get("openai_api_key") or settings.OPENAI_API_KEY
+
+
 def instagram_user_id(access_token):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     if integration.instagram_account_id:
@@ -200,7 +205,7 @@ def apply_stock_movement(batch, movement_type, quantity_stems, reason, user):
 def instagram_send(recipient_id, text):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID
+    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
     if not access_token or not account_id:
         return {"mocked": True}
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
@@ -254,9 +259,10 @@ def ai_reply(conversation):
         post = conversation.social_post
         context["post"] = {"title_uz": post.title_uz, "title_ru": post.title_ru, "description_uz": post.description_uz, "description_ru": post.description_ru, "price": str(post.price or ""), "flower_count": post.flower_count}
     instructions = ai_settings.system_prompt + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean."
-    if not settings.OPENAI_API_KEY:
+    api_key = openai_api_key()
+    if not api_key:
         return {"reply": "Hozir operatorimiz sizga yordam beradi. Ismingiz va telefon raqamingizni qoldiring, iltimos.", "detected_language": customer.language, "lead_ready": False, "handoff": True}
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    client = OpenAI(api_key=api_key)
     response = client.responses.create(
         model=ai_settings.openai_model or settings.OPENAI_MODEL,
         instructions=instructions + "\nKONTEKST:\n" + json.dumps(context, ensure_ascii=False),
