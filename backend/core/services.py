@@ -329,9 +329,7 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
         )
         Notification.objects.create(branch=conversation.branch, notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     if result.get("handoff"):
-        conversation.status = "operator"
-        conversation.save(update_fields=["status", "updated_at"])
-        Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator kerak: {customer}", title_ru=f"Требуется оператор: {customer}", reference_type="conversation", reference_id=conversation.id)
+        Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
     return reply
 
 
@@ -487,6 +485,8 @@ def resolve_instagram_event(payload):
         for event in entry.get("messaging", []):
             webhook_event = save_instagram_webhook_event(payload, entry, event)
             sender_id = event.get("sender", {}).get("id")
+            integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+            own_ids = {value for value in [integration.instagram_account_id, integration.instagram_business_id, settings.INSTAGRAM_ACCOUNT_ID] if value}
             message = event.get("message", {})
             text = message.get("text")
             story_attachment = first_story_attachment(message)
@@ -494,7 +494,7 @@ def resolve_instagram_event(payload):
             story_text = "Mijoz Instagram storyni directga yubordi." if story_attachment else ""
             media_text = "Mijoz Instagram post/reelni directga yubordi." if media_attachment else ""
             message_text = text or story_text or media_text
-            if not sender_id or not message_text or message.get("is_echo"):
+            if not sender_id or sender_id in own_ids or not message_text or message.get("is_echo"):
                 continue
             branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None)
             if not branch:
