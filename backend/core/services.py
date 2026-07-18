@@ -311,6 +311,12 @@ def ingest_customer_message(conversation, message_text, instagram_message_id="")
 def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
+    if conversation.ai_paused_until and conversation.ai_paused_until > timezone.now():
+        return None
+    if conversation.ai_paused_until:
+        conversation.ai_paused_until = None
+        conversation.ai_pause_reason = ""
+        conversation.save(update_fields=["ai_paused_until", "ai_pause_reason", "updated_at"])
     if conversation.status != "ai":
         conversation.status = "ai"
         conversation.save(update_fields=["status", "updated_at"])

@@ -15,11 +15,12 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "corsheaders",
+    "channels",
     "rest_framework",
     "drf_spectacular",
     "rest_framework_simplejwt.token_blacklist",
     "django_filters",
-    "core",
+    "core.apps.CoreConfig",
 ]
 
 MIDDLEWARE = [
@@ -46,6 +47,12 @@ TEMPLATES = [{
 }]
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [os.getenv("REDIS_URL", "redis://localhost:6379/0")]},
+    }
+}
 
 DATABASES = {"default": dj_database_url.config(default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}")}
 AUTH_PASSWORD_VALIDATORS = []

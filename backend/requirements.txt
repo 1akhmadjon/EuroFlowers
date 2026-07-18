@@ -12,3 +12,6 @@ requests==2.32.4
 celery==5.5.3
 redis==6.2.0
 gunicorn==23.0.0
+channels==4.2.2
+channels-redis==4.2.1
+uvicorn[standard]==0.35.0

@@ -18,6 +18,10 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         print(f"INSTAGRAM_TYPING_ON_FAILED recipient={recipient_id} error={exc}", flush=True)
     reply = process_pending_customer_reply(conversation_id, expected_message_id)
     if not reply:
+        try:
+            instagram_sender_action(recipient_id, "typing_off")
+        except Exception as exc:
+            print(f"INSTAGRAM_TYPING_OFF_FAILED recipient={recipient_id} error={exc}", flush=True)
         return None
     try:
         instagram_send(recipient_id, reply.text)

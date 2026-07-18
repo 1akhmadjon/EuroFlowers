@@ -249,6 +249,8 @@ class Conversation(TimeStampedModel):
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="assigned_conversations")
     last_message_at = models.DateTimeField(default=timezone.now)
     ai_summary = models.TextField(blank=True)
+    ai_paused_until = models.DateTimeField(null=True, blank=True)
+    ai_pause_reason = models.CharField(max_length=255, blank=True)
 
     class Meta:
         ordering = ["-last_message_at"]

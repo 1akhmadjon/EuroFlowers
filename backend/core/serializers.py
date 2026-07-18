@@ -387,6 +387,17 @@ class TextRequestSerializer(serializers.Serializer):
     text = serializers.CharField()
 
 
+class AIPauseRequestSerializer(serializers.Serializer):
+    minutes = serializers.IntegerField(required=False, min_value=1)
+    paused_until = serializers.DateTimeField(required=False)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, attrs):
+        if not attrs.get("minutes") and not attrs.get("paused_until"):
+            raise serializers.ValidationError({"detail": "minutes yoki paused_until yuboring"})
+        return attrs
+
+
 class SendResponseSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     text = serializers.CharField()

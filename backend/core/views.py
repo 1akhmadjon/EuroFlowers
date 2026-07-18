@@ -22,7 +22,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Notification, Packaging, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .services import apply_stock_movement, deduct_catalog_stock, instagram_send, mark_catalog_sold, process_customer_message, resolve_instagram_event
 
 
@@ -299,7 +299,10 @@ class ConversationViewSet(ScopedViewSet):
         message = conversation.messages.create(sender="operator", text=text)
         instagram_send(conversation.customer.instagram_user_id, text)
         conversation.last_message_at = timezone.now()
-        conversation.save(update_fields=["last_message_at", "updated_at"])
+        conversation.ai_paused_until = timezone.now() + timedelta(minutes=15)
+        conversation.ai_pause_reason = "operator_message"
+        conversation.assigned_to = request.user
+        conversation.save(update_fields=["last_message_at", "ai_paused_until", "ai_pause_reason", "assigned_to", "updated_at"])
         return Response({"id": message.id, "text": message.text})
 
     @extend_schema(request=None, responses=ConversationSerializer)
@@ -317,7 +320,25 @@ class ConversationViewSet(ScopedViewSet):
         conversation = self.get_object()
         conversation.status = "ai"
         conversation.assigned_to = None
-        conversation.save(update_fields=["status", "assigned_to", "updated_at"])
+        conversation.ai_paused_until = None
+        conversation.ai_pause_reason = ""
+        conversation.save(update_fields=["status", "assigned_to", "ai_paused_until", "ai_pause_reason", "updated_at"])
+        return Response(self.get_serializer(conversation).data)
+
+    @extend_schema(request=AIPauseRequestSerializer, responses=ConversationSerializer)
+    @action(detail=True, methods=["post"])
+    def pause_ai(self, request, pk=None):
+        conversation = self.get_object()
+        serializer = AIPauseRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if serializer.validated_data.get("paused_until"):
+            paused_until = serializer.validated_data["paused_until"]
+        else:
+            paused_until = timezone.now() + timedelta(minutes=serializer.validated_data["minutes"])
+        conversation.ai_paused_until = paused_until
+        conversation.ai_pause_reason = serializer.validated_data.get("reason", "manual")
+        conversation.assigned_to = request.user
+        conversation.save(update_fields=["ai_paused_until", "ai_pause_reason", "assigned_to", "updated_at"])
         return Response(self.get_serializer(conversation).data)
 
     @extend_schema(request=TextRequestSerializer, responses=SimulateResponseSerializer)
