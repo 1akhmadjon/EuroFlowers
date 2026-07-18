@@ -31,6 +31,11 @@ class BusinessRulesTests(TestCase):
 
     def test_phone_normalization(self):
         self.assertEqual(normalize_phone("90 123-45-67"), "+998901234567")
+        self.assertEqual(normalize_phone("+998 90 123 45 67"), "+998901234567")
+        self.assertEqual(normalize_phone("998901234567"), "+998901234567")
+        self.assertEqual(normalize_phone("+998 ** *** ** 67"), "")
+        self.assertEqual(normalize_phone("+99867"), "")
+        self.assertEqual(normalize_phone("67"), "")
 
 
 class ApiTests(TestCase):

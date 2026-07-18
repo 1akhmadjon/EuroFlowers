@@ -24,10 +24,14 @@ def media_id_from_url(value):
 
 
 def normalize_phone(value):
+    if "*" in (value or ""):
+        return ""
     digits = re.sub(r"\D", "", value or "")
     if len(digits) == 9:
         digits = "998" + digits
-    return "+" + digits if digits else ""
+    if len(digits) == 12 and digits.startswith("998"):
+        return "+" + digits
+    return ""
 
 
 def instagram_credentials():
