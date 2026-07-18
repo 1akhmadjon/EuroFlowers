@@ -214,6 +214,18 @@ def instagram_send(recipient_id, text):
     return response.json()
 
 
+def instagram_sender_action(recipient_id, action):
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+    if not access_token or not account_id:
+        return {"mocked": True}
+    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
+    response = requests.post(url, params={"access_token": access_token}, json={"recipient": {"id": recipient_id}, "sender_action": action}, timeout=20)
+    response.raise_for_status()
+    return response.json()
+
+
 def ai_reply(conversation):
     customer = conversation.customer
     branch = conversation.branch
@@ -287,12 +299,16 @@ def ai_reply(conversation):
     return json.loads(response.output_text)
 
 
-def process_customer_message(conversation, message_text, instagram_message_id=""):
-    if instagram_message_id and Message.objects.filter(instagram_message_id=instagram_message_id).exists():
+def ingest_customer_message(conversation, message_text, instagram_message_id=""):
+    if instagram_message_id and Message.objects.filter(instagram_message_id=instagram_message_id, conversation=conversation).exists():
         return None
-    Message.objects.create(conversation=conversation, sender="customer", text=message_text, instagram_message_id=instagram_message_id)
+    message = Message.objects.create(conversation=conversation, sender="customer", text=message_text, instagram_message_id=instagram_message_id)
     conversation.last_message_at = timezone.now()
     conversation.save(update_fields=["last_message_at", "updated_at"])
+    return message
+
+
+def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
     if conversation.status != "ai":
@@ -331,6 +347,23 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
     if result.get("handoff"):
         Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
     return reply
+
+
+def process_customer_message(conversation, message_text, instagram_message_id=""):
+    message = ingest_customer_message(conversation, message_text, instagram_message_id)
+    if not message:
+        return None
+    return create_ai_reply_for_conversation(conversation)
+
+
+def process_pending_customer_reply(conversation_id, expected_message_id):
+    conversation = Conversation.objects.select_related("customer", "branch", "social_post").filter(id=conversation_id).first()
+    if not conversation:
+        return None
+    latest = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    if not latest or latest.id != expected_message_id:
+        return None
+    return create_ai_reply_for_conversation(conversation)
 
 
 def flatten_interesting_payload(value, prefix=""):
@@ -513,11 +546,11 @@ def resolve_instagram_event(payload):
             elif post and conversation.social_post_id != post.id:
                 conversation.social_post = post
                 conversation.save(update_fields=["social_post", "updated_at"])
-            reply = process_customer_message(conversation, message_text, message.get("mid", ""))
-            if reply:
+            saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""))
+            if saved_message:
                 try:
-                    instagram_send(sender_id, reply.text)
+                    instagram_sender_action(sender_id, "typing_on")
                 except Exception as exc:
-                    print(f"INSTAGRAM_SEND_FAILED recipient={sender_id} error={exc}", flush=True)
-                results.append(reply.id)
+                    print(f"INSTAGRAM_TYPING_ON_FAILED recipient={sender_id} error={exc}", flush=True)
+                results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
     return results
