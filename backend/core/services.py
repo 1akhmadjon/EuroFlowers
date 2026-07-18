@@ -548,9 +548,5 @@ def resolve_instagram_event(payload):
                 conversation.save(update_fields=["social_post", "updated_at"])
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""))
             if saved_message:
-                try:
-                    instagram_sender_action(sender_id, "typing_on")
-                except Exception as exc:
-                    print(f"INSTAGRAM_TYPING_ON_FAILED recipient={sender_id} error={exc}", flush=True)
                 results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
     return results

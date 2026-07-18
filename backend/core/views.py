@@ -661,9 +661,6 @@ def instagram_webhook(request):
         if request.query_params.get("hub.verify_token") == verify_token:
             return Response(int(request.query_params.get("hub.challenge", "0")))
         return Response({"detail": "Invalid verify token"}, status=status.HTTP_403_FORBIDDEN)
-    if settings.DEBUG:
-        resolve_instagram_event(request.data)
-    else:
-        from .tasks import process_instagram_webhook
-        process_instagram_webhook.delay(request.data)
+    from .tasks import process_instagram_webhook
+    process_instagram_webhook.delay(request.data)
     return Response({"status": "EVENT_RECEIVED"})
