@@ -50,6 +50,17 @@ class BusinessRulesTests(TestCase):
         self.assertFalse(reply.metadata["lead_ready"])
         self.assertFalse(Lead.objects.filter(customer=customer).exists())
 
+    def test_ai_lead_requires_customer_name(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-2", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="buyurtma")
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value={"reply": "Qabul qilindi", "detected_language": "uz", "customer_name": None, "phone": "+998901234567", "lead_ready": True, "lead_request": "Test lead", "arrangement_type": "bouquet", "estimated_price": 100000, "handoff": False}):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertFalse(reply.metadata["lead_ready"])
+        self.assertIn("ismingiz", reply.text.lower())
+        self.assertFalse(Lead.objects.filter(customer=customer).exists())
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
@@ -61,7 +72,7 @@ class BusinessRulesTests(TestCase):
 
 class ApiTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user("admin", password="password")
+        self.user = User.objects.create_user("admin", password="password", is_superuser=True, is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
@@ -74,3 +85,16 @@ class ApiTests(TestCase):
         response = APIClient().get("/api/instagram/webhook/?hub.verify_token=verify&hub.challenge=123")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), 123)
+
+    def test_customers_list_hides_incomplete_placeholders(self):
+        branch = Branch.objects.create(name="Test", code="CUST")
+        Customer.objects.create(branch=branch, instagram_user_id="placeholder")
+        Customer.objects.create(branch=branch, instagram_user_id="complete", name="Ahmad", phone="+998901234567")
+        response = self.client.get("/api/customers/")
+        self.assertEqual(response.status_code, 200)
+        ids = [row["instagram_user_id"] for row in response.json()["results"]]
+        self.assertIn("complete", ids)
+        self.assertNotIn("placeholder", ids)
+        response = self.client.get("/api/customers/?include_incomplete=true")
+        ids = [row["instagram_user_id"] for row in response.json()["results"]]
+        self.assertIn("placeholder", ids)

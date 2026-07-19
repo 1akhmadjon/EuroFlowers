@@ -261,6 +261,12 @@ class CustomerViewSet(ScopedViewSet):
     filterset_fields = ["branch", "language", "is_blocked"]
     search_fields = ["name", "phone", "instagram_username"]
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.query_params.get("include_incomplete") == "true":
+            return queryset
+        return queryset.exclude(Q(name="") | Q(phone=""))
+
 
 class LeadViewSet(ScopedViewSet):
     permission_page = "crm"

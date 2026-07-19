@@ -339,7 +339,10 @@ def create_ai_reply_for_conversation(conversation):
         changed.append("language")
     if changed:
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
-    if result.get("lead_ready") and not customer.phone:
+    if result.get("lead_ready") and not customer.name:
+        result["lead_ready"] = False
+        result["reply"] = "Buyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
+    elif result.get("lead_ready") and not customer.phone:
         result["lead_ready"] = False
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
