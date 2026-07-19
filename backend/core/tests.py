@@ -1,8 +1,8 @@
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Customer, Flower, FlowerVariant, Notification, StockBatch
-from .services import deduct_catalog_stock, mark_catalog_sold, normalize_phone
+from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Notification, StockBatch
+from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone
 
 
 class BusinessRulesTests(TestCase):
@@ -36,6 +36,18 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(normalize_phone("+998 ** *** ** 67"), "")
         self.assertEqual(normalize_phone("+99867"), "")
         self.assertEqual(normalize_phone("67"), "")
+
+    def test_ai_lead_requires_valid_customer_phone(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="buyurtma")
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value={"reply": "Qabul qilindi", "detected_language": "uz", "customer_name": "Ahmad", "phone": "+998 ** *** ** 67", "lead_ready": True, "lead_request": "Test lead", "arrangement_type": "bouquet", "estimated_price": 100000, "handoff": False}):
+            reply = create_ai_reply_for_conversation(conversation)
+        customer.refresh_from_db()
+        self.assertEqual(customer.phone, "")
+        self.assertFalse(reply.metadata["lead_ready"])
+        self.assertFalse(Lead.objects.filter(customer=customer).exists())
 
 
 class ApiTests(TestCase):

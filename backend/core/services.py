@@ -339,6 +339,10 @@ def create_ai_reply_for_conversation(conversation):
         changed.append("language")
     if changed:
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
+    if result.get("lead_ready") and not customer.phone:
+        result["lead_ready"] = False
+        result["phone"] = None
+        result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("lead_ready") and result.get("lead_request"):
         request_text = result["lead_request"]
