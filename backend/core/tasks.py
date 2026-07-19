@@ -2,6 +2,32 @@ from celery import shared_task
 from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event
 
 
+LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
+
+
+def split_location_reply(text):
+    if not all(link in text for link in LOCATION_LINKS):
+        return [text]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    first = []
+    second = []
+    current = first
+    trailing = []
+    for line in lines:
+        if line.lower().startswith("manzillar"):
+            continue
+        if line.startswith("2."):
+            current = second
+        if line.startswith("Qaysi "):
+            trailing.append(line)
+            continue
+        current.append(line)
+    messages = ["\n".join(part) for part in [first, second] if part]
+    if trailing and messages:
+        messages[-1] = messages[-1] + "\n\n" + "\n".join(trailing)
+    return messages if len(messages) > 1 else [text]
+
+
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
 def process_instagram_webhook(payload):
     jobs = resolve_instagram_event(payload)
@@ -24,7 +50,8 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
             print(f"INSTAGRAM_TYPING_OFF_FAILED recipient={recipient_id} error={exc}", flush=True)
         return None
     try:
-        instagram_send(recipient_id, reply.text)
+        for text in split_location_reply(reply.text):
+            instagram_send(recipient_id, text)
     finally:
         try:
             instagram_sender_action(recipient_id, "typing_off")

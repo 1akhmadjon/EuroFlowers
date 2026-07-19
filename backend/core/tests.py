@@ -3,6 +3,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Notification, StockBatch
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone
+from .tasks import split_location_reply
 
 
 class BusinessRulesTests(TestCase):
@@ -48,6 +49,14 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(customer.phone, "")
         self.assertFalse(reply.metadata["lead_ready"])
         self.assertFalse(Lead.objects.filter(customer=customer).exists())
+
+    def test_location_reply_splits_into_two_messages(self):
+        text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
+        messages = split_location_reply(text)
+        self.assertEqual(len(messages), 2)
+        self.assertIn("CTVJzD4O", messages[0])
+        self.assertIn("CTVJfPoq", messages[1])
+        self.assertIn("Qaysi manzilga", messages[1])
 
 
 class ApiTests(TestCase):
