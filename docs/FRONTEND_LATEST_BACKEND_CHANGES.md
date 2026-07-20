@@ -10,6 +10,101 @@ API base:
 https://euroflowers.api.cognilabs.org/api
 ```
 
+WebSocket:
+
+```text
+wss://euroflowers.api.cognilabs.org/ws/notifications/?token=ACCESS_TOKEN
+```
+
+## Realtime CRM/chat eventlari
+
+Shu notification WS kanali endi notificationdan tashqari CRM va chat eventlarini ham yuboradi.
+
+Frontend bitta websocket ulanishni ochib, `type` bo‘yicha listlarni yangilashi kerak.
+
+### `conversation.created`
+
+Yangi Instagram/Telegram chat ochilganda keladi.
+
+```json
+{
+  "type": "conversation.created",
+  "conversation": {}
+}
+```
+
+Frontend:
+
+- inbox/chat listni refetch qilish;
+- yoki `conversation`ni list boshiga qo‘shish.
+
+### `message.created`
+
+Chatga mijoz, AI yoki operator xabari qo‘shilganda keladi.
+
+```json
+{
+  "type": "message.created",
+  "conversation_id": 12,
+  "message": {}
+}
+```
+
+Frontend:
+
+- shu `conversation_id` detail ochiq bo‘lsa message’ni qo‘shish;
+- chat listda last message/time’ni yangilash;
+- kerak bo‘lsa inbox listni refetch qilish.
+
+### `lead.created`
+
+CRMga yangi lead tushganda keladi.
+
+```json
+{
+  "type": "lead.created",
+  "lead": {}
+}
+```
+
+Frontend:
+
+- CRM kanban/listni refetch qilish;
+- dashboard counterlarini refetch qilish.
+
+### `lead.updated`
+
+Lead statusi yoki ma’lumotlari o‘zgarganda keladi.
+
+```json
+{
+  "type": "lead.updated",
+  "lead": {}
+}
+```
+
+Frontend:
+
+- lead kartani yangilash;
+- status `won/lost/...` bo‘lsa dashboardni refetch qilish.
+
+### `notification.created`
+
+Oldingi notification event saqlanib qolgan.
+
+```json
+{
+  "type": "notification.created",
+  "notification": {}
+}
+```
+
+Eventlar user permission va filialga qarab yuboriladi:
+
+- `conversation.created` / `message.created` -> `conversations` view permission;
+- `lead.created` / `lead.updated` -> `crm` view permission;
+- `notification.created` -> `notifications` view permission.
+
 ## 1. AI javob qoidalari
 
 AI prompt backend tomonda kuchaytirildi:

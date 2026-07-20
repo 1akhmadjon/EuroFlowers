@@ -1,32 +1,50 @@
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
-from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from .models import Notification
-from .permissions import has_page_permission
-from .serializers import NotificationSerializer
+from .models import Conversation, Lead, Message, Notification
+from .realtime import broadcast_to_page
+from .serializers import ConversationSerializer, LeadSerializer, MessageSerializer, NotificationSerializer
 
 
 @receiver(post_save, sender=Notification)
 def broadcast_notification(sender, instance, created, **kwargs):
     if not created:
         return
-    channel_layer = get_channel_layer()
-    if not channel_layer:
-        return
     payload = {
         "type": "notification.created",
         "notification": NotificationSerializer(instance).data,
     }
-    users = User.objects.filter(is_active=True).select_related("profile").prefetch_related("profile__branches", "page_permissions")
-    for user in users:
-        if not has_page_permission(user, "notifications", False):
-            continue
-        profile = getattr(user, "profile", None)
-        if not user.is_superuser and profile and profile.branches.exists() and instance.branch_id not in profile.branches.values_list("id", flat=True):
-            continue
-        try:
-            async_to_sync(channel_layer.group_send)(f"notifications_user_{user.id}", {"type": "notification", "payload": payload})
-        except Exception as exc:
-            print(f"NOTIFICATION_WS_BROADCAST_FAILED user={user.id} notification={instance.id} error={exc}", flush=True)
+    transaction.on_commit(lambda: broadcast_to_page("notifications", payload, instance.branch_id))
+
+
+@receiver(post_save, sender=Conversation)
+def broadcast_conversation(sender, instance, created, **kwargs):
+    if not created:
+        return
+    payload = {
+        "type": "conversation.created",
+        "conversation": ConversationSerializer(instance).data,
+    }
+    transaction.on_commit(lambda: broadcast_to_page("conversations", payload, instance.branch_id))
+
+
+@receiver(post_save, sender=Message)
+def broadcast_message(sender, instance, created, **kwargs):
+    if not created:
+        return
+    payload = {
+        "type": "message.created",
+        "conversation_id": instance.conversation_id,
+        "message": MessageSerializer(instance).data,
+    }
+    branch_id = instance.conversation.branch_id
+    transaction.on_commit(lambda: broadcast_to_page("conversations", payload, branch_id))
+
+
+@receiver(post_save, sender=Lead)
+def broadcast_lead(sender, instance, created, **kwargs):
+    payload = {
+        "type": "lead.created" if created else "lead.updated",
+        "lead": LeadSerializer(instance).data,
+    }
+    transaction.on_commit(lambda: broadcast_to_page("crm", payload, instance.branch_id))
