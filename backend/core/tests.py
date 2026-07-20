@@ -1,7 +1,8 @@
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Message, Notification, SocialPost, StockBatch
+from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Message, Notification, PagePermission, SocialPost, StockBatch, UserProfile
+from .serializers import permission_matrix
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, resolve_telegram_update
 from .tasks import split_location_reply
 
@@ -117,3 +118,36 @@ class ApiTests(TestCase):
         response = self.client.get("/api/customers/?include_incomplete=true")
         ids = [row["instagram_user_id"] for row in response.json()["results"]]
         self.assertIn("placeholder", ids)
+
+    def test_admin_permission_matrix_uses_saved_rows(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
+        PagePermission.objects.create(user=self.user, page="catalog", can_view=False, can_control=False)
+        response = self.client.get(f"/api/users/{self.user.id}/")
+        self.assertEqual(response.status_code, 200)
+        permissions = {row["page"]: row for row in response.json()["permissions"]}
+        self.assertEqual(permissions["catalog"]["can_view"], False)
+        self.assertEqual(permissions["catalog"]["can_control"], False)
+        developer = User.objects.create_user("developer", password="password")
+        UserProfile.objects.create(user=developer, role="developer")
+        developer_permissions = {row["page"]: row for row in permission_matrix(developer)}
+        self.assertTrue(developer_permissions["catalog"]["can_view"])
+        self.assertTrue(developer_permissions["catalog"]["can_control"])
+
+    def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
+        users = [self.user]
+        for index in range(3):
+            user = User.objects.create_user(f"operator-{index}", password="password")
+            UserProfile.objects.create(user=user, role="operator")
+            users.append(user)
+        for user in users:
+            for page, _ in PagePermission.PAGE_CHOICES:
+                PagePermission.objects.get_or_create(user=user, page=page, defaults={"can_view": True, "can_control": True})
+        response = self.client.get("/api/permissions/?page=2")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("results", response.json())
+        response = self.client.get("/api/permissions/?permission_page=users")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(row["page"] == "users" for row in response.json()["results"]))

@@ -39,8 +39,9 @@ def permission_matrix(user) -> list[dict[str, Any]]:
     for page, label in PagePermission.PAGE_CHOICES:
         row = rows.get(page)
         role = getattr(getattr(user, "profile", None), "role", None)
-        can_view = True if user.is_superuser or role == "developer" else bool(row and row.can_view)
-        can_control = True if user.is_superuser or role == "developer" else bool(row and row.can_control)
+        default_access = bool(user.is_superuser and not row)
+        can_view = True if role == "developer" else bool(row.can_view if row else default_access)
+        can_control = True if role == "developer" else bool(row.can_control if row else default_access)
         data.append({"page": page, "label": label, "can_view": can_view, "can_control": can_control})
     return data
 

@@ -54,6 +54,14 @@ class AuditLogFilter(CreatedAtRangeFilter):
         fields = ["action", "entity_type", "user", "created_at"]
 
 
+class PagePermissionFilter(django_filters.FilterSet):
+    permission_page = django_filters.ChoiceFilter(field_name="page", choices=PagePermission.PAGE_CHOICES)
+
+    class Meta:
+        model = PagePermission
+        fields = ["user", "permission_page", "can_view", "can_control"]
+
+
 class EuroFlowersTokenObtainPairView(TokenObtainPairView):
     serializer_class = EuroFlowersTokenObtainPairSerializer
 
@@ -392,7 +400,7 @@ class PagePermissionViewSet(viewsets.ModelViewSet):
     permission_page = "users"
     queryset = PagePermission.objects.select_related("user").all()
     serializer_class = PagePermissionSerializer
-    filterset_fields = ["user", "page", "can_view", "can_control"]
+    filterset_class = PagePermissionFilter
 
 
 class InstagramWebhookEventViewSet(viewsets.ReadOnlyModelViewSet):
