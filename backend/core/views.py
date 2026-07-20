@@ -691,3 +691,12 @@ def instagram_webhook(request):
     from .tasks import process_instagram_webhook
     process_instagram_webhook.delay(request.data)
     return Response({"status": "EVENT_RECEIVED"})
+
+
+@extend_schema(request=inline_serializer(name="TelegramWebhookPayload", fields={}), responses={200: OpenApiResponse(description="Telegram event received")})
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def telegram_webhook(request):
+    from .tasks import process_telegram_webhook
+    process_telegram_webhook.delay(request.data)
+    return Response({"status": "EVENT_RECEIVED"})

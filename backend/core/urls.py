@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
-from .views import AuditLogViewSet, BranchViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, LeadViewSet, NotificationViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, UserViewSet, ai_settings, business_settings, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_quote, upload_file
+from .views import AuditLogViewSet, BranchViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, LeadViewSet, NotificationViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, UserViewSet, ai_settings, business_settings, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_quote, telegram_webhook, upload_file
 
 router = DefaultRouter()
 router.register("branches", BranchViewSet)
@@ -32,6 +32,7 @@ urlpatterns = [
     path("integrations/", integrations_settings),
     path("instagram/status/", instagram_status),
     path("instagram/webhook/", instagram_webhook),
+    path("telegram/webhook/", telegram_webhook),
     path("mini-app/catalog/", mini_app_catalog),
     path("mini-app/quote/", mini_app_quote),
     path("mini-app/leads/", mini_app_lead),

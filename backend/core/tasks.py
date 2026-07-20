@@ -1,5 +1,5 @@
 from celery import shared_task
-from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event
+from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_send, telegram_sender_action
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
@@ -57,4 +57,26 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
             instagram_sender_action(recipient_id, "typing_off")
         except Exception as exc:
             print(f"INSTAGRAM_TYPING_OFF_FAILED recipient={recipient_id} error={exc}", flush=True)
+    return reply.id
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
+def process_telegram_webhook(payload):
+    jobs = resolve_telegram_update(payload)
+    for job in jobs:
+        process_delayed_telegram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["chat_id"]], countdown=5)
+    return jobs
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
+def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id):
+    try:
+        telegram_sender_action(chat_id, "typing")
+    except Exception as exc:
+        print(f"TELEGRAM_TYPING_FAILED chat={chat_id} error={exc}", flush=True)
+    reply = process_pending_customer_reply(conversation_id, expected_message_id)
+    if not reply:
+        return None
+    for text in split_location_reply(reply.text):
+        telegram_send(chat_id, text)
     return reply.id

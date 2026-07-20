@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, AuditLog, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, SocialPost, StockBatch, StockMovement
 
 
 def normalize_instagram_permalink(value):
@@ -228,6 +228,28 @@ def instagram_sender_action(recipient_id, action):
     response = requests.post(url, params={"access_token": access_token}, json={"recipient": {"id": recipient_id}, "sender_action": action}, timeout=20)
     response.raise_for_status()
     return response.json()
+
+
+def telegram_bot_token():
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    return integration.telegram_bot_token
+
+
+def telegram_api(method, payload):
+    token = telegram_bot_token()
+    if not token:
+        return {"mocked": True}
+    response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=20)
+    response.raise_for_status()
+    return response.json()
+
+
+def telegram_send(chat_id, text):
+    return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+
+
+def telegram_sender_action(chat_id, action="typing"):
+    return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
 def ai_reply(conversation):
@@ -567,3 +589,34 @@ def resolve_instagram_event(payload):
             if saved_message:
                 results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
     return results
+
+
+def resolve_telegram_update(payload):
+    message = payload.get("message") or payload.get("edited_message") or {}
+    text = (message.get("text") or "").strip()
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
+    chat_id = chat.get("id")
+    user_id = user.get("id")
+    if not chat_id or not user_id or not text:
+        return []
+    branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None) or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
+    if not branch:
+        return []
+    external_id = f"telegram:{user_id}"
+    defaults = {"branch": branch, "language": "uz"}
+    full_name = " ".join(part for part in [user.get("first_name", ""), user.get("last_name", "")] if part).strip()
+    if full_name:
+        defaults["name"] = full_name[:160]
+    customer, created = Customer.objects.get_or_create(instagram_user_id=external_id, defaults=defaults)
+    if not created and full_name and not customer.name:
+        customer.name = full_name[:160]
+        customer.save(update_fields=["name", "updated_at"])
+    conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
+    if not conversation:
+        conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch)
+    message_id = message.get("message_id", "")
+    saved_message = ingest_customer_message(conversation, text, f"telegram:{chat_id}:{message_id}")
+    if not saved_message:
+        return []
+    return [{"conversation_id": conversation.id, "message_id": saved_message.id, "chat_id": chat_id}]
