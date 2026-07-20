@@ -3,7 +3,7 @@ from typing import Any
 from urllib.parse import urlparse
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -167,6 +167,16 @@ class PackagingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Packaging
         fields = "__all__"
+
+
+class PackagingMovementSerializer(serializers.ModelSerializer):
+    packaging_detail = PackagingSerializer(source="packaging", read_only=True)
+    performed_by_detail = UserSerializer(source="performed_by", read_only=True)
+
+    class Meta:
+        model = PackagingMovement
+        fields = "__all__"
+        read_only_fields = ["performed_by"]
 
 
 class SocialPostSerializer(serializers.ModelSerializer):
@@ -413,6 +423,20 @@ class MovementRequestSerializer(serializers.Serializer):
     quantity_stems = serializers.IntegerField(min_value=1)
     quantity_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
     reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class PackagingMovementRequestSerializer(serializers.Serializer):
+    movement_type = serializers.ChoiceField(choices=PackagingMovement.TYPE_CHOICES)
+    quantity = serializers.IntegerField()
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if attrs["movement_type"] == "adjustment":
+            if attrs["quantity"] == 0:
+                raise serializers.ValidationError({"quantity": "0 bo‘lmasligi kerak"})
+        elif attrs["quantity"] < 1:
+            raise serializers.ValidationError({"quantity": "Musbat son kiriting"})
+        return attrs
 
 
 class MiniAppInitSerializer(serializers.Serializer):

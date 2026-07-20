@@ -20,10 +20,10 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Notification, Packaging, PagePermission, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .services import apply_stock_movement, deduct_catalog_stock, instagram_send, mark_catalog_sold, process_customer_message, resolve_instagram_event
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -40,6 +40,12 @@ class StockMovementFilter(CreatedAtRangeFilter):
     class Meta:
         model = StockMovement
         fields = ["batch", "movement_type", "created_at"]
+
+
+class PackagingMovementFilter(CreatedAtRangeFilter):
+    class Meta:
+        model = PackagingMovement
+        fields = ["packaging", "movement_type", "created_at"]
 
 
 class ConversationFilter(CreatedAtRangeFilter):
@@ -228,6 +234,47 @@ class PackagingViewSet(ScopedViewSet):
     serializer_class = PackagingSerializer
     filterset_fields = ["branch", "packaging_type", "is_active"]
     search_fields = ["name_uz", "name_ru"]
+
+    def perform_create(self, serializer):
+        packaging = serializer.save()
+        if packaging.quantity:
+            movement = PackagingMovement.objects.create(packaging=packaging, movement_type="in", quantity=packaging.quantity, reason="Qadoq/savat kirimi", performed_by=self.request.user)
+            AuditLog.objects.create(user=self.request.user, action="packaging_received", entity_type="Packaging", entity_id=str(packaging.id), after={"quantity": packaging.quantity, "movement": movement.id})
+
+    def perform_update(self, serializer):
+        before = serializer.instance.quantity
+        packaging = serializer.save()
+        if "quantity" in serializer.validated_data and packaging.quantity != before:
+            delta = packaging.quantity - before
+            movement = PackagingMovement.objects.create(packaging=packaging, movement_type="adjustment", quantity=delta, reason="Qadoq/savat qoldig‘i tahrirlandi", performed_by=self.request.user)
+            AuditLog.objects.create(user=self.request.user, action="packaging_adjusted", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"quantity": packaging.quantity, "movement": movement.id})
+
+    @extend_schema(request=PackagingMovementRequestSerializer, responses=PackagingMovementSerializer)
+    @action(detail=True, methods=["post"])
+    def movement(self, request, pk=None):
+        packaging = self.get_object()
+        serializer = PackagingMovementRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            movement = apply_packaging_movement(packaging, serializer.validated_data["movement_type"], serializer.validated_data["quantity"], serializer.validated_data.get("reason", ""), request.user)
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PackagingMovementSerializer(movement).data)
+
+
+class PackagingMovementViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [RolePermission]
+    permission_page = "inventory"
+    queryset = PackagingMovement.objects.select_related("packaging__branch", "performed_by").all()
+    serializer_class = PackagingMovementSerializer
+    filterset_class = PackagingMovementFilter
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        profile = getattr(self.request.user, "profile", None)
+        if self.request.user.is_superuser or not profile:
+            return queryset
+        return queryset.filter(packaging__branch__in=profile.branches.all())
 
 
 class CatalogItemViewSet(ScopedViewSet):
@@ -567,10 +614,12 @@ def upload_file(request):
     return Response({"url": url, "path": path}, status=status.HTTP_201_CREATED)
 
 
-def mini_app_user(init_data):
+def mini_app_identity(init_data, require_user=False):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     bot_token = integration.telegram_bot_token
     values = dict(parse_qsl(init_data or "", keep_blank_values=True))
+    if bot_token and init_data and not values.get("hash"):
+        raise ValueError("Mini app init data noto‘g‘ri")
     if bot_token and values.get("hash"):
         received_hash = values.pop("hash")
         data_check = "\n".join(f"{key}={values[key]}" for key in sorted(values))
@@ -578,13 +627,44 @@ def mini_app_user(init_data):
         expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(received_hash, expected):
             raise ValueError("Mini app init data noto‘g‘ri")
+    user_payload = {}
     user_id = values.get("user", "")
     if user_id:
         try:
-            user_id = str(json.loads(user_id).get("id", user_id))
+            user_payload = json.loads(user_id)
+            user_id = str(user_payload.get("id", user_id))
         except (TypeError, ValueError):
             pass
-    return user_id[:100] or "guest"
+    if require_user and not user_id:
+        raise ValueError("Telegram init data kerak")
+    return {"user_id": (user_id[:100] or "guest"), "user": user_payload, "auth_date": values.get("auth_date", ""), "query_id": values.get("query_id", "")}
+
+
+def mini_app_user(init_data):
+    return mini_app_identity(init_data, require_user=True)["user_id"]
+
+
+def mini_app_customer(identity):
+    return Customer.objects.filter(instagram_user_id=f"miniapp:{identity['user_id']}").first()
+
+
+def mini_app_order_rows(customer):
+    if not customer:
+        return []
+    rows = Lead.objects.filter(customer=customer).select_related("branch").order_by("-created_at")[:30]
+    return [{
+        "id": row.id,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "status": row.status,
+        "status_label": row.get_status_display(),
+        "source": row.source,
+        "branch": BranchSerializer(row.branch).data,
+        "arrangement_type": row.arrangement_type,
+        "request": row.request_uz or row.request_ru,
+        "estimated_price": row.estimated_price,
+        "details": row.details or {},
+    } for row in rows]
 
 
 def mini_app_branch(branch_id=None):
@@ -608,7 +688,7 @@ def mini_app_quote_payload(data):
             quantity = item.get("quantity") or 1
             line_total = catalog.price * quantity
             total += line_total
-            lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "name_ru": catalog.name_ru, "quantity": quantity, "total": str(line_total)})
+            lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "name_ru": catalog.name_ru, "quantity": quantity, "unit_price": str(catalog.price), "total": str(line_total)})
             continue
         batch = StockBatch.objects.select_related("variant__flower").filter(id=item.get("stock_batch"), branch=branch, is_active=True).first()
         if not batch:
@@ -632,19 +712,52 @@ def mini_app_quote_payload(data):
     return {"branch": branch, "lines": lines, "packaging": PackagingSerializer(packaging).data if packaging else None, "florist_fee": str(business.default_florist_fee if data["arrangement_type"] in ["bouquet", "basket"] else Decimal("0")), "estimated_price": str(total), "price_is_estimate": True}
 
 
-@extend_schema(parameters=[MiniAppInitSerializer], responses=inline_serializer(name="MiniAppCatalog", fields={"catalog": CatalogItemSerializer(many=True), "stock": StockBatchSerializer(many=True), "packaging": PackagingSerializer(many=True)}))
+def mini_app_request_text(arrangement_type, quote, note=""):
+    labels = {"bouquet": "Buket", "basket": "Savat", "stems": "Donalab gul", "catalog": "Tayyor katalog"}
+    lines = [f"Mini app buyurtma: {labels.get(arrangement_type, arrangement_type)}"]
+    for row in quote["lines"]:
+        if row["type"] == "catalog":
+            lines.append(f"- {row['name_uz']}: {row['quantity']} ta, {row['total']} so‘m")
+        else:
+            name = f"{row['flower_uz']} {row['variant_uz']} {row['color_uz']}".strip()
+            lines.append(f"- {name}: {row['quantity_stems']} dona, {row['total']} so‘m")
+    if quote.get("packaging"):
+        packaging = quote["packaging"]
+        lines.append(f"- Savat/qadoq: {packaging['name_uz']} ({packaging.get('size', '')}), {packaging['sale_price']} so‘m")
+    if Decimal(str(quote["florist_fee"])) > 0:
+        lines.append(f"- Florist xizmati: {quote['florist_fee']} so‘m")
+    lines.append(f"Jami taxminan: {quote['estimated_price']} so‘m")
+    if note:
+        lines.append(f"Izoh: {note}")
+    return "\n".join(lines)
+
+
+@extend_schema(parameters=[MiniAppInitSerializer], responses=inline_serializer(name="MiniAppCustomer", fields={"customer": CustomerSerializer(allow_null=True), "orders": serializers.ListField(child=serializers.DictField())}))
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def mini_app_me(request):
+    try:
+        identity = mini_app_identity(request.query_params.get("init_data", ""), require_user=True)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    customer = mini_app_customer(identity)
+    return Response({"customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
+
+
+@extend_schema(parameters=[MiniAppInitSerializer], responses=inline_serializer(name="MiniAppCatalog", fields={"catalog": CatalogItemSerializer(many=True), "stock": StockBatchSerializer(many=True), "packaging": PackagingSerializer(many=True), "customer": CustomerSerializer(allow_null=True), "orders": serializers.ListField(child=serializers.DictField())}))
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def mini_app_catalog(request):
     try:
-        mini_app_user(request.query_params.get("init_data", ""))
+        identity = mini_app_identity(request.query_params.get("init_data", ""))
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
     branch = mini_app_branch(request.query_params.get("branch"))
     catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("branch", "social_post")[:50]
     stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("branch", "variant__flower")[:100]
     packaging = Packaging.objects.filter(branch=branch, is_active=True)[:50]
-    return Response({"catalog": CatalogItemSerializer(catalog, many=True).data, "stock": StockBatchSerializer(stock, many=True).data, "packaging": PackagingSerializer(packaging, many=True).data})
+    customer = mini_app_customer(identity)
+    return Response({"catalog": CatalogItemSerializer(catalog, many=True).data, "stock": StockBatchSerializer(stock, many=True).data, "packaging": PackagingSerializer(packaging, many=True).data, "customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
 
 
 @extend_schema(request=MiniAppQuoteSerializer, responses=inline_serializer(name="MiniAppQuoteResponse", fields={"lines": serializers.ListField(child=serializers.DictField()), "packaging": serializers.DictField(allow_null=True), "florist_fee": serializers.CharField(), "estimated_price": serializers.CharField(), "price_is_estimate": serializers.BooleanField()}))
@@ -673,9 +786,11 @@ def mini_app_lead(request):
         quote = mini_app_quote_payload(serializer.validated_data)
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-    customer, _ = Customer.objects.update_or_create(instagram_user_id=f"miniapp:{mini_user}", defaults={"name": serializer.validated_data["name"], "phone": serializer.validated_data["phone"], "branch": quote["branch"], "language": "uz"})
-    request_text = serializer.validated_data.get("note") or f"Mini app buyurtma: {serializer.validated_data['arrangement_type']}. Taxminiy narx {quote['estimated_price']} so‘m."
-    lead = Lead.objects.create(customer=customer, branch=quote["branch"], status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app")
+    phone = normalize_phone(serializer.validated_data["phone"]) or serializer.validated_data["phone"]
+    customer, _ = Customer.objects.update_or_create(instagram_user_id=f"miniapp:{mini_user}", defaults={"name": serializer.validated_data["name"], "phone": phone, "branch": quote["branch"], "language": "uz"})
+    request_text = mini_app_request_text(serializer.validated_data["arrangement_type"], quote, serializer.validated_data.get("note", ""))
+    details = {"lines": quote["lines"], "packaging": quote["packaging"], "florist_fee": quote["florist_fee"], "estimated_price": quote["estimated_price"], "price_is_estimate": quote["price_is_estimate"], "note": serializer.validated_data.get("note", "")}
+    lead = Lead.objects.create(customer=customer, branch=quote["branch"], status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app", details=details)
     Notification.objects.create(branch=quote["branch"], notification_type="lead", title_uz=f"Mini app lead: {customer}", title_ru=f"Mini app лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     return Response(LeadSerializer(lead).data, status=status.HTTP_201_CREATED)
 

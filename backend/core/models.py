@@ -167,6 +167,27 @@ class Packaging(TimeStampedModel):
     is_active = models.BooleanField(default=True)
 
 
+class PackagingMovement(TimeStampedModel):
+    TYPE_CHOICES = [
+        ("in", "Kirim"),
+        ("out", "Chiqim"),
+        ("adjustment", "Tuzatish"),
+        ("waste", "Hisobdan chiqarish"),
+        ("transfer_out", "Filialdan chiqim"),
+        ("transfer_in", "Filialga kirim"),
+    ]
+    packaging = models.ForeignKey(Packaging, on_delete=models.PROTECT, related_name="movements")
+    movement_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    quantity = models.IntegerField()
+    reference_type = models.CharField(max_length=40, blank=True)
+    reference_id = models.PositiveBigIntegerField(null=True, blank=True)
+    reason = models.CharField(max_length=255, blank=True)
+    performed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="packaging_movements")
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
 class Customer(TimeStampedModel):
     name = models.CharField(max_length=160, blank=True)
     phone = models.CharField(max_length=30, blank=True, db_index=True)
@@ -282,6 +303,7 @@ class Lead(TimeStampedModel):
     desired_date = models.DateField(null=True, blank=True)
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     source = models.CharField(max_length=30, default="instagram")
+    details = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ["-created_at"]

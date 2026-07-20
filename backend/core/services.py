@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
 
 
 def normalize_instagram_permalink(value):
@@ -203,6 +203,26 @@ def apply_stock_movement(batch, movement_type, quantity_stems, reason, user):
                 reference_type="stock_batch",
                 reference_id=batch.id,
             )
+    return movement
+
+
+def apply_packaging_movement(packaging, movement_type, quantity, reason, user):
+    with transaction.atomic():
+        packaging = Packaging.objects.select_for_update().get(pk=packaging.pk)
+        delta = quantity if movement_type == "adjustment" else abs(quantity) if movement_type in ["in", "transfer_in"] else -abs(quantity)
+        if packaging.quantity + delta < 0:
+            raise ValueError("Skladda yetarli qadoqlash/savat yo‘q")
+        before = packaging.quantity
+        packaging.quantity += delta
+        packaging.save(update_fields=["quantity", "updated_at"])
+        movement = PackagingMovement.objects.create(
+            packaging=packaging,
+            movement_type=movement_type,
+            quantity=delta,
+            reason=reason,
+            performed_by=user,
+        )
+        AuditLog.objects.create(user=user, action="packaging_movement", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"quantity": packaging.quantity, "movement": movement.id})
     return movement
 
 

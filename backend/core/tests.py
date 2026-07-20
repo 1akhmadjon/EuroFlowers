@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Message, Notification, PagePermission, SocialPost, StockBatch, UserProfile
+from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, UserProfile
 from .serializers import permission_matrix
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, resolve_telegram_update
 from .tasks import split_location_reply
@@ -151,3 +151,49 @@ class ApiTests(TestCase):
         response = self.client.get("/api/permissions/?permission_page=users")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(row["page"] == "users" for row in response.json()["results"]))
+
+    def test_packaging_movement_updates_quantity(self):
+        branch = Branch.objects.create(name="Packaging", code="PKG")
+        response = self.client.post("/api/packaging/", {"branch": branch.id, "packaging_type": "basket", "name_uz": "API savat", "name_ru": "API корзина", "quantity": 4, "sale_price": "90000.00"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        api_packaging = Packaging.objects.get(id=response.json()["id"])
+        self.assertTrue(PackagingMovement.objects.filter(packaging=api_packaging, movement_type="in", quantity=4).exists())
+        response = self.client.patch(f"/api/packaging/{api_packaging.id}/", {"quantity": 6}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(PackagingMovement.objects.filter(packaging=api_packaging, movement_type="adjustment", quantity=2).exists())
+        packaging = Packaging.objects.create(branch=branch, packaging_type="basket", name_uz="Test savat", name_ru="Тест корзина", quantity=10, sale_price=100000)
+        response = self.client.post(f"/api/packaging/{packaging.id}/movement/", {"movement_type": "out", "quantity": 3, "reason": "test"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        packaging.refresh_from_db()
+        self.assertEqual(packaging.quantity, 7)
+        self.assertTrue(PackagingMovement.objects.filter(packaging=packaging, quantity=-3).exists())
+        response = self.client.post(f"/api/packaging/{packaging.id}/movement/", {"movement_type": "adjustment", "quantity": -2, "reason": "count"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        packaging.refresh_from_db()
+        self.assertEqual(packaging.quantity, 5)
+        response = self.client.post(f"/api/packaging/{packaging.id}/movement/", {"movement_type": "out", "quantity": 99}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_mini_app_lead_history_returns_customer_orders(self):
+        branch = Branch.objects.create(name="Mini", code="MINI")
+        flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="hydrangea")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Blue", name_ru="Blue", color_uz="Moviy", color_ru="Синий")
+        batch = StockBatch.objects.create(branch=branch, variant=variant, batch_number="M-1", height_cm=50, stems_per_bunch=5, received_stems=50, remaining_stems=50, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=100000, minimum_sale_stems=1)
+        packaging = Packaging.objects.create(branch=branch, packaging_type="basket", name_uz="Mini savat", name_ru="Мини корзина", size="S", capacity_min_stems=1, capacity_max_stems=10, quantity=5, sale_price=120000)
+        init_data = 'user={"id":777,"first_name":"Ali"}'
+        payload = {"init_data": init_data, "branch": branch.id, "arrangement_type": "basket", "items": [{"stock_batch": batch.id, "quantity_stems": 3}], "packaging": packaging.id, "name": "Ali", "phone": "901234567", "note": "Bugun kerak"}
+        response = APIClient().post("/api/mini-app/leads/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        lead = Lead.objects.get(source="mini_app")
+        self.assertEqual(lead.customer.instagram_user_id, "miniapp:777")
+        self.assertEqual(lead.customer.phone, "+998901234567")
+        self.assertEqual(lead.details["lines"][0]["quantity_stems"], 3)
+        response = APIClient().get("/api/mini-app/me/", {"init_data": init_data})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["customer"]["name"], "Ali")
+        self.assertEqual(len(data["orders"]), 1)
+        self.assertEqual(data["orders"][0]["details"]["lines"][0]["flower_uz"], "Gortenziya")
+        response = APIClient().get("/api/mini-app/catalog/", {"init_data": init_data, "branch": branch.id})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["orders"]), 1)
