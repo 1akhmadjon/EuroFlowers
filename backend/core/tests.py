@@ -31,6 +31,19 @@ class BusinessRulesTests(TestCase):
         with self.assertRaises(ValueError):
             deduct_catalog_stock(self.item, self.user)
 
+    def test_catalog_partial_sales_deduct_composition_per_quantity(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil set", name_ru="Красный сет", arrangement_type="bouquet", price=900000, quantity_total=10, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=3)
+        mark_catalog_sold(item, self.user, quantity=3)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 3)
+        deduct_catalog_stock(item, self.user)
+        self.batch.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 91)
+        self.assertEqual(item.quantity_stock_deducted, 3)
+        self.assertEqual(item.status, "available")
+
     def test_phone_normalization(self):
         self.assertEqual(normalize_phone("90 123-45-67"), "+998901234567")
         self.assertEqual(normalize_phone("+998 90 123 45 67"), "+998901234567")
@@ -95,6 +108,10 @@ class ApiTests(TestCase):
         self.user = User.objects.create_user("admin", password="password", is_superuser=True, is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(self.user)
+        self.branch = Branch.objects.create(name="API Test", code="API")
+        flower = Flower.objects.create(name_uz="Atirgul API", name_ru="Роза API", slug="rose-api")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", name_ru="Freedom", color_uz="Qizil", color_ru="Красный")
+        self.batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="API-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=400000)
 
     def test_dashboard_requires_authentication(self):
         response = APIClient().get("/api/dashboard/")
@@ -197,3 +214,46 @@ class ApiTests(TestCase):
         response = APIClient().get("/api/mini-app/catalog/", {"init_data": init_data, "branch": branch.id})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["orders"]), 1)
+
+    def test_catalog_create_rejects_short_stock_for_total_quantity(self):
+        payload = {
+            "branch": self.branch.id,
+            "name_uz": "Kop buket",
+            "name_ru": "Много букетов",
+            "arrangement_type": "bouquet",
+            "price": "100000.00",
+            "status": "available",
+            "quantity_total": 40,
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 3}],
+        }
+        response = self.client.post("/api/catalog/", payload, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
+        packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", name_ru="Lead basket", quantity=2, sale_price=50000)
+        payload = {
+            "branch": self.branch.id,
+            "status": "new",
+            "request_uz": "Manual lead",
+            "arrangement_type": "basket",
+            "estimated_price": "250000.00",
+            "florist_fee": "50000.00",
+            "customer_name": "Vali",
+            "customer_phone": "901112233",
+            "stock_usage_input": [{"stock_batch": self.batch.id, "quantity_stems": 4}],
+            "packaging_usage_input": [{"packaging": packaging.id, "quantity": 1}],
+        }
+        response = self.client.post("/api/leads/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        lead_id = response.json()["id"]
+        self.batch.refresh_from_db()
+        packaging.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(packaging.quantity, 2)
+        response = self.client.patch(f"/api/leads/{lead_id}/", {"status": "won"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        packaging.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 96)
+        self.assertEqual(packaging.quantity, 1)
+        self.assertEqual(Customer.objects.get(phone="+998901112233").leads.count(), 1)

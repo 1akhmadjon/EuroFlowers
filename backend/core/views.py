@@ -1,11 +1,13 @@
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.db.models import Count, F, Q, Sum
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce
+from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 import hashlib
 import hmac
@@ -23,7 +25,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
+from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -296,13 +298,18 @@ class CatalogItemViewSet(ScopedViewSet):
     @extend_schema(request=None, responses=CatalogItemSerializer)
     @action(detail=True, methods=["post"])
     def sell(self, request, pk=None):
-        return Response(self.get_serializer(mark_catalog_sold(self.get_object(), request.user)).data)
+        try:
+            item = mark_catalog_sold(self.get_object(), request.user, request.data.get("quantity", 1))
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(item).data)
 
     @extend_schema(request=None, responses=CatalogItemSerializer)
     @action(detail=True, methods=["post"])
     def deduct_stock(self, request, pk=None):
         try:
-            item = deduct_catalog_stock(self.get_object(), request.user)
+            quantity = request.data.get("quantity")
+            item = deduct_catalog_stock(self.get_object(), request.user, quantity)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(item).data)
@@ -331,6 +338,25 @@ class LeadViewSet(ScopedViewSet):
     filterset_class = LeadFilter
     search_fields = ["customer__name", "customer__phone", "request_uz", "request_ru"]
     ordering_fields = ["created_at", "estimated_price"]
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            lead = serializer.save()
+            if lead.status == "won":
+                try:
+                    deduct_lead_stock(lead, self.request.user)
+                except ValueError as exc:
+                    raise serializers.ValidationError({"detail": str(exc)})
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            before_status = serializer.instance.status
+            lead = serializer.save()
+            if lead.status == "won" and before_status != "won":
+                try:
+                    deduct_lead_stock(lead, self.request.user)
+                except ValueError as exc:
+                    raise serializers.ValidationError({"detail": str(exc)})
 
 
 class SocialPostViewSet(ScopedViewSet):
@@ -485,6 +511,14 @@ def me(request):
         "orders_today": serializers.IntegerField(),
         "revenue_7d": serializers.DecimalField(max_digits=14, decimal_places=2),
         "conversion_rate": serializers.FloatField(),
+        "period": serializers.DictField(),
+        "period_revenue": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "period_orders": serializers.IntegerField(),
+        "period_leads": serializers.IntegerField(),
+        "period_customers": serializers.IntegerField(),
+        "period_conversations": serializers.IntegerField(),
+        "florist_revenue": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "flowers_sold_stems": serializers.IntegerField(),
     },
 ))
 @api_view(["GET"])
@@ -493,8 +527,11 @@ def dashboard(request):
         return forbidden()
     today = timezone.localdate()
     week_start = today - timedelta(days=6)
+    period_start, period_end = dashboard_period(request)
     stock = StockBatch.objects.filter(is_active=True)
+    stock_movements = StockMovement.objects.all()
     leads = Lead.objects.all()
+    customers = Customer.objects.all()
     catalog = CatalogItem.objects.all()
     notifications = Notification.objects.all()
     conversations = Conversation.objects.all()
@@ -502,11 +539,19 @@ def dashboard(request):
     if not request.user.is_superuser and profile:
         branches = profile.branches.all()
         stock = stock.filter(branch__in=branches)
+        stock_movements = stock_movements.filter(batch__branch__in=branches)
         leads = leads.filter(branch__in=branches)
+        customers = customers.filter(branch__in=branches)
         catalog = catalog.filter(branch__in=branches)
         notifications = notifications.filter(branch__in=branches)
         conversations = conversations.filter(branch__in=branches)
     won_leads = leads.filter(status="won")
+    period_leads = apply_created_range(leads, period_start, period_end)
+    period_customers = apply_created_range(customers, period_start, period_end)
+    period_conversations = apply_created_range(conversations, period_start, period_end)
+    period_won_leads = apply_updated_range(won_leads, period_start, period_end)
+    period_stock_out = apply_created_range(stock_movements.filter(movement_type="out", quantity_stems__lt=0), period_start, period_end)
+    flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
     leads_total = leads.count()
     conversations_total = conversations.count()
     conversion_base = conversations_total or leads_total
@@ -516,9 +561,17 @@ def dashboard(request):
         "orders_today": won_leads.filter(updated_at__date=today).count(),
         "revenue_today": won_leads.filter(updated_at__date=today).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
         "revenue_7d": won_leads.filter(updated_at__date__gte=week_start).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
+        "period": {"from": period_start, "to": period_end},
+        "period_orders": period_won_leads.count(),
+        "period_revenue": period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
+        "period_leads": period_leads.count(),
+        "period_customers": period_customers.count(),
+        "period_conversations": period_conversations.count(),
+        "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
+        "flowers_sold_stems": abs(int(flowers_sold)),
         "conversion_rate": round((won_leads.count() / conversion_base) * 100, 2) if conversion_base else 0,
         "available_catalog": catalog.filter(status="available").count(),
-        "pending_deductions": catalog.filter(status="sold", stock_deducted_at__isnull=True).count(),
+        "pending_deductions": catalog.filter(quantity_sold__gt=F("quantity_stock_deducted")).count(),
         "unread_notifications": notifications.filter(is_read=False).count(),
         "ai_conversations": conversations.filter(status="ai").count(),
         "operator_conversations": conversations.filter(status="operator").count(),
@@ -570,6 +623,42 @@ def instagram_status(request):
 
 def is_developer(user):
     return bool(user and user.is_authenticated and getattr(getattr(user, "profile", None), "role", None) == "developer")
+
+
+def dashboard_period(request):
+    start_value = request.query_params.get("from") or request.query_params.get("date_from")
+    end_value = request.query_params.get("to") or request.query_params.get("date_to")
+    start = parse_datetime(start_value) if start_value else None
+    end = parse_datetime(end_value) if end_value else None
+    if start_value and not start:
+        parsed = parse_date(start_value)
+        if parsed:
+            start = timezone.make_aware(datetime.combine(parsed, time.min))
+    if end_value and not end:
+        parsed = parse_date(end_value)
+        if parsed:
+            end = timezone.make_aware(datetime.combine(parsed, time.max))
+    if start and timezone.is_naive(start):
+        start = timezone.make_aware(start)
+    if end and timezone.is_naive(end):
+        end = timezone.make_aware(end)
+    return start, end
+
+
+def apply_created_range(queryset, start, end):
+    if start:
+        queryset = queryset.filter(created_at__gte=start)
+    if end:
+        queryset = queryset.filter(created_at__lte=end)
+    return queryset
+
+
+def apply_updated_range(queryset, start, end):
+    if start:
+        queryset = queryset.filter(updated_at__gte=start)
+    if end:
+        queryset = queryset.filter(updated_at__lte=end)
+    return queryset
 
 
 @extend_schema(request=AISettingsSerializer, responses=AISettingsSerializer)

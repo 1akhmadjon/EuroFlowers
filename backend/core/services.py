@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
 
 
 def normalize_instagram_permalink(value):
@@ -125,35 +125,101 @@ def find_media_by_id(media_id):
     return None
 
 
-def mark_catalog_sold(item, user):
+def ensure_catalog_stock_available(item, quantity=None):
+    qty = quantity if quantity is not None else item.quantity_total
+    rows = list(item.composition.select_related("stock_batch"))
+    shortages = []
+    for row in rows:
+        needed = row.quantity_stems * qty
+        if row.stock_batch.remaining_stems < needed:
+            shortages.append(f"{row.stock_batch.batch_number}: kerak {needed}, bor {row.stock_batch.remaining_stems}")
+    if shortages:
+        raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + "; ".join(shortages))
+
+
+def mark_catalog_sold(item, user, quantity=1):
     with transaction.atomic():
-        item.status = "sold"
-        item.sold_at = timezone.now()
-        item.save(update_fields=["status", "sold_at", "updated_at"])
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        quantity = int(quantity or 1)
+        if quantity < 1:
+            raise ValueError("Sotilgan son 1 dan kam bo‘lmasligi kerak")
+        if item.quantity_sold + quantity > item.quantity_total:
+            raise ValueError("Sotilgan son katalogdagi umumiy sondan oshib ketdi")
+        item.quantity_sold += quantity
+        if item.quantity_sold >= item.quantity_total:
+            item.status = "sold"
+            item.sold_at = timezone.now()
+        elif item.status == "draft":
+            item.status = "available"
+        item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
         notification = Notification.objects.create(
             branch=item.branch,
             notification_type="stock_pending",
             title_uz=f"{item.name_uz}: sklad chiqimi kutilmoqda",
             title_ru=f"{item.name_ru}: ожидается списание со склада",
-            body_uz="Kompozitsiya sotildi. Tarkibdagi gullarni sklad hisobidan chiqaring.",
-            body_ru="Композиция продана. Спишите цветы из состава со склада.",
+            body_uz=f"{quantity} ta kompozitsiya sotildi. Tarkibdagi gullarni sklad hisobidan chiqaring.",
+            body_ru=f"Продано композиций: {quantity}. Спишите цветы из состава со склада.",
             reference_type="catalog_item",
             reference_id=item.id,
         )
-        AuditLog.objects.create(user=user, action="catalog_sold", entity_type="CatalogItem", entity_id=str(item.id), after={"status": "sold", "notification": notification.id})
+        AuditLog.objects.create(user=user, action="catalog_sold", entity_type="CatalogItem", entity_id=str(item.id), after={"status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "notification": notification.id})
     return item
 
 
-def deduct_catalog_stock(item, user):
+def deduct_catalog_stock(item, user, quantity=None):
     with transaction.atomic():
-        if item.stock_deducted_at:
-            raise ValueError("Sklad chiqimi avval bajarilgan")
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        pending = item.quantity_sold - item.quantity_stock_deducted
+        if quantity is None:
+            quantity = pending
+        quantity = int(quantity or 0)
+        if quantity < 1:
+            raise ValueError("Skladdan kamaytirish uchun sotilgan, lekin yechilmagan son yo‘q")
+        if quantity > pending:
+            raise ValueError("Skladdan kamaytirish soni sotilgan, lekin yechilmagan sondan oshib ketdi")
         rows = list(item.composition.select_related("stock_batch").select_for_update())
-        shortages = [row for row in rows if row.stock_batch.remaining_stems < row.quantity_stems]
+        shortages = [row for row in rows if row.stock_batch.remaining_stems < row.quantity_stems * quantity]
         if shortages:
             names = ", ".join(row.stock_batch.batch_number for row in shortages)
             raise ValueError(f"Yetarli qoldiq yo‘q: {names}")
         for row in rows:
+            batch = row.stock_batch
+            stems = row.quantity_stems * quantity
+            bunches = row.quantity_bunches * quantity
+            batch.remaining_stems -= stems
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            StockMovement.objects.create(
+                batch=batch,
+                movement_type="out",
+                quantity_stems=-stems,
+                quantity_bunches=-bunches,
+                reference_type="catalog_item",
+                reference_id=item.id,
+                reason=f"{item.name_uz} sotildi: {quantity} ta",
+                performed_by=user,
+            )
+        item.quantity_stock_deducted += quantity
+        if item.quantity_stock_deducted >= item.quantity_sold:
+            item.stock_deducted_at = timezone.now()
+            Notification.objects.filter(reference_type="catalog_item", reference_id=item.id, notification_type="stock_pending").update(is_read=True)
+        item.save(update_fields=["quantity_stock_deducted", "stock_deducted_at", "updated_at"])
+        AuditLog.objects.create(user=user, action="catalog_stock_deducted", entity_type="CatalogItem", entity_id=str(item.id), after={"rows": len(rows), "quantity": quantity, "quantity_stock_deducted": item.quantity_stock_deducted})
+    return item
+
+
+def deduct_lead_stock(lead, user):
+    with transaction.atomic():
+        lead = Lead.objects.select_for_update().get(pk=lead.pk)
+        if lead.stock_deducted_at:
+            return lead
+        stock_rows = list(lead.stock_usage.select_related("stock_batch").select_for_update())
+        packaging_rows = list(lead.packaging_usage.select_related("packaging").select_for_update())
+        stock_shortages = [row for row in stock_rows if row.stock_batch.remaining_stems < row.quantity_stems]
+        packaging_shortages = [row for row in packaging_rows if row.packaging.quantity < row.quantity]
+        if stock_shortages or packaging_shortages:
+            parts = [row.stock_batch.batch_number for row in stock_shortages] + [row.packaging.name_uz for row in packaging_shortages]
+            raise ValueError("Lead uchun yetarli sklad qoldig‘i yo‘q: " + ", ".join(parts))
+        for row in stock_rows:
             batch = row.stock_batch
             batch.remaining_stems -= row.quantity_stems
             batch.save(update_fields=["remaining_stems", "updated_at"])
@@ -162,16 +228,28 @@ def deduct_catalog_stock(item, user):
                 movement_type="out",
                 quantity_stems=-row.quantity_stems,
                 quantity_bunches=-row.quantity_bunches,
-                reference_type="catalog_item",
-                reference_id=item.id,
-                reason=f"{item.name_uz} sotildi",
+                reference_type="lead",
+                reference_id=lead.id,
+                reason=f"Lead #{lead.id}: {lead.customer}",
                 performed_by=user,
             )
-        item.stock_deducted_at = timezone.now()
-        item.save(update_fields=["stock_deducted_at", "updated_at"])
-        Notification.objects.filter(reference_type="catalog_item", reference_id=item.id, notification_type="stock_pending").update(is_read=True)
-        AuditLog.objects.create(user=user, action="catalog_stock_deducted", entity_type="CatalogItem", entity_id=str(item.id), after={"rows": len(rows)})
-    return item
+        for row in packaging_rows:
+            packaging = row.packaging
+            packaging.quantity -= row.quantity
+            packaging.save(update_fields=["quantity", "updated_at"])
+            PackagingMovement.objects.create(
+                packaging=packaging,
+                movement_type="out",
+                quantity=-row.quantity,
+                reference_type="lead",
+                reference_id=lead.id,
+                reason=f"Lead #{lead.id}: {lead.customer}",
+                performed_by=user,
+            )
+        lead.stock_deducted_at = timezone.now()
+        lead.save(update_fields=["stock_deducted_at", "updated_at"])
+        AuditLog.objects.create(user=user, action="lead_stock_deducted", entity_type="Lead", entity_id=str(lead.id), after={"stock_rows": len(stock_rows), "packaging_rows": len(packaging_rows)})
+    return lead
 
 
 def apply_stock_movement(batch, movement_type, quantity_stems, reason, user):
@@ -316,7 +394,13 @@ def ai_reply(conversation):
     if conversation.social_post:
         post = conversation.social_post
         context["post"] = {"title_uz": post.title_uz, "title_ru": post.title_ru, "description_uz": post.description_uz, "description_ru": post.description_ru, "price": str(post.price or ""), "flower_count": post.flower_count}
-    instructions = ai_settings.system_prompt + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean."
+    sales_rules = (
+        " Qat'iy qoida: mijoz o‘zbek tilida, hatto kirill yozuvida yozsa ham javobni o‘zbek lotinida yoz, ruscha so‘z aralashtirma. Faqat mijoz aniq rus tilida yozsa rus tilida javob ber."
+        " Mijoz gul yig‘dirayotgan bo‘lsa yoki custom buket/savat so‘rasa, gullar narxiga florist xizmati qo‘shilishini ayt: florist xizmati 50 000 so‘mdan boshlanadi va gul obyomiga qarab o‘zgaradi."
+        " Story, reel, post yoki katalogdagi tayyor buket/kompozitsiya haqida so‘ralsa florist xizmatini alohida aytma va narxga qo‘shma, chunki ular tayyor yasalgan sotuvdagi gullar."
+        " Lead yaratish uchun JSON estimated_price qiymatida florist xizmatini alohida qo‘shib yuborma; tizim operator sotildi qilganda florist_fee maydonida yuritadi."
+    )
+    instructions = ai_settings.system_prompt + sales_rules + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean."
     api_key = openai_api_key()
     if not api_key:
         return {"reply": "Hozir operatorimiz sizga yordam beradi. Ismingiz va telefon raqamingizni qoldiring, iltimos.", "detected_language": customer.language, "lead_ready": False, "handoff": True}

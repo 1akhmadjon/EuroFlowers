@@ -1,9 +1,10 @@
 from django.contrib.auth.models import User
 from typing import Any
 from urllib.parse import urlparse
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -277,6 +278,22 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["created_by", "sold_at", "stock_deducted_at"]
 
+    def validate(self, attrs):
+        composition = attrs.get("composition")
+        quantity_total = attrs.get("quantity_total", getattr(self.instance, "quantity_total", 1))
+        if composition is None and self.instance:
+            composition = [{"stock_batch": row.stock_batch, "quantity_stems": row.quantity_stems} for row in self.instance.composition.select_related("stock_batch")]
+        if composition:
+            for row in composition:
+                batch = row["stock_batch"]
+                needed = row["quantity_stems"] * quantity_total
+                if batch.remaining_stems < needed:
+                    raise serializers.ValidationError({"composition": f"{batch.batch_number} partiyada yetarli qoldiq yo‘q. Kerak: {needed}, bor: {batch.remaining_stems}"})
+        quantity_sold = getattr(self.instance, "quantity_sold", 0)
+        if quantity_total < quantity_sold:
+            raise serializers.ValidationError({"quantity_total": "Umumiy son sotilgan sondan kam bo‘lishi mumkin emas"})
+        return attrs
+
     def create(self, validated_data):
         composition = validated_data.pop("composition", [])
         item = CatalogItem.objects.create(**validated_data)
@@ -321,12 +338,107 @@ class ConversationSerializer(serializers.ModelSerializer):
         return MessageSerializer(message).data if message else None
 
 
+class LeadPackagingUsageInputSerializer(serializers.Serializer):
+    packaging = serializers.PrimaryKeyRelatedField(queryset=Packaging.objects.all())
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+
 class LeadSerializer(serializers.ModelSerializer):
     customer_detail = CustomerSerializer(source="customer", read_only=True)
     branch_detail = BranchSerializer(source="branch", read_only=True)
+    stock_usage = serializers.SerializerMethodField()
+    packaging_usage = serializers.SerializerMethodField()
+    stock_usage_input = CatalogCompositionSerializer(many=True, write_only=True, required=False)
+    packaging_usage_input = LeadPackagingUsageInputSerializer(many=True, write_only=True, required=False)
+    customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
+    customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
+    customer_instagram_user_id = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=100)
+
     class Meta:
         model = Lead
         fields = "__all__"
+        extra_kwargs = {"customer": {"required": False}}
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_stock_usage(self, obj):
+        return [{
+            "id": row.id,
+            "stock_batch": row.stock_batch_id,
+            "batch_detail": StockBatchSerializer(row.stock_batch).data,
+            "quantity_stems": row.quantity_stems,
+            "quantity_bunches": row.quantity_bunches,
+        } for row in obj.stock_usage.select_related("stock_batch__variant__flower").all()]
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_packaging_usage(self, obj):
+        return [{
+            "id": row.id,
+            "packaging": row.packaging_id,
+            "packaging_detail": PackagingSerializer(row.packaging).data,
+            "quantity": row.quantity,
+        } for row in obj.packaging_usage.select_related("packaging").all()]
+
+    def validate(self, attrs):
+        customer = attrs.get("customer") or getattr(self.instance, "customer", None)
+        if not customer and not attrs.get("customer_name"):
+            raise serializers.ValidationError({"customer_name": "Yangi lead uchun mijoz ismi kerak"})
+        if not customer and not attrs.get("customer_phone"):
+            raise serializers.ValidationError({"customer_phone": "Yangi lead uchun telefon kerak"})
+        return attrs
+
+    def _customer_from_attrs(self, attrs):
+        customer = attrs.pop("customer", None)
+        name = attrs.pop("customer_name", "")
+        phone = attrs.pop("customer_phone", "")
+        external_id = attrs.pop("customer_instagram_user_id", "")
+        if customer:
+            return customer
+        from .services import normalize_phone
+        normalized = normalize_phone(phone) or phone
+        branch = attrs.get("branch")
+        customer = Customer.objects.filter(phone=normalized).first() if normalized else None
+        if customer:
+            updates = []
+            if name and not customer.name:
+                customer.name = name
+                updates.append("name")
+            if branch and not customer.branch_id:
+                customer.branch = branch
+                updates.append("branch")
+            if updates:
+                customer.save(update_fields=updates + ["updated_at"])
+            return customer
+        external = external_id or f"manual:{normalized or name}"
+        customer = Customer.objects.create(name=name, phone=normalized, branch=branch, language="uz", instagram_user_id=external)
+        return customer
+
+    def _save_usage(self, lead, stock_rows=None, packaging_rows=None):
+        if stock_rows is not None:
+            lead.stock_usage.all().delete()
+            LeadStockUsage.objects.bulk_create([LeadStockUsage(lead=lead, stock_batch=row["stock_batch"], quantity_stems=row["quantity_stems"], quantity_bunches=row.get("quantity_bunches") or 0) for row in stock_rows])
+        if packaging_rows is not None:
+            lead.packaging_usage.all().delete()
+            LeadPackagingUsage.objects.bulk_create([LeadPackagingUsage(lead=lead, packaging=row["packaging"], quantity=row.get("quantity", 1)) for row in packaging_rows])
+
+    def create(self, validated_data):
+        stock_rows = validated_data.pop("stock_usage_input", None)
+        packaging_rows = validated_data.pop("packaging_usage_input", None)
+        customer = self._customer_from_attrs(validated_data)
+        lead = Lead.objects.create(customer=customer, **validated_data)
+        self._save_usage(lead, stock_rows, packaging_rows)
+        return lead
+
+    def update(self, instance, validated_data):
+        stock_rows = validated_data.pop("stock_usage_input", None)
+        packaging_rows = validated_data.pop("packaging_usage_input", None)
+        validated_data.pop("customer_name", None)
+        validated_data.pop("customer_phone", None)
+        validated_data.pop("customer_instagram_user_id", None)
+        for key, value in validated_data.items():
+            setattr(instance, key, value)
+        instance.save()
+        self._save_usage(instance, stock_rows, packaging_rows)
+        return instance
 
 
 class NotificationSerializer(serializers.ModelSerializer):

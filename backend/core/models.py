@@ -246,6 +246,9 @@ class CatalogItem(TimeStampedModel):
     image_url = models.URLField(blank=True)
     instagram_story_url = models.URLField(blank=True)
     social_post = models.ForeignKey(SocialPost, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
+    quantity_total = models.PositiveIntegerField(default=1)
+    quantity_sold = models.PositiveIntegerField(default=0)
+    quantity_stock_deducted = models.PositiveIntegerField(default=0)
     sold_at = models.DateTimeField(null=True, blank=True)
     stock_deducted_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
@@ -300,13 +303,28 @@ class Lead(TimeStampedModel):
     request_ru = models.TextField(blank=True)
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("stems", "Donalab"), ("catalog", "Katalog")], blank=True)
     estimated_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     desired_date = models.DateField(null=True, blank=True)
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     source = models.CharField(max_length=30, default="instagram")
     details = models.JSONField(default=dict, blank=True)
+    stock_deducted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class LeadStockUsage(TimeStampedModel):
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="stock_usage")
+    stock_batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="lead_usages")
+    quantity_stems = models.PositiveIntegerField()
+    quantity_bunches = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+
+class LeadPackagingUsage(TimeStampedModel):
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="packaging_usage")
+    packaging = models.ForeignKey(Packaging, on_delete=models.PROTECT, related_name="lead_usages")
+    quantity = models.PositiveIntegerField(default=1)
 
 
 class Notification(TimeStampedModel):
