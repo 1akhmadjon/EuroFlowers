@@ -397,10 +397,12 @@ def ai_reply(conversation):
     sales_rules = (
         " Qat'iy qoida: mijoz o‘zbek tilida, hatto kirill yozuvida yozsa ham javobni o‘zbek lotinida yoz, ruscha so‘z aralashtirma. Faqat mijoz aniq rus tilida yozsa rus tilida javob ber."
         " Format qoidasi: javobda hech bir qatorni probel bilan boshlama. Bullet ishlatsang har qator to‘g‘ridan-to‘g‘ri '•' bilan boshlansin. '  Narx:' kabi oldida space bor qator yozma. Instagram uchun text plain bo‘lsin, markdown ishlatma."
-        " Gul variantini taklif qilganda dona narxini ham yoz: masalan '• Premium Blue — moviy, 50 cm\\nDona narxi: taxminan 105 000 so‘m\\n10 dona: taxminan 1 050 000 so‘m'. Agar mijoz 10 ta gortenziya kabi miqdor aytsa, dona narxi va jami taxminiy narxni alohida ko‘rsat."
+        " Gul variantlarini taklif qilganda sarlavha bilan yoz: masalan 'Bizda bor Gortenziyalar:' yoki 'Hozir mavjud atirgullar:'. Keyin variantlarni bullet bilan ber."
+        " Dona narxida 'taxminan' so‘zini ishlatma: 'Dona narxi: 105 000 so‘m' deb yoz. Mijoz so‘ragan miqdor yoki buket/savat jami narxida 'Jami taxminan: ... so‘m' deb yozish mumkin. 'taxminan' so‘zini bitta javobda ko‘pi bilan 1 marta ishlat."
+        " Gul variantini taklif qilganda dona narxini ham yoz: masalan 'Bizda bor Gortenziyalar:\\n• Premium Blue — moviy, 50 cm\\nDona narxi: 105 000 so‘m\\n10 dona jami taxminan: 1 050 000 so‘m'."
         " Mijoz hali 'olaman', 'rasmiylashtiring', 'zakaz qilaman', 'shu kerak' demagan bo‘lsa ism yoki telefon so‘rama va lead_ready=false qaytar. Avval ehtiyoj turini aniqlashtir: 'Sizga buket qilib beraylikmi, savatga yig‘amizmi yoki gulning o‘zini olmoqchimisiz?' kabi bitta chiroyli savol ber."
         " CRM lead yaratishda arrangement_type aniq bo‘lsin: buket bo‘lsa bouquet, savat bo‘lsa basket, gulning o‘zi/donalab bo‘lsa stems, tayyor katalog guli bo‘lsa catalog. Tur aniq bo‘lmasa lead yaratma."
-        " Mijoz gul yig‘dirayotgan bo‘lsa yoki custom buket/savat so‘rasa, gullar narxiga florist xizmati qo‘shilishini ayt: florist xizmati 50 000 so‘mdan boshlanadi va gul obyomiga qarab o‘zgaradi."
+        " Mijoz buket yoki savat tanlasa, javobda florist xizmatini alohida ayt: 'Florist xizmati 50 000 so‘mdan boshlanadi, gul hajmi va bezagiga qarab o‘zgaradi.'"
         " Story, reel, post yoki katalogdagi tayyor buket/kompozitsiya haqida so‘ralsa florist xizmatini alohida aytma va narxga qo‘shma, chunki ular tayyor yasalgan sotuvdagi gullar."
         " Lead yaratish uchun JSON estimated_price qiymatida florist xizmatini alohida qo‘shib yuborma; tizim operator sotildi qilganda florist_fee maydonida yuritadi."
     )
