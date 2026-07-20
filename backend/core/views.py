@@ -345,6 +345,7 @@ class LeadViewSet(ScopedViewSet):
             if lead.status == "won":
                 try:
                     deduct_lead_stock(lead, self.request.user)
+                    serializer.instance.refresh_from_db()
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
 
@@ -355,6 +356,7 @@ class LeadViewSet(ScopedViewSet):
             if lead.status == "won" and before_status != "won":
                 try:
                     deduct_lead_stock(lead, self.request.user)
+                    serializer.instance.refresh_from_db()
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
 
