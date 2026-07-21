@@ -426,6 +426,18 @@ def telegram_bot_token():
     return integration.telegram_bot_token
 
 
+def telegram_file_url(file_id):
+    token = telegram_bot_token()
+    if not token or not file_id:
+        return ""
+    response = requests.post(f"https://api.telegram.org/bot{token}/getFile", json={"file_id": file_id}, timeout=20)
+    response.raise_for_status()
+    file_path = response.json().get("result", {}).get("file_path", "")
+    if not file_path:
+        return ""
+    return f"https://api.telegram.org/file/bot{token}/{file_path}"
+
+
 def telegram_api(method, payload):
     token = telegram_bot_token()
     if not token:
@@ -651,10 +663,10 @@ def ai_reply(conversation):
     return result
 
 
-def ingest_customer_message(conversation, message_text, instagram_message_id=""):
+def ingest_customer_message(conversation, message_text, instagram_message_id="", metadata=None):
     if instagram_message_id and Message.objects.filter(instagram_message_id=instagram_message_id, conversation=conversation).exists():
         return None
-    message = Message.objects.create(conversation=conversation, sender="customer", text=message_text, instagram_message_id=instagram_message_id)
+    message = Message.objects.create(conversation=conversation, sender="customer", text=message_text, instagram_message_id=instagram_message_id, metadata=metadata or {})
     conversation.last_message_at = timezone.now()
     conversation.save(update_fields=["last_message_at", "updated_at"])
     return message
@@ -761,6 +773,64 @@ def flatten_interesting_payload(value, prefix=""):
     return matches
 
 
+def urls_from_value(value):
+    urls = []
+    if isinstance(value, str):
+        urls.extend(re.findall(r"https?://[^\s\"'<>]+", value))
+    elif isinstance(value, dict):
+        for child in value.values():
+            urls.extend(urls_from_value(child))
+    elif isinstance(value, list):
+        for child in value:
+            urls.extend(urls_from_value(child))
+    return urls
+
+
+def attachment_kind(source, attachment_type, url):
+    text = f"{source} {attachment_type} {url}".lower()
+    if "voice" in text or "audio" in text:
+        return "voice"
+    if "story" in text:
+        return "story"
+    if "reel" in text:
+        return "reel"
+    if "post" in text or "media" in text or "instagram.com/p/" in text:
+        return "post"
+    return "media"
+
+
+def attachment_label(kind):
+    return {
+        "story": "Story link",
+        "post": "Post link",
+        "reel": "Reel link",
+        "voice": "Voice message",
+        "media": "Media link",
+    }.get(kind, "Media link")
+
+
+def unique_attachment_rows(rows):
+    result = []
+    seen = set()
+    for row in rows:
+        url = row.get("url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        result.append(row)
+    return result
+
+
+def append_attachment_links(text, attachments):
+    base = (text or "").strip()
+    lines = [base] if base else []
+    for row in attachments:
+        url = row.get("url")
+        if url:
+            lines.append(f"{attachment_label(row.get('kind'))}: {url}")
+    return "\n".join(lines)
+
+
 def first_string_from_keys(data, keys):
     for key in keys:
         value = data.get(key)
@@ -811,6 +881,26 @@ def first_media_attachment(message):
         if media_id or media_url:
             return {"id": media_id, "url": media_url, "type": attachment.get("type", ""), "payload": payload}
     return {}
+
+
+def instagram_message_metadata(event, webhook_event=None):
+    message = event.get("message", {}) or {}
+    rows = []
+    for attachment in message.get("attachments", []) or []:
+        attachment_type = attachment.get("type", "")
+        payload = attachment.get("payload", {}) or {}
+        for url in urls_from_value(payload):
+            rows.append({"kind": attachment_kind("instagram_attachment", attachment_type, url), "type": attachment_type, "url": url, "source": "instagram_attachment"})
+    for source, value in [
+        ("instagram_message", message),
+        ("instagram_referral", event.get("referral") or message.get("referral") or {}),
+        ("instagram_reply_to", message.get("reply_to") or {}),
+    ]:
+        for url in urls_from_value(value):
+            rows.append({"kind": attachment_kind(source, "", url), "type": "", "url": url, "source": source})
+    if webhook_event and webhook_event.story_url:
+        rows.append({"kind": attachment_kind("instagram_webhook_event", webhook_event.event_type, webhook_event.story_url), "type": webhook_event.event_type, "url": webhook_event.story_url, "source": "instagram_webhook_event"})
+    return {"attachments": unique_attachment_rows(rows)}
 
 
 def save_instagram_webhook_event(payload, entry, event):
@@ -920,7 +1010,8 @@ def resolve_instagram_event(payload):
             media_attachment = first_media_attachment(message)
             story_text = "Mijoz Instagram storyni directga yubordi." if story_attachment else ""
             media_text = "Mijoz Instagram post/reelni directga yubordi." if media_attachment else ""
-            message_text = text or story_text or media_text
+            message_metadata = instagram_message_metadata(event, webhook_event)
+            message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
             if not sender_id or sender_id in own_ids or not message_text or message.get("is_echo"):
                 continue
             branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None)
@@ -941,20 +1032,59 @@ def resolve_instagram_event(payload):
                 conversation.social_post = post
                 conversation.branch = post.branch
                 conversation.save(update_fields=["social_post", "branch", "updated_at"])
-            saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""))
+            saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
             if saved_message:
                 results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
     return results
 
 
+def telegram_media_file_id(message):
+    if message.get("voice"):
+        return "voice", message["voice"].get("file_id", "")
+    if message.get("audio"):
+        return "audio", message["audio"].get("file_id", "")
+    if message.get("video"):
+        return "video", message["video"].get("file_id", "")
+    if message.get("video_note"):
+        return "video_note", message["video_note"].get("file_id", "")
+    if message.get("document"):
+        return "document", message["document"].get("file_id", "")
+    if message.get("photo"):
+        photo = sorted(message["photo"], key=lambda row: row.get("file_size", 0))[-1]
+        return "photo", photo.get("file_id", "")
+    return "", ""
+
+
+def telegram_message_metadata(message):
+    rows = []
+    for url in urls_from_value(message):
+        rows.append({"kind": attachment_kind("telegram_message", "", url), "type": "", "url": url, "source": "telegram_message"})
+    media_type, file_id = telegram_media_file_id(message)
+    if file_id:
+        row = {"kind": attachment_kind("telegram_file", media_type, ""), "type": media_type, "file_id": file_id, "source": "telegram_file"}
+        try:
+            file_url = telegram_file_url(file_id)
+        except Exception as exc:
+            print(f"TELEGRAM_FILE_URL_FAILED file_id={file_id} error={exc}", flush=True)
+            file_url = ""
+        if file_url:
+            row["url"] = file_url
+            rows.append(row)
+        else:
+            rows.append(row)
+    return {"attachments": unique_attachment_rows(rows)}
+
+
 def resolve_telegram_update(payload):
     message = payload.get("message") or payload.get("edited_message") or {}
     text = (message.get("text") or "").strip()
+    metadata = telegram_message_metadata(message)
+    message_text = append_attachment_links(text, metadata.get("attachments", []))
     chat = message.get("chat") or {}
     user = message.get("from") or {}
     chat_id = chat.get("id")
     user_id = user.get("id")
-    if not chat_id or not user_id or not text:
+    if not chat_id or not user_id or not message_text:
         return []
     branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None) or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
     if not branch:
@@ -972,7 +1102,7 @@ def resolve_telegram_update(payload):
     if not conversation:
         conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch)
     message_id = message.get("message_id", "")
-    saved_message = ingest_customer_message(conversation, text, f"telegram:{chat_id}:{message_id}")
+    saved_message = ingest_customer_message(conversation, message_text, f"telegram:{chat_id}:{message_id}", metadata)
     if not saved_message:
         return []
     return [{"conversation_id": conversation.id, "message_id": saved_message.id, "chat_id": chat_id}]

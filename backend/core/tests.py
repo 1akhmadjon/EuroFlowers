@@ -1,9 +1,9 @@
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, UserProfile
+from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, UserProfile
 from .serializers import permission_matrix
-from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, resolve_telegram_update
+from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, resolve_instagram_event, resolve_telegram_update
 from .tasks import split_location_reply
 
 
@@ -101,6 +101,62 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(Conversation.objects.filter(customer=customer).exists())
         self.assertTrue(Message.objects.filter(conversation__customer=customer, text="Assalomu alaykum", instagram_message_id="telegram:555:77").exists())
         self.assertEqual(resolve_telegram_update(payload), [])
+
+    def test_instagram_media_links_are_saved_in_chat_message(self):
+        SocialPost.objects.create(branch=self.branch, post_type="story", title_uz="Story", title_ru="Story", is_active=True)
+        payload = {
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig-user-1"},
+                    "recipient": {"id": "ig-business"},
+                    "message": {
+                        "mid": "mid-link-1",
+                        "text": "shu qancha",
+                        "attachments": [{
+                            "type": "ig_story",
+                            "payload": {
+                                "story_media_id": "story-1",
+                                "story_media_url": "https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg",
+                            },
+                        }],
+                    },
+                }],
+            }],
+        }
+        jobs = resolve_instagram_event(payload)
+        self.assertEqual(len(jobs), 1)
+        message = Message.objects.get(instagram_message_id="mid-link-1")
+        self.assertIn("Story link: https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg", message.text)
+        self.assertEqual(message.metadata["attachments"][0]["kind"], "story")
+        self.assertEqual(message.metadata["attachments"][0]["url"], "https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg")
+
+    def test_telegram_voice_link_is_saved_in_chat_message(self):
+        SocialPost.objects.create(branch=self.branch, post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
+        IntegrationSettings.objects.update_or_create(pk=1, defaults={"telegram_bot_token": "test-token"})
+        payload = {
+            "update_id": 1002,
+            "message": {
+                "message_id": 78,
+                "chat": {"id": 555},
+                "from": {"id": 1000, "first_name": "Ali"},
+                "voice": {"file_id": "voice-file-id"},
+            },
+        }
+        from unittest.mock import patch
+
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"ok": True, "result": {"file_path": "voice/file.ogg"}}
+
+        with patch("core.services.requests.post", return_value=MockResponse()):
+            jobs = resolve_telegram_update(payload)
+        self.assertEqual(len(jobs), 1)
+        message = Message.objects.get(instagram_message_id="telegram:555:78")
+        self.assertIn("Voice message: https://api.telegram.org/file/bottest-token/voice/file.ogg", message.text)
+        self.assertEqual(message.metadata["attachments"][0]["kind"], "voice")
 
 
 class ApiTests(TestCase):
