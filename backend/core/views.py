@@ -25,7 +25,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
+from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -426,6 +426,9 @@ class LeadViewSet(ScopedViewSet):
                     lead.refresh_from_db()
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
+            elif before_status == "won" and lead.status != "won":
+                restore_lead_stock(lead, self.request.user)
+                lead.refresh_from_db()
         return Response(LeadSerializer(lead, context={"request": request}).data)
 
     def perform_update(self, serializer):
@@ -438,6 +441,9 @@ class LeadViewSet(ScopedViewSet):
                     serializer.instance.refresh_from_db()
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
+            elif before_status == "won" and lead.status != "won":
+                restore_lead_stock(lead, self.request.user)
+                serializer.instance.refresh_from_db()
             transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
 
 

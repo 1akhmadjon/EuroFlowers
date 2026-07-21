@@ -294,6 +294,75 @@ def deduct_lead_stock(lead, user):
     return lead
 
 
+def restore_lead_stock(lead, user):
+    with transaction.atomic():
+        lead = Lead.objects.select_for_update().get(pk=lead.pk)
+        if not lead.stock_deducted_at:
+            return lead
+        stock_rows = list(lead.stock_usage.select_related("stock_batch").select_for_update())
+        packaging_rows = list(lead.packaging_usage.select_related("packaging").select_for_update())
+        catalog_rows = list(lead.catalog_usage.select_related("catalog_item").select_for_update())
+        catalog_quantities = {}
+        for row in catalog_rows:
+            catalog_quantities[row.catalog_item_id] = catalog_quantities.get(row.catalog_item_id, 0) + row.quantity
+        for catalog_item_id, quantity in catalog_quantities.items():
+            item = CatalogItem.objects.select_for_update().get(pk=catalog_item_id)
+            for composition in item.composition.select_related("stock_batch").select_for_update():
+                batch = composition.stock_batch
+                stems = composition.quantity_stems * quantity
+                bunches = composition.quantity_bunches * quantity
+                batch.remaining_stems += stems
+                batch.save(update_fields=["remaining_stems", "updated_at"])
+                StockMovement.objects.create(
+                    batch=batch,
+                    movement_type="adjustment",
+                    quantity_stems=stems,
+                    quantity_bunches=bunches,
+                    reference_type="lead",
+                    reference_id=lead.id,
+                    reason=f"Lead #{lead.id}: status qaytdi / {item.name_uz}: {quantity} ta",
+                    performed_by=user,
+                )
+            item.quantity_sold = max(item.quantity_sold - quantity, 0)
+            item.quantity_stock_deducted = max(item.quantity_stock_deducted - quantity, 0)
+            if item.quantity_sold < item.quantity_total and item.status == "sold":
+                item.status = "available"
+                item.sold_at = None
+            item.stock_deducted_at = timezone.now() if item.quantity_stock_deducted and item.quantity_stock_deducted >= item.quantity_sold else None
+            item.save(update_fields=["quantity_sold", "quantity_stock_deducted", "status", "sold_at", "stock_deducted_at", "updated_at"])
+        for row in stock_rows:
+            batch = row.stock_batch
+            batch.remaining_stems += row.quantity_stems
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            StockMovement.objects.create(
+                batch=batch,
+                movement_type="adjustment",
+                quantity_stems=row.quantity_stems,
+                quantity_bunches=row.quantity_bunches,
+                reference_type="lead",
+                reference_id=lead.id,
+                reason=f"Lead #{lead.id}: status qaytdi / {lead.customer}",
+                performed_by=user,
+            )
+        for row in packaging_rows:
+            packaging = row.packaging
+            packaging.quantity += row.quantity
+            packaging.save(update_fields=["quantity", "updated_at"])
+            PackagingMovement.objects.create(
+                packaging=packaging,
+                movement_type="adjustment",
+                quantity=row.quantity,
+                reference_type="lead",
+                reference_id=lead.id,
+                reason=f"Lead #{lead.id}: status qaytdi / {lead.customer}",
+                performed_by=user,
+            )
+        lead.stock_deducted_at = None
+        lead.save(update_fields=["stock_deducted_at", "updated_at"])
+        AuditLog.objects.create(user=user, action="lead_stock_restored", entity_type="Lead", entity_id=str(lead.id), after={"stock_rows": len(stock_rows), "packaging_rows": len(packaging_rows), "catalog_rows": len(catalog_rows)})
+    return lead
+
+
 def apply_stock_movement(batch, movement_type, quantity_stems, reason, user):
     with transaction.atomic():
         batch = StockBatch.objects.select_for_update().get(pk=batch.pk)

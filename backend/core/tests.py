@@ -2,7 +2,7 @@ from decimal import Decimal
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, UserProfile
+from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import permission_matrix
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, resolve_instagram_event, resolve_telegram_update
 from .tasks import split_location_reply
@@ -356,6 +356,53 @@ class ApiTests(TestCase):
         self.assertEqual(self.batch.remaining_stems, 96)
         self.assertEqual(packaging.quantity, 1)
         self.assertEqual(Customer.objects.get(phone="+998901112233").leads.count(), 1)
+        response = self.client.patch(f"/api/leads/{lead_id}/", {"status": "lost"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        packaging.refresh_from_db()
+        lead = Lead.objects.get(id=lead_id)
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(packaging.quantity, 2)
+        self.assertIsNone(lead.stock_deducted_at)
+        self.assertTrue(StockMovement.objects.filter(reference_type="lead", reference_id=lead_id, movement_type="adjustment", quantity_stems=4).exists())
+        self.assertTrue(PackagingMovement.objects.filter(reference_type="lead", reference_id=lead_id, movement_type="adjustment", quantity=1).exists())
+        response = self.client.patch(f"/api/leads/{lead_id}/", {"status": "won"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        packaging.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 96)
+        self.assertEqual(packaging.quantity, 1)
+
+    def test_catalog_lead_stock_returns_when_won_is_reverted(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Catalog buket", name_ru="Catalog bouquet", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        payload = {
+            "branch": self.branch.id,
+            "status": "new",
+            "request_uz": "Catalog lead",
+            "arrangement_type": "catalog",
+            "customer_name": "Sardor",
+            "customer_phone": "901234000",
+            "catalog_usage_input": [{"catalog_item": item.id, "quantity": 2}],
+        }
+        response = self.client.post("/api/leads/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        lead_id = response.json()["id"]
+        response = self.client.post(f"/api/leads/{lead_id}/move/", {"status": "won"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(item.quantity_sold, 2)
+        self.assertEqual(item.quantity_stock_deducted, 2)
+        response = self.client.post(f"/api/leads/{lead_id}/move/", {"status": "new"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(item.quantity_sold, 0)
+        self.assertEqual(item.quantity_stock_deducted, 0)
+        self.assertEqual(item.status, "available")
 
     def test_lead_move_keeps_kanban_position_between_two_leads(self):
         customer = Customer.objects.create(branch=self.branch, name="Kanban", phone="+998901234567", instagram_user_id="kanban")
