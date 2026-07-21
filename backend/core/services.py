@@ -451,6 +451,32 @@ def catalog_composition_summary(item):
     return rows
 
 
+def recent_customer_orders(customer):
+    orders = []
+    for lead in customer.leads.select_related("social_post").prefetch_related("catalog_usage__catalog_item", "stock_usage__stock_batch__variant__flower", "packaging_usage__packaging").order_by("-created_at")[:5]:
+        catalog_items = [{"name_uz": row.catalog_item.name_uz, "quantity": row.quantity, "type": row.catalog_item.arrangement_type, "price": str(row.catalog_item.price)} for row in lead.catalog_usage.all()]
+        stock_items = [{
+            "flower_uz": row.stock_batch.variant.flower.name_uz,
+            "variant_uz": row.stock_batch.variant.name_uz,
+            "color_uz": row.stock_batch.variant.color_uz,
+            "quantity_stems": row.quantity_stems,
+            "quantity_bunches": str(row.quantity_bunches),
+        } for row in lead.stock_usage.all()]
+        packaging_items = [{"name_uz": row.packaging.name_uz, "quantity": row.quantity, "type": row.packaging.packaging_type} for row in lead.packaging_usage.all()]
+        orders.append({
+            "lead_id": lead.id,
+            "created_at": lead.created_at.isoformat(),
+            "status": lead.status,
+            "arrangement_type": lead.arrangement_type,
+            "estimated_price": str(lead.estimated_price or ""),
+            "request_uz": lead.request_uz,
+            "catalog_items": catalog_items,
+            "stock_items": stock_items,
+            "packaging_items": packaging_items,
+        })
+    return orders
+
+
 def ai_reply(conversation):
     customer = conversation.customer
     branch = conversation.branch
@@ -462,6 +488,7 @@ def ai_reply(conversation):
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
         "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
+        "recent_orders": recent_customer_orders(customer),
         "stock": [{
             "batch_id": row.id,
             "flower_uz": row.variant.flower.name_uz,
@@ -527,6 +554,7 @@ def ai_reply(conversation):
         " Story/post/reel/katalogdagi tayyor gul haqida javob berganda katalog item ichidagi nechta dona gul ketganini yoki post flower_countni mijoz so‘ramasa yozma. Faqat nomi, buket/savat turi, narxi va katalogda nechta borligini ayt."
         " Agar mijoz tayyor katalog buketiga nechta gul ketganini so‘rasa, catalog composition ma'lumotidan javob ber. Composition mavjud bo‘lsa 'katalogda ko‘rsatilmagan' demagin."
         " Mijoz arzonlashtirish, skidka, chegirma, savdolashish yoki narxni tushirishni so‘rasa, chegirma va'da qilma va foiz aytma. Javob mazmuni shunday bo‘lsin: 'Hurmatli mijoz, bizning narxlarimiz shahardagi ko‘p gul do‘konlarga nisbatan ancha qulay. Chegirma yoki yakuniy narx masalasini operatorimiz bilan gaplashib ko‘rsangiz bo‘ladi 😊' Keyin ism va telefon raqamini so‘rab, lead_ready uchun kerakli ma'lumotlarni yig‘."
+        " recent_orders faqat mijozning eski buyurtmalari haqida ma'lumot berish uchun. Mijoz 'oldingi zakazim nima edi', 'oxirgi nima olgandim' desa shu ro‘yxatdan javob ber. Eski buyurtmani yangi lead deb yaratma, mijoz 'yana shundan olaman' yoki yangi buyurtmani aniq tasdiqlamaguncha lead_ready=false bo‘lsin."
         " Mijoz 'qanaqa tayyor gullar bor', 'katalog bormi', 'tayyor buketlar' desa rasm yuborishni so‘rama va har bir rasmni alohida tavsiflama. Catalog kontekstdagi barcha available gullarni nomi, turi, narxi, qoldiq soni bilan qisqa ro‘yxat qil. Oxirida 'Qaysi biri qiziq bo‘lsa, tanlang, rasmini ko‘rsataman' degan mazmunda bitta savol ber."
         " Mijoz katalog ro‘yxatidan birini tanlasa yoki story/post/reeldagi tayyor gulni olmoqchi bo‘lsa, catalog_items arrayga catalog id va quantity yoz. Bir nechta tayyor buket/savat olsa ham hammasini catalog_itemsga yoz."
         " Mijoz bir nechta tayyor katalog gullarni ko‘rib chiqqan bo‘lsa va oxirida aniq qaysini olishi noma'lum bo‘lsa, ism/telefon so‘rama. Avval 'Sizga qaysi biri yoqdi, qaysi guldan buyurtma qilamiz?' deb aniqlashtir."
