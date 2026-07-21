@@ -701,7 +701,8 @@ def upload_file(request):
     serializer.is_valid(raise_exception=True)
     uploaded = serializer.validated_data["file"]
     path = default_storage.save(f"uploads/{uploaded.name}", uploaded)
-    url = request.build_absolute_uri(default_storage.url(path))
+    media_url = default_storage.url(path)
+    url = f"{settings.PUBLIC_BASE_URL}{media_url}" if settings.PUBLIC_BASE_URL else request.build_absolute_uri(media_url)
     return Response({"url": url, "path": path}, status=status.HTTP_201_CREATED)
 
 

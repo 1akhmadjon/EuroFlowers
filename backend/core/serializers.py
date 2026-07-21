@@ -296,17 +296,32 @@ class CatalogItemSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         composition = validated_data.pop("composition", [])
+        validated_data = self._sync_social_post_image_data(validated_data)
         item = CatalogItem.objects.create(**validated_data)
         CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=item, **row) for row in composition])
+        self._sync_social_post_image(item)
         return item
 
     def update(self, instance, validated_data):
         composition = validated_data.pop("composition", None)
+        validated_data = self._sync_social_post_image_data(validated_data)
         instance = super().update(instance, validated_data)
         if composition is not None:
             instance.composition.all().delete()
             CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=instance, **row) for row in composition])
+        self._sync_social_post_image(instance)
         return instance
+
+    def _sync_social_post_image_data(self, validated_data):
+        social_post = validated_data.get("social_post") or getattr(self.instance, "social_post", None)
+        if social_post and not validated_data.get("image_url") and getattr(social_post, "image_url", ""):
+            validated_data["image_url"] = social_post.image_url
+        return validated_data
+
+    def _sync_social_post_image(self, item):
+        if item.social_post_id and item.image_url and item.social_post.image_url != item.image_url:
+            item.social_post.image_url = item.image_url
+            item.social_post.save(update_fields=["image_url", "updated_at"])
 
 
 class CustomerSerializer(serializers.ModelSerializer):
