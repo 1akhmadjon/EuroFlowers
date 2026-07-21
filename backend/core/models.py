@@ -292,19 +292,36 @@ class Message(TimeStampedModel):
         ordering = ["created_at"]
 
 
+class LeadStatus(TimeStampedModel):
+    key = models.SlugField(max_length=40, unique=True)
+    name_uz = models.CharField(max_length=120)
+    name_ru = models.CharField(max_length=120, blank=True)
+    color = models.CharField(max_length=40, default="#64748b")
+    order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return self.name_uz
+
+
 class Lead(TimeStampedModel):
-    STATUS_CHOICES = [("new", "Yangi"), ("qualified", "Aniqlangan"), ("contacted", "Aloqa qilindi"), ("won", "Sotildi"), ("lost", "Yo‘qotildi")]
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="leads")
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="leads")
     conversation = models.ForeignKey(Conversation, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     social_post = models.ForeignKey(SocialPost, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
+    status = models.CharField(max_length=40, default="new")
     request_uz = models.TextField()
     request_ru = models.TextField(blank=True)
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("stems", "Donalab"), ("catalog", "Katalog")], blank=True)
     estimated_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     desired_date = models.DateField(null=True, blank=True)
+    delivery_at = models.DateTimeField(null=True, blank=True)
+    recall_at = models.DateTimeField(null=True, blank=True)
+    recall_sent_at = models.DateTimeField(null=True, blank=True)
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     source = models.CharField(max_length=30, default="instagram")
     details = models.JSONField(default=dict, blank=True)
@@ -386,6 +403,7 @@ class IntegrationSettings(TimeStampedModel):
     instagram_business_id = models.CharField(max_length=120, blank=True)
     instagram_verify_token = models.CharField(max_length=180, blank=True)
     telegram_bot_token = models.CharField(max_length=180, blank=True)
+    telegram_group_chat_id = models.CharField(max_length=120, blank=True)
     extra = models.JSONField(default=dict, blank=True)
 
 

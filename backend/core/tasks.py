@@ -1,7 +1,7 @@
 from celery import shared_task
 import threading
 import time
-from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_instagram_context_image, telegram_send, telegram_sender_action
+from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_due_lead_recalls, send_instagram_context_image, send_lead_recall, telegram_send, telegram_sender_action
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
@@ -95,3 +95,13 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
     finally:
         stop_typing.set()
         typing_thread.join(timeout=1)
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def process_lead_recall(lead_id):
+    return bool(send_lead_recall(lead_id))
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def process_due_lead_recalls():
+    return send_due_lead_recalls()

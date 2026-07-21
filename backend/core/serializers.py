@@ -1,10 +1,11 @@
 from django.contrib.auth.models import User
+from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -366,6 +367,7 @@ class LeadCatalogUsageInputSerializer(serializers.Serializer):
 class LeadSerializer(serializers.ModelSerializer):
     customer_detail = CustomerSerializer(source="customer", read_only=True)
     branch_detail = BranchSerializer(source="branch", read_only=True)
+    status_detail = serializers.SerializerMethodField()
     stock_usage = serializers.SerializerMethodField()
     packaging_usage = serializers.SerializerMethodField()
     catalog_usage = serializers.SerializerMethodField()
@@ -380,6 +382,11 @@ class LeadSerializer(serializers.ModelSerializer):
         model = Lead
         fields = "__all__"
         extra_kwargs = {"customer": {"required": False}}
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_status_detail(self, obj):
+        status = LeadStatus.objects.filter(key=obj.status).first()
+        return LeadStatusSerializer(status).data if status else None
 
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
     def get_stock_usage(self, obj):
@@ -415,6 +422,12 @@ class LeadSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"customer_name": "Yangi lead uchun mijoz ismi kerak"})
         if not customer and not attrs.get("customer_phone"):
             raise serializers.ValidationError({"customer_phone": "Yangi lead uchun telefon kerak"})
+        status_value = attrs.get("status")
+        if status_value and not LeadStatus.objects.filter(key=status_value).exists():
+            raise serializers.ValidationError({"status": "Bunday lead statusi mavjud emas"})
+        delivery_at = attrs.get("delivery_at")
+        if "delivery_at" in attrs and delivery_at and "recall_at" not in attrs:
+            attrs["recall_at"] = delivery_at - timedelta(hours=1)
         return attrs
 
     def _customer_from_attrs(self, attrs):
@@ -481,6 +494,13 @@ class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
         fields = "__all__"
+
+
+class LeadStatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LeadStatus
+        fields = "__all__"
+        read_only_fields = ["created_at", "updated_at"]
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

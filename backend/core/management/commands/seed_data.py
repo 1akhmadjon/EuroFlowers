@@ -4,7 +4,7 @@ import os
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from core.models import AISettings, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, IntegrationSettings, Lead, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from core.models import AISettings, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, IntegrationSettings, Lead, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
 class Command(BaseCommand):
@@ -29,6 +29,14 @@ class Command(BaseCommand):
         AISettings.objects.get_or_create(pk=1)
         IntegrationSettings.objects.get_or_create(pk=1)
         InstagramSettings.objects.get_or_create(pk=1, defaults={"account_username": "euroflowers.uz"})
+        for key, name_uz, name_ru, color, order in [
+            ("new", "Yangi", "Новый", "#2563eb", 10),
+            ("qualified", "Aniqlangan", "Квалифицирован", "#7c3aed", 20),
+            ("contacted", "Aloqa qilindi", "Связались", "#f59e0b", 30),
+            ("won", "Sotildi", "Продано", "#16a34a", 40),
+            ("lost", "Yo‘qotildi", "Потерян", "#dc2626", 50),
+        ]:
+            LeadStatus.objects.update_or_create(key=key, defaults={"name_uz": name_uz, "name_ru": name_ru, "color": color, "order": order, "is_active": True})
 
         central, _ = Branch.objects.update_or_create(code="TASH-C", defaults={"name": "Toshkent markaziy filial", "address": "Toshkent shahri, Mirzo Ulug‘bek tumani", "phone": "+998 90 900 00 01"})
         west, _ = Branch.objects.update_or_create(code="TASH-W", defaults={"name": "Toshkent g‘arbiy filial", "address": "Toshkent shahri, Chilonzor tumani", "phone": "+998 90 900 00 02"})

@@ -1,6 +1,7 @@
 import json
 import re
 import requests
+from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 from django.conf import settings
@@ -442,6 +443,44 @@ def telegram_sender_action(chat_id, action="typing"):
     return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
+def send_lead_recall(lead_id):
+    with transaction.atomic():
+        lead = Lead.objects.select_for_update().select_related("customer", "branch").filter(id=lead_id).first()
+        if not lead or lead.status == "lost" or lead.recall_sent_at or not lead.recall_at or lead.recall_at > timezone.now():
+            return None
+        title = f"Recall: Lead #{lead.id}"
+        body = f"{lead.customer} buyurtmasi 1 soat ichida yuborilishi kerak. Telefon: {lead.customer.phone or lead.customer.masked_phone}. So‘rov: {lead.request_uz or lead.request_ru}"
+        notification = Notification.objects.create(
+            branch=lead.branch,
+            notification_type="lead",
+            title_uz=title,
+            title_ru=title,
+            body_uz=body,
+            body_ru=body,
+            reference_type="lead",
+            reference_id=lead.id,
+        )
+        lead.recall_sent_at = timezone.now()
+        lead.save(update_fields=["recall_sent_at", "updated_at"])
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    group_chat_id = integration.telegram_group_chat_id or settings.TELEGRAM_GROUP_CHAT_ID
+    if group_chat_id:
+        try:
+            telegram_send(group_chat_id, f"{title}\n{body}")
+        except Exception as exc:
+            print(f"LEAD_RECALL_TELEGRAM_FAILED lead={lead_id} error={exc}", flush=True)
+    return notification
+
+
+def send_due_lead_recalls():
+    due_ids = list(Lead.objects.filter(recall_at__lte=timezone.now(), recall_sent_at__isnull=True).exclude(status="lost").values_list("id", flat=True)[:100])
+    sent = 0
+    for lead_id in due_ids:
+        if send_lead_recall(lead_id):
+            sent += 1
+    return sent
+
+
 def catalog_composition_summary(item):
     rows = []
     for row in item.composition.select_related("stock_batch__variant__flower"):
@@ -483,11 +522,21 @@ def ai_reply(conversation):
     stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower")
     catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower")[:30]
     baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0)
-    history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in conversation.messages.exclude(sender="system").order_by("created_at")[:60]]
+    visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:60])
+    session_messages = []
+    fresh_session = False
+    for index, message in enumerate(visible_messages):
+        if index and session_messages[-1].created_at - message.created_at >= timedelta(hours=24):
+            fresh_session = True
+            break
+        session_messages.append(message)
+    history_messages = list(reversed(session_messages))
+    history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in history_messages]
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
         "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
+        "conversation": {"fresh_session": fresh_session},
         "recent_orders": recent_customer_orders(customer),
         "stock": [{
             "batch_id": row.id,
@@ -557,6 +606,7 @@ def ai_reply(conversation):
         " Agar mijoz tayyor katalog buketiga nechta gul ketganini so‘rasa, catalog composition ma'lumotidan javob ber. Composition mavjud bo‘lsa 'katalogda ko‘rsatilmagan' demagin."
         " Mijoz arzonlashtirish, skidka, chegirma, savdolashish yoki narxni tushirishni so‘rasa, chegirma va'da qilma va foiz aytma. Javob mazmuni shunday bo‘lsin: 'Hurmatli mijoz, bizning narxlarimiz shahardagi ko‘p gul do‘konlarga nisbatan ancha qulay. Chegirma yoki yakuniy narx masalasini operatorimiz bilan gaplashib ko‘rsangiz bo‘ladi 😊' Keyin ism va telefon raqamini so‘rab, lead_ready uchun kerakli ma'lumotlarni yig‘."
         " recent_orders faqat mijozning eski buyurtmalari haqida ma'lumot berish uchun. Mijoz 'oldingi zakazim nima edi', 'oxirgi nima olgandim' desa shu ro‘yxatdan javob ber. Eski buyurtmani yangi lead deb yaratma, mijoz 'yana shundan olaman' yoki yangi buyurtmani aniq tasdiqlamaguncha lead_ready=false bo‘lsin."
+        " Agar conversation.fresh_session=true bo‘lsa, mijoz ertasi kuni yoki uzoq tanaffusdan keyin yozgan bo‘ladi: salomlashuvdan boshlagin, oldingi suhbatdagi savollarni yoki takliflarni mijoz o‘zi eslatmasa eslatma. recent_ordersni ham faqat mijoz o‘zi oldingi zakaz haqida so‘rasa ishlat."
         " Mijoz 'qanaqa tayyor gullar bor', 'katalog bormi', 'tayyor buketlar' desa rasm yuborishni so‘rama va har bir rasmni alohida tavsiflama. Catalog kontekstdagi barcha available gullarni nomi, turi, narxi, qoldiq soni bilan qisqa ro‘yxat qil. Oxirida 'Qaysi biri qiziq bo‘lsa, tanlang, rasmini ko‘rsataman' degan mazmunda bitta savol ber."
         " Mijoz katalog ro‘yxatidan birini tanlasa yoki story/post/reeldagi tayyor gulni olmoqchi bo‘lsa, catalog_items arrayga catalog id va quantity yoz. Bir nechta tayyor buket/savat olsa ham hammasini catalog_itemsga yoz."
         " Mijoz bir nechta tayyor katalog gullarni ko‘rib chiqqan bo‘lsa va oxirida aniq qaysini olishi noma'lum bo‘lsa, ism/telefon so‘rama. Avval 'Sizga qaysi biri yoqdi, qaysi guldan buyurtma qilamiz?' deb aniqlashtir."

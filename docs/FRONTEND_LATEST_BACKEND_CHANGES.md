@@ -105,6 +105,108 @@ Eventlar user permission va filialga qarab yuboriladi:
 - `lead.created` / `lead.updated` -> `crm` view permission;
 - `notification.created` -> `notifications` view permission.
 
+## Lead statuslari
+
+Lead statuslari endi backendda dynamic.
+
+Endpoint:
+
+```http
+GET /api/lead-statuses/
+POST /api/lead-statuses/
+PATCH /api/lead-statuses/{id}/
+DELETE /api/lead-statuses/{id}/
+```
+
+Fieldlar:
+
+```json
+{
+  "id": 1,
+  "key": "new",
+  "name_uz": "Yangi",
+  "name_ru": "Новый",
+  "color": "#2563eb",
+  "order": 10,
+  "is_active": true
+}
+```
+
+Default status keys:
+
+```text
+new
+qualified
+contacted
+won
+lost
+```
+
+`Lead.status` string bo‘lib qoladi. Lead response ichida `status_detail` ham keladi:
+
+```json
+{
+  "status": "new",
+  "status_detail": {
+    "key": "new",
+    "name_uz": "Yangi",
+    "color": "#2563eb"
+  }
+}
+```
+
+CRM kanban columnlarini `/api/lead-statuses/?is_active=true&ordering=order` orqali olish kerak.
+
+## Lead recall
+
+Leadga yuborish vaqti qo‘shildi:
+
+```json
+{
+  "delivery_at": "2026-07-21T18:00:00+05:00",
+  "recall_at": "2026-07-21T17:00:00+05:00",
+  "recall_sent_at": null
+}
+```
+
+`delivery_at` yuborilsa, `recall_at` bodyda kelmasa backend avtomatik `delivery_at - 1 hour` qiladi.
+
+Recall vaqti kelganda backend:
+
+- `Notification` yaratadi;
+- WS orqali `notification.created` yuboradi;
+- Telegram group chat id sozlangan bo‘lsa bot orqali groupga xabar yuboradi.
+
+Telegram group sozlamasi:
+
+```http
+GET/PATCH /api/integrations/
+```
+
+Field:
+
+```json
+{
+  "telegram_group_chat_id": "-1001234567890"
+}
+```
+
+Env fallback:
+
+```text
+TELEGRAM_GROUP_CHAT_ID=-1001234567890
+```
+
+## AI 24 soat reset
+
+Mijoz oxirgi xabardan 24 soatdan keyin yozsa, AI suhbatni yangi session deb ko‘radi:
+
+- salomlashuvdan boshlaydi;
+- oldingi savollarni o‘zi eslatmaydi;
+- oldingi lead/zakazlarni faqat mijoz o‘zi so‘rasa aytadi.
+
+AI contextda `recent_orders` bor, lekin faqat ma’lumot uchun ishlatiladi. Eski lead avtomatik yangi lead qilib yaratilmaydi.
+
 ## 1. AI javob qoidalari
 
 AI prompt backend tomonda kuchaytirildi:

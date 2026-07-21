@@ -22,9 +22,9 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
 
 
@@ -36,6 +36,17 @@ class LeadFilter(CreatedAtRangeFilter):
     class Meta:
         model = Lead
         fields = ["branch", "status", "arrangement_type", "assigned_to", "social_post", "created_at"]
+
+
+def schedule_lead_recall(lead):
+    if not lead.recall_at or lead.recall_sent_at or lead.status == "lost":
+        return
+    from .tasks import process_lead_recall
+    eta = lead.recall_at if lead.recall_at > timezone.now() else None
+    if eta:
+        process_lead_recall.apply_async(args=[lead.id], eta=eta)
+    else:
+        process_lead_recall.delay(lead.id)
 
 
 class StockMovementFilter(CreatedAtRangeFilter):
@@ -330,6 +341,16 @@ class CustomerViewSet(ScopedViewSet):
         return queryset.exclude(Q(name="") | Q(phone=""))
 
 
+class LeadStatusViewSet(ScopedViewSet):
+    permission_page = "crm"
+    write_roles = ["admin", "operator"]
+    queryset = LeadStatus.objects.all()
+    serializer_class = LeadStatusSerializer
+    filterset_fields = ["is_active"]
+    search_fields = ["key", "name_uz", "name_ru"]
+    ordering_fields = ["order", "created_at"]
+
+
 class LeadViewSet(ScopedViewSet):
     permission_page = "crm"
     write_roles = ["admin", "operator"]
@@ -348,6 +369,7 @@ class LeadViewSet(ScopedViewSet):
                     serializer.instance.refresh_from_db()
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
+            transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
 
     def perform_update(self, serializer):
         with transaction.atomic():
@@ -359,6 +381,7 @@ class LeadViewSet(ScopedViewSet):
                     serializer.instance.refresh_from_db()
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
+            transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
 
 
 class SocialPostViewSet(ScopedViewSet):
@@ -744,12 +767,13 @@ def mini_app_order_rows(customer):
     if not customer:
         return []
     rows = Lead.objects.filter(customer=customer).select_related("branch").order_by("-created_at")[:30]
+    statuses = {row.key: row.name_uz for row in LeadStatus.objects.filter(key__in=[lead.status for lead in rows])}
     return [{
         "id": row.id,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "status": row.status,
-        "status_label": row.get_status_display(),
+        "status_label": statuses.get(row.status, row.status),
         "source": row.source,
         "branch": BranchSerializer(row.branch).data,
         "arrangement_type": row.arrangement_type,
