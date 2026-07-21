@@ -8,6 +8,8 @@ def has_page_permission(user, page, control=False):
     role = getattr(getattr(user, "profile", None), "role", None)
     if role == "developer":
         return True
+    if page in PagePermission.DEVELOPER_ONLY_PAGES:
+        return False
     if not page:
         return True
     row = PagePermission.objects.filter(user=user, page=page).first()

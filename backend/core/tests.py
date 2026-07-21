@@ -1,3 +1,4 @@
+from decimal import Decimal
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -130,6 +131,33 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(message.metadata["attachments"][0]["kind"], "story")
         self.assertEqual(message.metadata["attachments"][0]["url"], "https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg")
 
+    def test_unknown_instagram_media_clears_previous_post_context(self):
+        old_post = SocialPost.objects.create(branch=self.branch, post_type="reel", media_id="old-pion", title_uz="Pion buket", title_ru="Pion", is_active=True)
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-user-2")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch, social_post=old_post)
+        payload = {
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig-user-2"},
+                    "recipient": {"id": "ig-business"},
+                    "message": {
+                        "mid": "mid-link-2",
+                        "text": "shu qancha",
+                        "attachments": [{
+                            "type": "share",
+                            "payload": {"url": "https://www.instagram.com/reel/UNKNOWN123/"},
+                        }],
+                    },
+                }],
+            }],
+        }
+        jobs = resolve_instagram_event(payload)
+        self.assertEqual(len(jobs), 1)
+        conversation.refresh_from_db()
+        message = Message.objects.get(instagram_message_id="mid-link-2")
+        self.assertIsNone(conversation.social_post)
+        self.assertIn("bazadagi story/post/reel katalogiga bog‘lanmagan", message.text)
+
     def test_telegram_voice_link_is_saved_in_chat_message(self):
         SocialPost.objects.create(branch=self.branch, post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
         IntegrationSettings.objects.update_or_create(pk=1, defaults={"telegram_bot_token": "test-token"})
@@ -206,6 +234,21 @@ class ApiTests(TestCase):
         developer_permissions = {row["page"]: row for row in permission_matrix(developer)}
         self.assertTrue(developer_permissions["catalog"]["can_view"])
         self.assertTrue(developer_permissions["catalog"]["can_control"])
+        admin_permissions = {row["page"]: row for row in permission_matrix(self.user)}
+        self.assertNotIn("ai_settings", admin_permissions)
+        self.assertNotIn("integrations", admin_permissions)
+        self.assertNotIn("audit", admin_permissions)
+
+    def test_admin_cannot_grant_developer_only_permissions(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        operator = User.objects.create_user("limited", password="password")
+        UserProfile.objects.create(user=operator, role="operator")
+        response = self.client.post("/api/permissions/", {"user": operator.id, "page": "ai_settings", "can_view": True, "can_control": True}, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post("/api/users/", {"username": "bad-user", "password": "password", "role": "operator", "permissions": [{"page": "audit", "can_view": True, "can_control": True}]}, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.get("/api/audit/")
+        self.assertEqual(response.status_code, 403)
 
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
@@ -313,3 +356,15 @@ class ApiTests(TestCase):
         self.assertEqual(self.batch.remaining_stems, 96)
         self.assertEqual(packaging.quantity, 1)
         self.assertEqual(Customer.objects.get(phone="+998901112233").leads.count(), 1)
+
+    def test_lead_move_keeps_kanban_position_between_two_leads(self):
+        customer = Customer.objects.create(branch=self.branch, name="Kanban", phone="+998901234567", instagram_user_id="kanban")
+        first = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="First", sort_order=Decimal("1000"))
+        moving = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Moving", sort_order=Decimal("2000"))
+        last = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Last", sort_order=Decimal("3000"))
+        response = self.client.post(f"/api/leads/{moving.id}/move/", {"status": "new", "before": first.id, "after": last.id}, format="json")
+        self.assertEqual(response.status_code, 200)
+        moving.refresh_from_db()
+        self.assertEqual(moving.sort_order, Decimal("2000.000000"))
+        ids = list(Lead.objects.filter(status="new").order_by("sort_order").values_list("id", flat=True))
+        self.assertEqual(ids, [first.id, moving.id, last.id])

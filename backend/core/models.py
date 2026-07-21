@@ -40,6 +40,7 @@ class UserProfile(TimeStampedModel):
 
 
 class PagePermission(TimeStampedModel):
+    DEVELOPER_ONLY_PAGES = ("ai_settings", "integrations", "audit")
     PAGE_CHOICES = [
         ("dashboard", "Dashboard"),
         ("inventory", "Sklad"),
@@ -326,9 +327,10 @@ class Lead(TimeStampedModel):
     source = models.CharField(max_length=30, default="instagram")
     details = models.JSONField(default=dict, blank=True)
     stock_deducted_at = models.DateTimeField(null=True, blank=True)
+    sort_order = models.DecimalField(max_digits=20, decimal_places=6, default=0, db_index=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["status", "sort_order", "-created_at", "id"]
 
 
 class LeadStockUsage(TimeStampedModel):

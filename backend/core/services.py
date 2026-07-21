@@ -610,6 +610,7 @@ def ai_reply(conversation):
         " 'Taxminan' so‘zini faqat mijoz gulni yangidan buket/savat qilib yeg‘dirayotganda yoki custom hisob-kitobda ishlat: 'Jami taxminan: ... so‘m'."
         " Gul variantini taklif qilganda dona narxini ham yoz: masalan 'Bizda bor Gortenziyalar:\\n• Premium Blue — moviy, 50 cm\\nDona narxi: 105 000 so‘m\\n10 dona jami taxminan: 1 050 000 so‘m'."
         " Agar mijoz story/post/reelni sent qilib yoki reply qilib 'shu', 'shundan kerak', 'narxi qancha' desa, 'Sizga qanday gul yoki buket kerak edi?' demagin. 'Bugungi tayyor variantlardan' deb boshlama. Story bo‘lsa 'Siz yozgan storydagi gul:', post bo‘lsa 'Siz yuborgan postdagi gul:', reel bo‘lsa 'Siz yuborgan reeldagi gul:' deb yoz."
+        " Agar mijoz yuborgan story/post/reel linki tizim izohida bazadan topilmadi deb kelsa yoki conversation.post bo‘sh bo‘lsa, oldingi post/reel/story yoki boshqa katalog gulini ishlatma. Javob ber: 'Bu yuborgan media bo‘yicha tizimda aniq ma'lumot topilmadi. Iltimos, qaysi gul ekanini yozib yuboring yoki ism-raqamingizni qoldiring, operatorimiz aniqlashtirib bog‘lanadi.'"
         " Agar conversation contextida post mavjud bo‘lsa va mijoz 'bo‘yi nechchi', 'narxi qancha', 'bormi', 'qoldimi', 'shu gul', 'shu buket' kabi noaniq savol bersa, albatta o‘sha post/story/reeldagi katalog gulini nazarda tutyapti deb qabul qil. Bunday holatda 'Qaysi gulni nazarda tutyapsiz?' deb so‘rama."
         " Mijoz story/post/reeldagi gul bo‘yini so‘rasa, catalog height_cm va compositiondagi gul bo‘yidan javob ber. Ma'lumot contextda bo‘lsa umumiy gul turini aniqlashtirishga qaytma."
         " Javobda arrangement_type enum qiymatlarini inglizcha yozma: 'bouquet' emas 'buket', 'basket' emas 'savat', 'stems' emas 'gulning o‘zi' deb yoz."
@@ -1032,6 +1033,11 @@ def resolve_instagram_event(payload):
                 conversation.social_post = post
                 conversation.branch = post.branch
                 conversation.save(update_fields=["social_post", "branch", "updated_at"])
+            elif (story_attachment or media_attachment or message_metadata.get("attachments")) and not post and conversation.social_post_id:
+                conversation.social_post = None
+                conversation.save(update_fields=["social_post", "updated_at"])
+            if (story_attachment or media_attachment or message_metadata.get("attachments")) and not post:
+                message_text = append_attachment_links(f"{message_text}\nTizim izohi: yuborilgan Instagram media bazadagi story/post/reel katalogiga bog‘lanmagan.", [])
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
             if saved_message:
                 results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})

@@ -2,7 +2,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
 from django.db import transaction
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce
 from django.utils.dateparse import parse_date, parse_datetime
@@ -24,7 +24,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
 
 
@@ -47,6 +47,29 @@ def schedule_lead_recall(lead):
         process_lead_recall.apply_async(args=[lead.id], eta=eta)
     else:
         process_lead_recall.delay(lead.id)
+
+
+def next_lead_sort_order(branch, status_value):
+    current = Lead.objects.filter(branch=branch, status=status_value).aggregate(value=Max("sort_order"))["value"] or Decimal("0")
+    return current + Decimal("1000")
+
+
+def lead_sort_order_between(before, after, branch, status_value):
+    if before and before.branch_id != branch.id:
+        raise serializers.ValidationError({"before": "Lead boshqa filialga tegishli"})
+    if after and after.branch_id != branch.id:
+        raise serializers.ValidationError({"after": "Lead boshqa filialga tegishli"})
+    if before and before.status != status_value:
+        raise serializers.ValidationError({"before": "Lead statusi yangi column bilan mos emas"})
+    if after and after.status != status_value:
+        raise serializers.ValidationError({"after": "Lead statusi yangi column bilan mos emas"})
+    if before and after:
+        return (before.sort_order + after.sort_order) / Decimal("2")
+    if before:
+        return before.sort_order + Decimal("1000")
+    if after:
+        return after.sort_order - Decimal("1000")
+    return next_lead_sort_order(branch, status_value)
 
 
 class StockMovementFilter(CreatedAtRangeFilter):
@@ -358,11 +381,17 @@ class LeadViewSet(ScopedViewSet):
     serializer_class = LeadSerializer
     filterset_class = LeadFilter
     search_fields = ["customer__name", "customer__phone", "request_uz", "request_ru"]
-    ordering_fields = ["created_at", "estimated_price"]
+    ordering_fields = ["sort_order", "created_at", "estimated_price"]
 
     def perform_create(self, serializer):
         with transaction.atomic():
-            lead = serializer.save()
+            extra = {}
+            if "sort_order" not in serializer.validated_data:
+                branch = serializer.validated_data.get("branch")
+                status_value = serializer.validated_data.get("status", "new")
+                if branch:
+                    extra["sort_order"] = next_lead_sort_order(branch, status_value)
+            lead = serializer.save(**extra)
             if lead.status == "won":
                 try:
                     deduct_lead_stock(lead, self.request.user)
@@ -370,6 +399,34 @@ class LeadViewSet(ScopedViewSet):
                 except ValueError as exc:
                     raise serializers.ValidationError({"detail": str(exc)})
             transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
+
+    @extend_schema(request=LeadMoveSerializer, responses=LeadSerializer)
+    @action(detail=True, methods=["post"])
+    def move(self, request, pk=None):
+        lead = self.get_object()
+        serializer = LeadMoveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        status_value = serializer.validated_data.get("status") or lead.status
+        if not LeadStatus.objects.filter(key=status_value).exists():
+            return Response({"status": "Bunday lead statusi mavjud emas"}, status=status.HTTP_400_BAD_REQUEST)
+        before = serializer.validated_data.get("before")
+        after = serializer.validated_data.get("after")
+        sort_order = serializer.validated_data.get("sort_order")
+        with transaction.atomic():
+            lead = Lead.objects.select_for_update().get(pk=lead.pk)
+            before_status = lead.status
+            if sort_order is None:
+                sort_order = lead_sort_order_between(before, after, lead.branch, status_value)
+            lead.status = status_value
+            lead.sort_order = sort_order
+            lead.save(update_fields=["status", "sort_order", "updated_at"])
+            if lead.status == "won" and before_status != "won":
+                try:
+                    deduct_lead_stock(lead, self.request.user)
+                    lead.refresh_from_db()
+                except ValueError as exc:
+                    raise serializers.ValidationError({"detail": str(exc)})
+        return Response(LeadSerializer(lead, context={"request": request}).data)
 
     def perform_update(self, serializer):
         with transaction.atomic():
@@ -499,6 +556,13 @@ class PagePermissionViewSet(viewsets.ModelViewSet):
     queryset = PagePermission.objects.select_related("user").all()
     serializer_class = PagePermissionSerializer
     filterset_class = PagePermissionFilter
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(getattr(self.request.user, "profile", None), "role", None)
+        if role != "developer":
+            queryset = queryset.exclude(page__in=PagePermission.DEVELOPER_ONLY_PAGES).exclude(user__profile__role="developer")
+        return queryset
 
 
 class InstagramWebhookEventViewSet(viewsets.ReadOnlyModelViewSet):

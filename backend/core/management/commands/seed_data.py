@@ -43,8 +43,10 @@ class Command(BaseCommand):
         profile.branches.set([central, west])
         developer_profile.branches.set([central, west])
         operator_profile.branches.set([central])
+        PagePermission.objects.filter(user=admin, page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
         for page, _ in PagePermission.PAGE_CHOICES:
-            PagePermission.objects.update_or_create(user=admin, page=page, defaults={"can_view": True, "can_control": True})
+            if page not in PagePermission.DEVELOPER_ONLY_PAGES:
+                PagePermission.objects.update_or_create(user=admin, page=page, defaults={"can_view": True, "can_control": True})
             PagePermission.objects.update_or_create(user=developer, page=page, defaults={"can_view": True, "can_control": True})
         operator_permissions = {
             "dashboard": (True, False),
@@ -56,6 +58,7 @@ class Command(BaseCommand):
         }
         for page, values in operator_permissions.items():
             PagePermission.objects.update_or_create(user=operator, page=page, defaults={"can_view": values[0], "can_control": values[1]})
+        PagePermission.objects.filter(user=operator, page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
 
         flowers = [
             ("atirgul", "Atirgul", "Роза", 1, 12, "https://images.unsplash.com/photo-1518895949257-7621c3c786d7?auto=format&fit=crop&w=900&q=85"),

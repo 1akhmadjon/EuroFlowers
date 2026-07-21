@@ -40,6 +40,9 @@ class Command(BaseCommand):
         branches = list(Branch.objects.filter(is_active=True))
         if branches:
             profile.branches.set(branches)
+        PagePermission.objects.filter(user=user, page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
         for page, _ in PagePermission.PAGE_CHOICES:
+            if page in PagePermission.DEVELOPER_ONLY_PAGES:
+                continue
             PagePermission.objects.update_or_create(user=user, page=page, defaults={"can_view": True, "can_control": True})
         self.stdout.write(self.style.SUCCESS(f"Admin user ready: {username}"))

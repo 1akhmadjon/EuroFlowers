@@ -28,6 +28,18 @@ class PagePermissionSerializer(serializers.ModelSerializer):
         model = PagePermission
         fields = ["id", "user", "page", "label", "can_view", "can_control", "created_at", "updated_at"]
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        requester_role = getattr(getattr(getattr(request, "user", None), "profile", None), "role", None)
+        page = attrs.get("page") or getattr(self.instance, "page", "")
+        if requester_role != "developer" and page in PagePermission.DEVELOPER_ONLY_PAGES:
+            raise serializers.ValidationError({"page": "Bu permission faqat developer uchun"})
+        user = attrs.get("user") or getattr(self.instance, "user", None)
+        target_role = getattr(getattr(user, "profile", None), "role", None)
+        if target_role != "developer" and page in PagePermission.DEVELOPER_ONLY_PAGES:
+            raise serializers.ValidationError({"page": "Bu permission faqat developer userga beriladi"})
+        return attrs
+
 
 class PagePermissionInputSerializer(serializers.Serializer):
     page = serializers.ChoiceField(choices=PagePermission.PAGE_CHOICES)
@@ -38,9 +50,11 @@ class PagePermissionInputSerializer(serializers.Serializer):
 def permission_matrix(user) -> list[dict[str, Any]]:
     rows = {row.page: row for row in user.page_permissions.all()} if getattr(user, "id", None) else {}
     data = []
+    role = getattr(getattr(user, "profile", None), "role", None)
     for page, label in PagePermission.PAGE_CHOICES:
+        if role != "developer" and page in PagePermission.DEVELOPER_ONLY_PAGES:
+            continue
         row = rows.get(page)
-        role = getattr(getattr(user, "profile", None), "role", None)
         default_access = bool(user.is_superuser and not row)
         can_view = True if role == "developer" else bool(row.can_view if row else default_access)
         can_control = True if role == "developer" else bool(row.can_control if row else default_access)
@@ -76,14 +90,34 @@ class UserWriteSerializer(serializers.ModelSerializer):
     def get_permission_matrix(self, obj) -> list[dict[str, Any]]:
         return permission_matrix(obj)
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        requester_role = getattr(getattr(getattr(request, "user", None), "profile", None), "role", None)
+        permissions = attrs.get("permissions") or []
+        if requester_role != "developer" and any(row["page"] in PagePermission.DEVELOPER_ONLY_PAGES for row in permissions):
+            raise serializers.ValidationError({"permissions": "AI settings, integrations va audit log permissionlari faqat developer tomonidan beriladi"})
+        return attrs
+
     def save_permissions(self, user, permissions):
         if permissions is None:
             return
+        request = self.context.get("request")
+        requester_role = getattr(getattr(getattr(request, "user", None), "profile", None), "role", None)
+        target_role = getattr(getattr(user, "profile", None), "role", None)
+        if requester_role != "developer" and any(row["page"] in PagePermission.DEVELOPER_ONLY_PAGES for row in permissions):
+            raise serializers.ValidationError({"permissions": "AI settings, integrations va audit log permissionlari faqat developer tomonidan beriladi"})
         seen = set()
         for row in permissions:
+            if target_role != "developer" and row["page"] in PagePermission.DEVELOPER_ONLY_PAGES:
+                continue
             seen.add(row["page"])
             PagePermission.objects.update_or_create(user=user, page=row["page"], defaults={"can_view": row["can_view"] or row["can_control"], "can_control": row["can_control"]})
-        PagePermission.objects.filter(user=user).exclude(page__in=seen).delete()
+        queryset = PagePermission.objects.filter(user=user).exclude(page__in=seen)
+        if target_role == "developer":
+            queryset.delete()
+        else:
+            queryset.exclude(page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
+            PagePermission.objects.filter(user=user, page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
 
     def create(self, validated_data):
         role = validated_data.pop("role", "operator")
@@ -362,6 +396,13 @@ class LeadPackagingUsageInputSerializer(serializers.Serializer):
 class LeadCatalogUsageInputSerializer(serializers.Serializer):
     catalog_item = serializers.PrimaryKeyRelatedField(queryset=CatalogItem.objects.all())
     quantity = serializers.IntegerField(min_value=1, default=1)
+
+
+class LeadMoveSerializer(serializers.Serializer):
+    status = serializers.CharField(required=False, max_length=40)
+    before = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all(), required=False, allow_null=True)
+    after = serializers.PrimaryKeyRelatedField(queryset=Lead.objects.all(), required=False, allow_null=True)
+    sort_order = serializers.DecimalField(max_digits=20, decimal_places=6, required=False)
 
 
 class LeadSerializer(serializers.ModelSerializer):
