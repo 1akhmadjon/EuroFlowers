@@ -608,7 +608,7 @@ def link_story_post_from_event(webhook_event, branch=None):
     story_id = webhook_event.story_id or webhook_event.media_id
     if not story_id:
         return None
-    exact = SocialPost.objects.filter(Q(media_id=story_id) | Q(webhook_story_id=story_id)).first()
+    exact = SocialPost.objects.filter(Q(media_id=story_id) | Q(webhook_story_id=story_id), is_active=True).first()
     if exact:
         updates = []
         if not exact.webhook_story_id:
@@ -639,12 +639,12 @@ def link_media_post_from_event(webhook_event):
         return None
     media_id = webhook_event.media_id
     if media_id:
-        exact = SocialPost.objects.filter(media_id=media_id).first()
+        exact = SocialPost.objects.filter(media_id=media_id, is_active=True).first()
         if exact:
             return exact
         media = find_media_by_id(media_id)
         if media:
-            exact = SocialPost.objects.filter(permalink=media.get("permalink", "")).first()
+            exact = SocialPost.objects.filter(permalink=media.get("permalink", ""), is_active=True).first()
             if exact:
                 if exact.media_id != media_id:
                     exact.media_id = media_id
@@ -652,7 +652,7 @@ def link_media_post_from_event(webhook_event):
                 return exact
     if webhook_event.story_url:
         normalized = normalize_instagram_permalink(webhook_event.story_url)
-        exact = SocialPost.objects.filter(permalink__startswith=normalized).first()
+        exact = SocialPost.objects.filter(permalink__startswith=normalized, is_active=True).first()
         if exact and media_id and exact.media_id != media_id and not SocialPost.objects.filter(media_id=media_id).exclude(pk=exact.pk).exists():
             exact.media_id = media_id
             exact.save(update_fields=["media_id", "updated_at"])
@@ -683,7 +683,7 @@ def resolve_instagram_event(payload):
                 continue
             referral = event.get("referral") or message.get("referral") or {}
             media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
-            post = SocialPost.objects.filter(Q(media_id=media_id) | Q(webhook_story_id=media_id)).first() if media_id else None
+            post = SocialPost.objects.filter(Q(media_id=media_id) | Q(webhook_story_id=media_id), is_active=True).first() if media_id else None
             if not post:
                 post = link_story_post_from_event(webhook_event, branch)
             if not post:
