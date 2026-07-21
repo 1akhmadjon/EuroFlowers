@@ -442,11 +442,20 @@ def telegram_sender_action(chat_id, action="typing"):
     return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
+def catalog_composition_summary(item):
+    rows = []
+    for row in item.composition.select_related("stock_batch__variant__flower"):
+        batch = row.stock_batch
+        name = f"{batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz}".strip()
+        rows.append({"name_uz": name, "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)})
+    return rows
+
+
 def ai_reply(conversation):
     customer = conversation.customer
     branch = conversation.branch
     stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower")
-    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post")[:30]
+    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower")[:30]
     baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0)
     history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in conversation.messages.exclude(sender="system").order_by("created_at")[:60]]
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
@@ -476,6 +485,7 @@ def ai_reply(conversation):
             "price": str(row.price),
             "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
             "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
+            "composition": catalog_composition_summary(row),
         } for row in catalog],
         "baskets": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "min": row.capacity_min_stems, "max": row.capacity_max_stems, "price": str(row.sale_price)} for row in baskets],
         "post": None,
@@ -493,7 +503,7 @@ def ai_reply(conversation):
     }
     if conversation.social_post:
         post = conversation.social_post
-        post_catalog = CatalogItem.objects.filter(social_post=post, status="available")
+        post_catalog = CatalogItem.objects.filter(social_post=post, status="available").prefetch_related("composition__stock_batch__variant__flower")
         context["post"] = {
             "type": post.post_type,
             "title_uz": post.title_uz,
@@ -501,7 +511,7 @@ def ai_reply(conversation):
             "description_uz": post.description_uz,
             "description_ru": post.description_ru,
             "price": str(post.price or ""),
-            "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0)} for row in post_catalog],
+            "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0), "composition": catalog_composition_summary(row)} for row in post_catalog],
         }
     sales_rules = (
         " Qat'iy qoida: mijoz o‘zbek tilida, hatto kirill yozuvida yozsa ham javobni o‘zbek lotinida yoz, ruscha so‘z aralashtirma. Faqat mijoz aniq rus tilida yozsa rus tilida javob ber."
@@ -510,7 +520,9 @@ def ai_reply(conversation):
         " Dona narxida 'taxminan' so‘zini ishlatma: 'Dona narxi: 105 000 so‘m' deb yoz. Mijoz so‘ragan miqdor yoki buket/savat jami narxida 'Jami taxminan: ... so‘m' deb yozish mumkin. 'taxminan' so‘zini bitta javobda ko‘pi bilan 1 marta ishlat."
         " Gul variantini taklif qilganda dona narxini ham yoz: masalan 'Bizda bor Gortenziyalar:\\n• Premium Blue — moviy, 50 cm\\nDona narxi: 105 000 so‘m\\n10 dona jami taxminan: 1 050 000 so‘m'."
         " Agar mijoz story/post/reelni sent qilib yoki reply qilib 'shu', 'shundan kerak', 'narxi qancha' desa, 'Sizga qanday gul yoki buket kerak edi?' demagin. 'Bugungi tayyor variantlardan' deb boshlama. Story bo‘lsa 'Siz yozgan storydagi gul:', post bo‘lsa 'Siz yuborgan postdagi gul:', reel bo‘lsa 'Siz yuborgan reeldagi gul:' deb yoz."
+        " 'Qabul qilamizmi?', 'davom ettiraymi?' kabi g‘alati yoki noaniq savollar yozma. Tayyor buket/savatni taklif qilganda oxirida tabiiy savol ber: 'Shu buketdan buyurtma qilmoqchimisiz?' yoki 'Shu savatdan nechta kerak bo‘ladi?'"
         " Story/post/reel/katalogdagi tayyor gul haqida javob berganda katalog item ichidagi nechta dona gul ketganini yoki post flower_countni mijoz so‘ramasa yozma. Faqat nomi, buket/savat turi, narxi va katalogda nechta borligini ayt."
+        " Agar mijoz tayyor katalog buketiga nechta gul ketganini so‘rasa, catalog composition ma'lumotidan javob ber. Composition mavjud bo‘lsa 'katalogda ko‘rsatilmagan' demagin."
         " Mijoz 'qanaqa tayyor gullar bor', 'katalog bormi', 'tayyor buketlar' desa rasm yuborishni so‘rama va har bir rasmni alohida tavsiflama. Catalog kontekstdagi barcha available gullarni nomi, turi, narxi, qoldiq soni bilan qisqa ro‘yxat qil. Oxirida 'Qaysi biri qiziq bo‘lsa, tanlang, rasmini ko‘rsataman' degan mazmunda bitta savol ber."
         " Mijoz katalog ro‘yxatidan birini tanlasa yoki story/post/reeldagi tayyor gulni olmoqchi bo‘lsa, catalog_items arrayga catalog id va quantity yoz. Bir nechta tayyor buket/savat olsa ham hammasini catalog_itemsga yoz."
         " Mijoz bir nechta tayyor katalog gullarni ko‘rib chiqqan bo‘lsa va oxirida aniq qaysini olishi noma'lum bo‘lsa, ism/telefon so‘rama. Avval 'Sizga qaysi biri yoqdi, qaysi guldan buyurtma qilamiz?' deb aniqlashtir."
