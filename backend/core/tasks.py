@@ -57,7 +57,7 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         if not reply:
             return None
         try:
-            send_instagram_context_image(recipient_id, reply.conversation)
+            send_instagram_context_image(recipient_id, reply.conversation, reply)
         except Exception as exc:
             print(f"INSTAGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} recipient={recipient_id} error={exc}", flush=True)
         for text in split_location_reply(reply.text):

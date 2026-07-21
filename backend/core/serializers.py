@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -358,13 +358,20 @@ class LeadPackagingUsageInputSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, default=1)
 
 
+class LeadCatalogUsageInputSerializer(serializers.Serializer):
+    catalog_item = serializers.PrimaryKeyRelatedField(queryset=CatalogItem.objects.all())
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+
 class LeadSerializer(serializers.ModelSerializer):
     customer_detail = CustomerSerializer(source="customer", read_only=True)
     branch_detail = BranchSerializer(source="branch", read_only=True)
     stock_usage = serializers.SerializerMethodField()
     packaging_usage = serializers.SerializerMethodField()
+    catalog_usage = serializers.SerializerMethodField()
     stock_usage_input = CatalogCompositionSerializer(many=True, write_only=True, required=False)
     packaging_usage_input = LeadPackagingUsageInputSerializer(many=True, write_only=True, required=False)
+    catalog_usage_input = LeadCatalogUsageInputSerializer(many=True, write_only=True, required=False)
     customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
     customer_instagram_user_id = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=100)
@@ -392,6 +399,15 @@ class LeadSerializer(serializers.ModelSerializer):
             "packaging_detail": PackagingSerializer(row.packaging).data,
             "quantity": row.quantity,
         } for row in obj.packaging_usage.select_related("packaging").all()]
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_catalog_usage(self, obj):
+        return [{
+            "id": row.id,
+            "catalog_item": row.catalog_item_id,
+            "catalog_detail": CatalogItemSerializer(row.catalog_item).data,
+            "quantity": row.quantity,
+        } for row in obj.catalog_usage.select_related("catalog_item__branch", "catalog_item__social_post").prefetch_related("catalog_item__composition").all()]
 
     def validate(self, attrs):
         customer = attrs.get("customer") or getattr(self.instance, "customer", None)
@@ -427,32 +443,37 @@ class LeadSerializer(serializers.ModelSerializer):
         customer = Customer.objects.create(name=name, phone=normalized, branch=branch, language="uz", instagram_user_id=external)
         return customer
 
-    def _save_usage(self, lead, stock_rows=None, packaging_rows=None):
+    def _save_usage(self, lead, stock_rows=None, packaging_rows=None, catalog_rows=None):
         if stock_rows is not None:
             lead.stock_usage.all().delete()
             LeadStockUsage.objects.bulk_create([LeadStockUsage(lead=lead, stock_batch=row["stock_batch"], quantity_stems=row["quantity_stems"], quantity_bunches=row.get("quantity_bunches") or 0) for row in stock_rows])
         if packaging_rows is not None:
             lead.packaging_usage.all().delete()
             LeadPackagingUsage.objects.bulk_create([LeadPackagingUsage(lead=lead, packaging=row["packaging"], quantity=row.get("quantity", 1)) for row in packaging_rows])
+        if catalog_rows is not None:
+            lead.catalog_usage.all().delete()
+            LeadCatalogUsage.objects.bulk_create([LeadCatalogUsage(lead=lead, catalog_item=row["catalog_item"], quantity=row.get("quantity", 1)) for row in catalog_rows])
 
     def create(self, validated_data):
         stock_rows = validated_data.pop("stock_usage_input", None)
         packaging_rows = validated_data.pop("packaging_usage_input", None)
+        catalog_rows = validated_data.pop("catalog_usage_input", None)
         customer = self._customer_from_attrs(validated_data)
         lead = Lead.objects.create(customer=customer, **validated_data)
-        self._save_usage(lead, stock_rows, packaging_rows)
+        self._save_usage(lead, stock_rows, packaging_rows, catalog_rows)
         return lead
 
     def update(self, instance, validated_data):
         stock_rows = validated_data.pop("stock_usage_input", None)
         packaging_rows = validated_data.pop("packaging_usage_input", None)
+        catalog_rows = validated_data.pop("catalog_usage_input", None)
         validated_data.pop("customer_name", None)
         validated_data.pop("customer_phone", None)
         validated_data.pop("customer_instagram_user_id", None)
         for key, value in validated_data.items():
             setattr(instance, key, value)
         instance.save()
-        self._save_usage(instance, stock_rows, packaging_rows)
+        self._save_usage(instance, stock_rows, packaging_rows, catalog_rows)
         return instance
 
 

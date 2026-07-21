@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
 
 
 def normalize_instagram_permalink(value):
@@ -214,11 +214,52 @@ def deduct_lead_stock(lead, user):
             return lead
         stock_rows = list(lead.stock_usage.select_related("stock_batch").select_for_update())
         packaging_rows = list(lead.packaging_usage.select_related("packaging").select_for_update())
+        catalog_rows = list(lead.catalog_usage.select_related("catalog_item").select_for_update())
+        catalog_quantities = {}
+        for row in catalog_rows:
+            catalog_quantities[row.catalog_item_id] = catalog_quantities.get(row.catalog_item_id, 0) + row.quantity
+        catalog_composition_rows = []
+        catalog_shortages = []
+        catalog_items = {}
+        for catalog_item_id, quantity in catalog_quantities.items():
+            item = CatalogItem.objects.select_for_update().get(pk=catalog_item_id)
+            catalog_items[catalog_item_id] = item
+            if item.quantity_sold + quantity > item.quantity_total:
+                catalog_shortages.append(f"{item.name_uz}: katalogda {item.quantity_total - item.quantity_sold} ta qoldi")
+                continue
+            for composition in item.composition.select_related("stock_batch").select_for_update():
+                needed = composition.quantity_stems * quantity
+                if composition.stock_batch.remaining_stems < needed:
+                    catalog_shortages.append(f"{item.name_uz} / {composition.stock_batch.batch_number}: kerak {needed}, bor {composition.stock_batch.remaining_stems}")
+                catalog_composition_rows.append((quantity, item, composition, needed, composition.quantity_bunches * quantity))
         stock_shortages = [row for row in stock_rows if row.stock_batch.remaining_stems < row.quantity_stems]
         packaging_shortages = [row for row in packaging_rows if row.packaging.quantity < row.quantity]
-        if stock_shortages or packaging_shortages:
-            parts = [row.stock_batch.batch_number for row in stock_shortages] + [row.packaging.name_uz for row in packaging_shortages]
+        if stock_shortages or packaging_shortages or catalog_shortages:
+            parts = [row.stock_batch.batch_number for row in stock_shortages] + [row.packaging.name_uz for row in packaging_shortages] + catalog_shortages
             raise ValueError("Lead uchun yetarli sklad qoldig‘i yo‘q: " + ", ".join(parts))
+        for quantity, item, composition, stems, bunches in catalog_composition_rows:
+            batch = composition.stock_batch
+            batch.remaining_stems -= stems
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            StockMovement.objects.create(
+                batch=batch,
+                movement_type="out",
+                quantity_stems=-stems,
+                quantity_bunches=-bunches,
+                reference_type="lead",
+                reference_id=lead.id,
+                reason=f"Lead #{lead.id}: {lead.customer} / {item.name_uz}: {quantity} ta",
+                performed_by=user,
+            )
+        for catalog_item_id, quantity in catalog_quantities.items():
+            item = catalog_items[catalog_item_id]
+            item.quantity_sold += quantity
+            item.quantity_stock_deducted += quantity
+            if item.quantity_sold >= item.quantity_total:
+                item.status = "sold"
+                item.sold_at = timezone.now()
+            item.stock_deducted_at = timezone.now()
+            item.save(update_fields=["quantity_sold", "quantity_stock_deducted", "status", "sold_at", "stock_deducted_at", "updated_at"])
         for row in stock_rows:
             batch = row.stock_batch
             batch.remaining_stems -= row.quantity_stems
@@ -248,7 +289,7 @@ def deduct_lead_stock(lead, user):
             )
         lead.stock_deducted_at = timezone.now()
         lead.save(update_fields=["stock_deducted_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="lead_stock_deducted", entity_type="Lead", entity_id=str(lead.id), after={"stock_rows": len(stock_rows), "packaging_rows": len(packaging_rows)})
+        AuditLog.objects.create(user=user, action="lead_stock_deducted", entity_type="Lead", entity_id=str(lead.id), after={"stock_rows": len(stock_rows), "packaging_rows": len(packaging_rows), "catalog_rows": len(catalog_rows)})
     return lead
 
 
@@ -337,7 +378,14 @@ def instagram_send_image(recipient_id, image_url):
     return response.json()
 
 
-def instagram_catalog_image_for_conversation(conversation):
+def instagram_catalog_image_for_conversation(conversation, reply=None):
+    catalog_ids = []
+    if reply and reply.metadata:
+        catalog_ids = [row.get("catalog_id") for row in reply.metadata.get("catalog_items", []) if row.get("catalog_id")]
+    if catalog_ids:
+        catalog = CatalogItem.objects.filter(id__in=catalog_ids, status="available").exclude(image_url="").order_by("id").first()
+        if catalog and catalog.image_url.startswith("https://"):
+            return {"source": f"catalog:{catalog.id}", "image_url": catalog.image_url}
     if not conversation.social_post_id:
         return None
     catalog = CatalogItem.objects.filter(social_post=conversation.social_post, status="available").exclude(image_url="").order_by("-created_at").first()
@@ -348,8 +396,8 @@ def instagram_catalog_image_for_conversation(conversation):
     return {"source": source, "image_url": image_url}
 
 
-def send_instagram_context_image(recipient_id, conversation):
-    image = instagram_catalog_image_for_conversation(conversation)
+def send_instagram_context_image(recipient_id, conversation, reply=None):
+    image = instagram_catalog_image_for_conversation(conversation, reply)
     if not image:
         return None
     marker = f"instagram_image_sent:{image['source']}:{image['image_url']}"
@@ -398,7 +446,7 @@ def ai_reply(conversation):
     customer = conversation.customer
     branch = conversation.branch
     stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower")
-    catalog = CatalogItem.objects.filter(branch=branch, status="available")[:30]
+    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post")[:30]
     baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0)
     history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in conversation.messages.exclude(sender="system").order_by("created_at")[:60]]
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
@@ -420,7 +468,15 @@ def ai_reply(conversation):
             "price_per_stem": str(row.sale_price_per_stem),
             "price_per_bunch": str(row.sale_price_per_bunch),
         } for row in stock],
-        "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price)} for row in catalog],
+        "catalog": [{
+            "id": row.id,
+            "name_uz": row.name_uz,
+            "name_ru": row.name_ru,
+            "type": row.arrangement_type,
+            "price": str(row.price),
+            "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
+            "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
+        } for row in catalog],
         "baskets": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "min": row.capacity_min_stems, "max": row.capacity_max_stems, "price": str(row.sale_price)} for row in baskets],
         "post": None,
         "rules": {
@@ -437,20 +493,35 @@ def ai_reply(conversation):
     }
     if conversation.social_post:
         post = conversation.social_post
-        context["post"] = {"title_uz": post.title_uz, "title_ru": post.title_ru, "description_uz": post.description_uz, "description_ru": post.description_ru, "price": str(post.price or ""), "flower_count": post.flower_count}
+        post_catalog = CatalogItem.objects.filter(social_post=post, status="available")
+        context["post"] = {
+            "type": post.post_type,
+            "title_uz": post.title_uz,
+            "title_ru": post.title_ru,
+            "description_uz": post.description_uz,
+            "description_ru": post.description_ru,
+            "price": str(post.price or ""),
+            "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0)} for row in post_catalog],
+        }
     sales_rules = (
         " Qat'iy qoida: mijoz o‘zbek tilida, hatto kirill yozuvida yozsa ham javobni o‘zbek lotinida yoz, ruscha so‘z aralashtirma. Faqat mijoz aniq rus tilida yozsa rus tilida javob ber."
         " Format qoidasi: javobda hech bir qatorni probel bilan boshlama. Bullet ishlatsang har qator to‘g‘ridan-to‘g‘ri '•' bilan boshlansin. '  Narx:' kabi oldida space bor qator yozma. Instagram uchun text plain bo‘lsin, markdown ishlatma."
         " Gul variantlarini taklif qilganda sarlavha bilan yoz: masalan 'Bizda bor Gortenziyalar:' yoki 'Hozir mavjud atirgullar:'. Keyin variantlarni bullet bilan ber."
         " Dona narxida 'taxminan' so‘zini ishlatma: 'Dona narxi: 105 000 so‘m' deb yoz. Mijoz so‘ragan miqdor yoki buket/savat jami narxida 'Jami taxminan: ... so‘m' deb yozish mumkin. 'taxminan' so‘zini bitta javobda ko‘pi bilan 1 marta ishlat."
         " Gul variantini taklif qilganda dona narxini ham yoz: masalan 'Bizda bor Gortenziyalar:\\n• Premium Blue — moviy, 50 cm\\nDona narxi: 105 000 so‘m\\n10 dona jami taxminan: 1 050 000 so‘m'."
+        " Agar mijoz story/post/reelni sent qilib yoki reply qilib 'shu', 'shundan kerak', 'narxi qancha' desa, 'Sizga qanday gul yoki buket kerak edi?' demagin. 'Bugungi tayyor variantlardan' deb boshlama. Story bo‘lsa 'Siz yozgan storydagi gul:', post bo‘lsa 'Siz yuborgan postdagi gul:', reel bo‘lsa 'Siz yuborgan reeldagi gul:' deb yoz."
+        " Story/post/reel/katalogdagi tayyor gul haqida javob berganda katalog item ichidagi nechta dona gul ketganini yoki post flower_countni mijoz so‘ramasa yozma. Faqat nomi, buket/savat turi, narxi va katalogda nechta borligini ayt."
+        " Mijoz 'qanaqa tayyor gullar bor', 'katalog bormi', 'tayyor buketlar' desa rasm yuborishni so‘rama va har bir rasmni alohida tavsiflama. Catalog kontekstdagi barcha available gullarni nomi, turi, narxi, qoldiq soni bilan qisqa ro‘yxat qil. Oxirida 'Qaysi biri qiziq bo‘lsa, tanlang, rasmini ko‘rsataman' degan mazmunda bitta savol ber."
+        " Mijoz katalog ro‘yxatidan birini tanlasa yoki story/post/reeldagi tayyor gulni olmoqchi bo‘lsa, catalog_items arrayga catalog id va quantity yoz. Bir nechta tayyor buket/savat olsa ham hammasini catalog_itemsga yoz."
+        " Mijoz bir nechta tayyor katalog gullarni ko‘rib chiqqan bo‘lsa va oxirida aniq qaysini olishi noma'lum bo‘lsa, ism/telefon so‘rama. Avval 'Sizga qaysi biri yoqdi, qaysi guldan buyurtma qilamiz?' deb aniqlashtir."
+        " Mijoz custom yig‘dirsa, stock_items arrayga batch_id, quantity_stems va quantity_bunches yoz. Bir nechta buket/savat/gul bo‘lsa lead_request ichida har birining soni va tarkibi alohida aniq yozilsin."
         " Mijoz hali 'olaman', 'rasmiylashtiring', 'zakaz qilaman', 'shu kerak' demagan bo‘lsa ism yoki telefon so‘rama va lead_ready=false qaytar. Avval ehtiyoj turini aniqlashtir: 'Sizga buket qilib beraylikmi, savatga yig‘amizmi yoki gulning o‘zini olmoqchimisiz?' kabi bitta chiroyli savol ber."
         " CRM lead yaratishda arrangement_type aniq bo‘lsin: buket bo‘lsa bouquet, savat bo‘lsa basket, gulning o‘zi/donalab bo‘lsa stems, tayyor katalog guli bo‘lsa catalog. Tur aniq bo‘lmasa lead yaratma."
         " Mijoz buket yoki savat tanlasa, javobda florist xizmatini alohida ayt: 'Florist xizmati 50 000 so‘mdan boshlanadi, gul hajmi va bezagiga qarab o‘zgaradi.'"
         " Story, reel, post yoki katalogdagi tayyor buket/kompozitsiya haqida so‘ralsa florist xizmatini alohida aytma va narxga qo‘shma, chunki ular tayyor yasalgan sotuvdagi gullar."
         " Lead yaratish uchun JSON estimated_price qiymatida florist xizmatini alohida qo‘shib yuborma; tizim operator sotildi qilganda florist_fee maydonida yuritadi."
     )
-    instructions = ai_settings.system_prompt + sales_rules + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean."
+    instructions = ai_settings.system_prompt + sales_rules + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean, catalog_items array, stock_items array."
     api_key = openai_api_key()
     if not api_key:
         return {"reply": "Hozir operatorimiz sizga yordam beradi. Ismingiz va telefon raqamingizni qoldiring, iltimos.", "detected_language": customer.language, "lead_ready": False, "handoff": True}
@@ -470,13 +541,18 @@ def ai_reply(conversation):
                 "lead_request": {"type": ["string", "null"]},
                 "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
                 "estimated_price": {"type": ["number", "null"]},
-                "handoff": {"type": "boolean"}
+                "handoff": {"type": "boolean"},
+                "catalog_items": {"type": "array", "items": {"type": "object", "properties": {"catalog_id": {"type": "integer"}, "quantity": {"type": "integer"}}, "required": ["catalog_id", "quantity"], "additionalProperties": False}},
+                "stock_items": {"type": "array", "items": {"type": "object", "properties": {"batch_id": {"type": "integer"}, "quantity_stems": {"type": "integer"}, "quantity_bunches": {"type": "number"}}, "required": ["batch_id", "quantity_stems", "quantity_bunches"], "additionalProperties": False}}
             },
-            "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff"],
+            "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items", "stock_items"],
             "additionalProperties": False
         }}},
     )
-    return json.loads(response.output_text)
+    result = json.loads(response.output_text)
+    result.setdefault("catalog_items", [])
+    result.setdefault("stock_items", [])
+    return result
 
 
 def ingest_customer_message(conversation, message_text, instagram_message_id=""):
@@ -526,6 +602,10 @@ def create_ai_reply_for_conversation(conversation):
     if result.get("lead_ready") and result.get("lead_request"):
         request_text = result["lead_request"]
         request_language = result.get("detected_language", "uz")
+        details = {
+            "catalog_items": result.get("catalog_items") or [],
+            "stock_items": result.get("stock_items") or [],
+        }
         lead = Lead.objects.create(
             customer=customer,
             branch=conversation.branch,
@@ -535,7 +615,18 @@ def create_ai_reply_for_conversation(conversation):
             request_ru=request_text if request_language == "ru" else "",
             arrangement_type=result.get("arrangement_type") or "",
             estimated_price=result.get("estimated_price"),
+            details=details,
         )
+        for row in result.get("catalog_items") or []:
+            catalog_item = CatalogItem.objects.filter(id=row.get("catalog_id"), branch=conversation.branch).first()
+            quantity = int(row.get("quantity") or 1)
+            if catalog_item and quantity > 0:
+                LeadCatalogUsage.objects.create(lead=lead, catalog_item=catalog_item, quantity=quantity)
+        for row in result.get("stock_items") or []:
+            batch = StockBatch.objects.filter(id=row.get("batch_id"), branch=conversation.branch).first()
+            quantity_stems = int(row.get("quantity_stems") or 0)
+            if batch and quantity_stems > 0:
+                LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
         Notification.objects.create(branch=conversation.branch, notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     if result.get("handoff"):
         Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)

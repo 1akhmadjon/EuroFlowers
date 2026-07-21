@@ -22,7 +22,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event
@@ -883,6 +883,15 @@ def mini_app_lead(request):
     request_text = mini_app_request_text(serializer.validated_data["arrangement_type"], quote, serializer.validated_data.get("note", ""))
     details = {"lines": quote["lines"], "packaging": quote["packaging"], "florist_fee": quote["florist_fee"], "estimated_price": quote["estimated_price"], "price_is_estimate": quote["price_is_estimate"], "note": serializer.validated_data.get("note", "")}
     lead = Lead.objects.create(customer=customer, branch=quote["branch"], status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app", details=details)
+    for row in quote["lines"]:
+        if row["type"] == "catalog":
+            catalog_item = CatalogItem.objects.filter(id=row["id"], branch=quote["branch"]).first()
+            if catalog_item:
+                LeadCatalogUsage.objects.create(lead=lead, catalog_item=catalog_item, quantity=row["quantity"])
+        elif row["type"] == "stock":
+            batch = StockBatch.objects.filter(id=row["id"], branch=quote["branch"]).first()
+            if batch:
+                LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=row["quantity_stems"], quantity_bunches=Decimal(row["quantity_stems"]) / Decimal(batch.stems_per_bunch))
     Notification.objects.create(branch=quote["branch"], notification_type="lead", title_uz=f"Mini app lead: {customer}", title_ru=f"Mini app лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     return Response(LeadSerializer(lead).data, status=status.HTTP_201_CREATED)
 

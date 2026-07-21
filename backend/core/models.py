@@ -327,6 +327,12 @@ class LeadPackagingUsage(TimeStampedModel):
     quantity = models.PositiveIntegerField(default=1)
 
 
+class LeadCatalogUsage(TimeStampedModel):
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="catalog_usage")
+    catalog_item = models.ForeignKey(CatalogItem, on_delete=models.PROTECT, related_name="lead_usages")
+    quantity = models.PositiveIntegerField(default=1)
+
+
 class Notification(TimeStampedModel):
     TYPE_CHOICES = [("stock_pending", "Sklad kamaytirilmagan"), ("low_stock", "Kam qoldiq"), ("lead", "Yangi lead"), ("handoff", "Operator kerak")]
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="notifications")
