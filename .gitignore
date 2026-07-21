@@ -40,3 +40,4 @@ build/
 *.tar
 *.tar.gz
 *.zip
+*.md
