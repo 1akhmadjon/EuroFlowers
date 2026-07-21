@@ -1,7 +1,7 @@
 from celery import shared_task
 import threading
 import time
-from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_send, telegram_sender_action
+from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_instagram_context_image, telegram_send, telegram_sender_action
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
@@ -56,6 +56,10 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
+        try:
+            send_instagram_context_image(recipient_id, reply.conversation)
+        except Exception as exc:
+            print(f"INSTAGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} recipient={recipient_id} error={exc}", flush=True)
         for text in split_location_reply(reply.text):
             instagram_send(recipient_id, text)
         return reply.id

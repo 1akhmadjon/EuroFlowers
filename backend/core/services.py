@@ -316,6 +316,50 @@ def instagram_send(recipient_id, text):
     return response.json()
 
 
+def instagram_send_image(recipient_id, image_url):
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+    if not access_token or not account_id:
+        return {"mocked": True}
+    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {"url": image_url, "is_reusable": True},
+            }
+        },
+    }
+    response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def instagram_catalog_image_for_conversation(conversation):
+    if not conversation.social_post_id:
+        return None
+    catalog = CatalogItem.objects.filter(social_post=conversation.social_post, status="available").exclude(image_url="").order_by("-created_at").first()
+    image_url = catalog.image_url if catalog else conversation.social_post.image_url
+    if not image_url or not image_url.startswith("https://"):
+        return None
+    source = f"catalog:{catalog.id}" if catalog else f"social_post:{conversation.social_post_id}"
+    return {"source": source, "image_url": image_url}
+
+
+def send_instagram_context_image(recipient_id, conversation):
+    image = instagram_catalog_image_for_conversation(conversation)
+    if not image:
+        return None
+    marker = f"instagram_image_sent:{image['source']}:{image['image_url']}"
+    if Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).exists():
+        return None
+    result = instagram_send_image(recipient_id, image["image_url"])
+    Message.objects.create(conversation=conversation, sender="system", text="Instagram image sent", metadata={"media_image_key": marker, "image_url": image["image_url"], "result": result})
+    return result
+
+
 def instagram_sender_action(recipient_id, action):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
