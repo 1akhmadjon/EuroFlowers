@@ -218,10 +218,30 @@ class PackagingMovementSerializer(serializers.ModelSerializer):
 class SocialPostSerializer(serializers.ModelSerializer):
     reply_count = serializers.IntegerField(read_only=True)
     lead_count = serializers.IntegerField(read_only=True)
+    leads = serializers.SerializerMethodField()
     class Meta:
         model = SocialPost
         fields = "__all__"
         extra_kwargs = {"media_id": {"required": False}, "post_type": {"required": False}}
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_leads(self, obj):
+        rows = obj.leads.select_related("customer").prefetch_related("catalog_usage__catalog_item").order_by("-created_at")[:50]
+        return [{
+            "id": row.id,
+            "status": row.status,
+            "customer": row.customer_id,
+            "customer_name": row.customer.name,
+            "customer_phone": row.customer.phone,
+            "customer_instagram_user_id": row.customer.instagram_user_id,
+            "request_uz": row.request_uz,
+            "request_ru": row.request_ru,
+            "arrangement_type": row.arrangement_type,
+            "estimated_price": str(row.estimated_price) if row.estimated_price is not None else None,
+            "source": row.source,
+            "created_at": row.created_at.isoformat(),
+            "catalog_items": [{"id": usage.catalog_item_id, "name_uz": usage.catalog_item.name_uz, "quantity": usage.quantity} for usage in row.catalog_usage.all()],
+        } for row in rows]
 
     def _fill_story_share_fields(self, validated_data):
         permalink = validated_data.get("permalink") or getattr(self.instance, "permalink", "")

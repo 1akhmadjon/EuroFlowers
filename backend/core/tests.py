@@ -220,6 +220,20 @@ class ApiTests(TestCase):
         ids = [row["instagram_user_id"] for row in response.json()["results"]]
         self.assertIn("placeholder", ids)
 
+    def test_social_post_response_includes_lead_ids(self):
+        post = SocialPost.objects.create(branch=self.branch, post_type="story", title_uz="Story buket", title_ru="Story bouquet", is_active=True)
+        customer = Customer.objects.create(branch=self.branch, name="Madina", phone="+998901234567", instagram_user_id="ig-lead")
+        lead = Lead.objects.create(customer=customer, branch=self.branch, social_post=post, status="won", request_uz="Storydagi buket", arrangement_type="catalog", estimated_price=400000)
+        item = CatalogItem.objects.create(branch=self.branch, social_post=post, name_uz="Qizil buket", name_ru="Red bouquet", arrangement_type="bouquet", price=400000, quantity_total=4, status="available")
+        lead.catalog_usage.create(catalog_item=item, quantity=1)
+        response = self.client.get(f"/api/social-posts/{post.id}/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["lead_count"], 1)
+        self.assertEqual(data["leads"][0]["id"], lead.id)
+        self.assertEqual(data["leads"][0]["customer_name"], "Madina")
+        self.assertEqual(data["leads"][0]["catalog_items"][0]["id"], item.id)
+
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
