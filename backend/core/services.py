@@ -686,6 +686,21 @@ def first_string_from_keys(data, keys):
     return ""
 
 
+def social_post_media_query(media_id):
+    return Q(media_id=media_id) | Q(story_share_id=media_id) | Q(webhook_story_id=media_id) | Q(webhook_story_id__contains=media_id)
+
+
+def append_story_webhook_id(post, story_id):
+    if not story_id:
+        return False
+    values = [value.strip() for value in (post.webhook_story_id or "").splitlines() if value.strip()]
+    if story_id in values:
+        return False
+    values.append(story_id)
+    post.webhook_story_id = "\n".join(values)
+    return True
+
+
 def nested_get(data, path):
     value = data
     for key in path:
@@ -756,11 +771,10 @@ def link_story_post_from_event(webhook_event, branch=None):
     story_id = webhook_event.story_id or webhook_event.media_id
     if not story_id:
         return None
-    exact = SocialPost.objects.filter(Q(media_id=story_id) | Q(webhook_story_id=story_id), is_active=True).first()
+    exact = SocialPost.objects.filter(social_post_media_query(story_id), is_active=True).first()
     if exact:
         updates = []
-        if not exact.webhook_story_id:
-            exact.webhook_story_id = story_id
+        if append_story_webhook_id(exact, story_id):
             updates.append("webhook_story_id")
         if webhook_event.story_url and exact.webhook_story_url != webhook_event.story_url:
             exact.webhook_story_url = webhook_event.story_url
@@ -831,7 +845,7 @@ def resolve_instagram_event(payload):
                 continue
             referral = event.get("referral") or message.get("referral") or {}
             media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
-            post = SocialPost.objects.filter(Q(media_id=media_id) | Q(webhook_story_id=media_id), is_active=True).first() if media_id else None
+            post = SocialPost.objects.filter(social_post_media_query(media_id), is_active=True).first() if media_id else None
             if not post:
                 post = link_story_post_from_event(webhook_event, branch)
             if not post:
@@ -842,7 +856,8 @@ def resolve_instagram_event(payload):
                 conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch, social_post=post)
             elif post and conversation.social_post_id != post.id:
                 conversation.social_post = post
-                conversation.save(update_fields=["social_post", "updated_at"])
+                conversation.branch = post.branch
+                conversation.save(update_fields=["social_post", "branch", "updated_at"])
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""))
             if saved_message:
                 results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
