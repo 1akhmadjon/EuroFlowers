@@ -555,6 +555,25 @@ class ApiTests(TestCase):
         ids = list(Lead.objects.filter(status="new").order_by("sort_order").values_list("id", flat=True))
         self.assertEqual(ids, [first.id, moving.id, last.id])
 
+    def test_leads_can_be_paginated_by_status_for_kanban_column(self):
+        customer = Customer.objects.create(branch=self.branch, name="Kanban page", phone="+998901234569", instagram_user_id="kanban-page")
+        first = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="First", sort_order=Decimal("1000"))
+        second = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Second", sort_order=Decimal("2000"))
+        Lead.objects.create(customer=customer, branch=self.branch, status="qualified", request_uz="Other column", sort_order=Decimal("1000"))
+        response = self.client.get("/api/leads/", {"status": "new", "page": 1, "page_size": 1})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["id"], first.id)
+        self.assertTrue(data["next"])
+        response = self.client.get("/api/leads/", {"status": "new", "page": 2, "page_size": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"][0]["id"], second.id)
+        response = self.client.get("/api/leads/")
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(response.json()["count"], 3)
+
     def test_lead_reorder_column_accepts_full_column_ids(self):
         customer = Customer.objects.create(branch=self.branch, name="Kanban full", phone="+998901234568", instagram_user_id="kanban-full")
         first = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="First", sort_order=Decimal("1000"))

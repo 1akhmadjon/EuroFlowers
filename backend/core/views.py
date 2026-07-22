@@ -382,6 +382,7 @@ class LeadViewSet(ScopedViewSet):
     filterset_class = LeadFilter
     search_fields = ["customer__name", "customer__phone", "request_uz", "request_ru"]
     ordering_fields = ["sort_order", "created_at", "estimated_price"]
+    ordering = ["status", "sort_order", "-created_at", "id"]
 
     def perform_create(self, serializer):
         with transaction.atomic():
