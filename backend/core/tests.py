@@ -76,6 +76,31 @@ class BusinessRulesTests(TestCase):
         self.assertIn("ismingiz", reply.text.lower())
         self.assertFalse(Lead.objects.filter(customer=customer).exists())
 
+    def test_ai_direct_stems_request_creates_lead_without_stock_deduction_items(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-3", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="3 pochka atirgulni o‘zini olaman")
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value={
+            "reply": "Operatorimiz aniqlashtirib aloqaga chiqadi.",
+            "detected_language": "uz",
+            "customer_name": "Ahmad",
+            "phone": "+998901234567",
+            "lead_ready": True,
+            "lead_request": "Mijoz gulni dona/pochka holida olmoqchi, operator aniqlashtirishi kerak.",
+            "arrangement_type": "stems",
+            "estimated_price": 1000000,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [{"batch_id": self.batch.id, "quantity_stems": 75, "quantity_bunches": 3}],
+        }):
+            reply = create_ai_reply_for_conversation(conversation)
+        lead = Lead.objects.get(customer=customer)
+        self.assertTrue(reply.metadata["lead_ready"])
+        self.assertIsNone(lead.estimated_price)
+        self.assertEqual(lead.stock_usage.count(), 0)
+        self.assertIn("dona/pochka", lead.request_uz)
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
