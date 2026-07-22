@@ -24,7 +24,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock
 
 
@@ -430,6 +430,49 @@ class LeadViewSet(ScopedViewSet):
                 restore_lead_stock(lead, self.request.user)
                 lead.refresh_from_db()
         return Response(LeadSerializer(lead, context={"request": request}).data)
+
+    @extend_schema(request=LeadColumnReorderSerializer, responses=inline_serializer(name="LeadColumnReorderResponse", fields={"updated": serializers.IntegerField()}))
+    @action(detail=False, methods=["post"], url_path="reorder-column")
+    def reorder_column(self, request):
+        serializer = LeadColumnReorderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        status_value = serializer.validated_data["status"]
+        if not LeadStatus.objects.filter(key=status_value).exists():
+            return Response({"status": "Bunday lead statusi mavjud emas"}, status=status.HTTP_400_BAD_REQUEST)
+        lead_ids = serializer.validated_data["lead_ids"]
+        if len(lead_ids) != len(set(lead_ids)):
+            return Response({"lead_ids": "Lead id takrorlanmasligi kerak"}, status=status.HTTP_400_BAD_REQUEST)
+        branch = serializer.validated_data.get("branch")
+        scoped_queryset = self.get_queryset()
+        leads = list(scoped_queryset.filter(id__in=lead_ids))
+        if len(leads) != len(set(lead_ids)):
+            return Response({"lead_ids": "Lead topilmadi yoki sizda ruxsat yo‘q"}, status=status.HTTP_400_BAD_REQUEST)
+        if leads:
+            branch = branch or leads[0].branch
+        if not branch:
+            return Response({"branch": "Bo‘sh column tartibi uchun branch kerak"}, status=status.HTTP_400_BAD_REQUEST)
+        if any(lead.branch_id != branch.id for lead in leads):
+            return Response({"lead_ids": "Bitta column tartibi faqat bitta filial leadlari bilan yuboriladi"}, status=status.HTTP_400_BAD_REQUEST)
+        target_existing_ids = set(scoped_queryset.filter(branch=branch, status=status_value).values_list("id", flat=True))
+        incoming_ids = set(lead_ids)
+        missing_ids = target_existing_ids - incoming_ids
+        if missing_ids:
+            return Response({"lead_ids": "Target column lead_ids to‘liq yuborilishi kerak", "missing_ids": sorted(missing_ids)}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            for index, lead_id in enumerate(lead_ids, start=1):
+                lead = Lead.objects.select_for_update().get(id=lead_id)
+                before_status = lead.status
+                lead.status = status_value
+                lead.sort_order = Decimal(index * 1000)
+                lead.save(update_fields=["status", "sort_order", "updated_at"])
+                if lead.status == "won" and before_status != "won":
+                    try:
+                        deduct_lead_stock(lead, self.request.user)
+                    except ValueError as exc:
+                        raise serializers.ValidationError({"detail": str(exc)})
+                elif before_status == "won" and lead.status != "won":
+                    restore_lead_stock(lead, self.request.user)
+        return Response({"updated": len(lead_ids)})
 
     def perform_update(self, serializer):
         with transaction.atomic():

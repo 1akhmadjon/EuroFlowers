@@ -425,6 +425,12 @@ class LeadMoveSerializer(serializers.Serializer):
     sort_order = serializers.DecimalField(max_digits=20, decimal_places=6, required=False)
 
 
+class LeadColumnReorderSerializer(serializers.Serializer):
+    status = serializers.CharField(max_length=40)
+    lead_ids = serializers.ListField(child=serializers.IntegerField(min_value=1))
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
+
+
 class LeadSerializer(serializers.ModelSerializer):
     customer_detail = CustomerSerializer(source="customer", read_only=True)
     branch_detail = BranchSerializer(source="branch", read_only=True)
