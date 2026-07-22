@@ -459,6 +459,8 @@ class ConversationSerializer(serializers.ModelSerializer):
     customer_detail = CustomerSerializer(source="customer", read_only=True)
     messages = MessageSerializer(many=True, read_only=True)
     last_message = serializers.SerializerMethodField()
+    source = serializers.SerializerMethodField()
+    source_label = serializers.SerializerMethodField()
     class Meta:
         model = Conversation
         fields = "__all__"
@@ -466,6 +468,18 @@ class ConversationSerializer(serializers.ModelSerializer):
     def get_last_message(self, obj) -> dict[str, Any] | None:
         message = obj.messages.last()
         return MessageSerializer(message).data if message else None
+
+    def get_source(self, obj) -> str:
+        external_id = obj.customer.instagram_user_id if obj.customer_id else ""
+        if external_id.startswith("telegram:"):
+            return "telegram"
+        if external_id.startswith("miniapp:"):
+            return "mini_app"
+        return "instagram"
+
+    def get_source_label(self, obj) -> str:
+        labels = {"telegram": "Telegram", "mini_app": "Mini app", "instagram": "Instagram"}
+        return labels[self.get_source(obj)]
 
 
 class LeadPackagingUsageInputSerializer(serializers.Serializer):

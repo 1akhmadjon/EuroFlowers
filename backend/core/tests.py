@@ -324,6 +324,20 @@ class ApiTests(TestCase):
         self.assertEqual(composition.quantity_stems, 3)
         self.assertEqual(response.json()["catalog_items"][0]["composition"][0]["stock_batch"], self.batch.id)
 
+    def test_conversation_response_includes_source(self):
+        instagram_customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
+        telegram_customer = Customer.objects.create(branch=self.branch, name="Telegram", phone="+998901234568", instagram_user_id="telegram:123")
+        instagram_conversation = Conversation.objects.create(customer=instagram_customer, branch=self.branch)
+        telegram_conversation = Conversation.objects.create(customer=telegram_customer, branch=self.branch)
+        response = self.client.get(f"/api/conversations/{instagram_conversation.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"], "instagram")
+        self.assertEqual(response.json()["source_label"], "Instagram")
+        response = self.client.get(f"/api/conversations/{telegram_conversation.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"], "telegram")
+        self.assertEqual(response.json()["source_label"], "Telegram")
+
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
