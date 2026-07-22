@@ -4,7 +4,7 @@ from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.deletion import ProtectedError
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, TruncDate
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
 from datetime import datetime, time, timedelta
@@ -655,6 +655,7 @@ def me(request):
         "period_leads": serializers.IntegerField(),
         "period_customers": serializers.IntegerField(),
         "period_conversations": serializers.IntegerField(),
+        "daily_stats": serializers.ListField(child=serializers.DictField()),
         "florist_revenue": serializers.DecimalField(max_digits=14, decimal_places=2),
         "flowers_sold_stems": serializers.IntegerField(),
     },
@@ -705,6 +706,7 @@ def dashboard(request):
         "period_leads": period_leads.count(),
         "period_customers": period_customers.count(),
         "period_conversations": period_conversations.count(),
+        "daily_stats": dashboard_daily_stats(period_leads, period_conversations, period_start, period_end),
         "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
         "flowers_sold_stems": abs(int(flowers_sold)),
         "conversion_rate": round((won_leads.count() / conversion_base) * 100, 2) if conversion_base else 0,
@@ -780,7 +782,32 @@ def dashboard_period(request):
         start = timezone.make_aware(start)
     if end and timezone.is_naive(end):
         end = timezone.make_aware(end)
+    today = timezone.localdate()
+    if not end:
+        end = timezone.make_aware(datetime.combine(today, time.max))
+    if not start:
+        end_date = timezone.localtime(end).date()
+        start = timezone.make_aware(datetime.combine(end_date - timedelta(days=29), time.min))
     return start, end
+
+
+def dashboard_daily_stats(leads, conversations, start, end):
+    start_date = timezone.localtime(start).date()
+    end_date = timezone.localtime(end).date()
+    lead_counts = {
+        row["day"]: row["count"]
+        for row in leads.annotate(day=TruncDate("created_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"))
+    }
+    conversation_counts = {
+        row["day"]: row["count"]
+        for row in conversations.annotate(day=TruncDate("created_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"))
+    }
+    days = []
+    current = start_date
+    while current <= end_date:
+        days.append({"date": current.isoformat(), "leads": lead_counts.get(current, 0), "conversations": conversation_counts.get(current, 0)})
+        current += timedelta(days=1)
+    return days
 
 
 def apply_created_range(queryset, start, end):

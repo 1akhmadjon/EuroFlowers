@@ -1,6 +1,7 @@
 from decimal import Decimal
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import permission_matrix
@@ -240,6 +241,22 @@ class ApiTests(TestCase):
     def test_dashboard_requires_authentication(self):
         response = APIClient().get("/api/dashboard/")
         self.assertEqual(response.status_code, 401)
+
+    def test_dashboard_includes_daily_chart_stats_for_default_month(self):
+        customer = Customer.objects.create(branch=self.branch, name="Chart User", phone="+998901234567", instagram_user_id="chart-user")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        lead = Lead.objects.create(customer=customer, branch=self.branch, conversation=conversation, request_uz="Chart lead", arrangement_type="catalog")
+        today = timezone.localdate()
+        created_at = timezone.now()
+        Conversation.objects.filter(id=conversation.id).update(created_at=created_at)
+        Lead.objects.filter(id=lead.id).update(created_at=created_at)
+        response = self.client.get("/api/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["daily_stats"]), 30)
+        self.assertEqual(data["daily_stats"][-1]["date"], today.isoformat())
+        self.assertGreaterEqual(data["daily_stats"][-1]["leads"], 1)
+        self.assertGreaterEqual(data["daily_stats"][-1]["conversations"], 1)
 
     @override_settings(INSTAGRAM_VERIFY_TOKEN="verify")
     def test_instagram_webhook_verification(self):
