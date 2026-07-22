@@ -291,6 +291,39 @@ class ApiTests(TestCase):
         self.assertEqual(data["leads"][0]["customer_name"], "Madina")
         self.assertEqual(data["leads"][0]["catalog_items"][0]["id"], item.id)
 
+    def test_social_post_create_accepts_catalog_composition(self):
+        response = self.client.post("/api/social-posts/", {
+            "branch": self.branch.id,
+            "post_type": "post",
+            "media_id": "api-post-composition",
+            "title_uz": "Atirgul post",
+            "title_ru": "Розовый пост",
+            "price": "400000.00",
+            "flower_count": 3,
+            "is_active": True,
+            "catalog_items": [{
+                "name_uz": "Qizil atirgul buket",
+                "name_ru": "Букет красных роз",
+                "arrangement_type": "bouquet",
+                "price": "400000.00",
+                "quantity_total": 4,
+                "status": "available",
+                "composition": [{
+                    "stock_batch": self.batch.id,
+                    "quantity_stems": 3,
+                    "quantity_bunches": "0.15"
+                }]
+            }]
+        }, format="json")
+        self.assertEqual(response.status_code, 201)
+        post = SocialPost.objects.get(media_id="api-post-composition")
+        item = post.catalog_items.get()
+        composition = item.composition.get()
+        self.assertEqual(item.quantity_total, 4)
+        self.assertEqual(composition.stock_batch_id, self.batch.id)
+        self.assertEqual(composition.quantity_stems, 3)
+        self.assertEqual(response.json()["catalog_items"][0]["composition"][0]["stock_batch"], self.batch.id)
+
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)

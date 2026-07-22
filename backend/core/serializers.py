@@ -1,4 +1,5 @@
 from django.contrib.auth.models import User
+from django.db import transaction
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -215,10 +216,28 @@ class PackagingMovementSerializer(serializers.ModelSerializer):
         read_only_fields = ["performed_by"]
 
 
+class CatalogCompositionSerializer(serializers.ModelSerializer):
+    batch_detail = StockBatchSerializer(source="stock_batch", read_only=True)
+    class Meta:
+        model = CatalogComposition
+        fields = ["id", "stock_batch", "batch_detail", "quantity_stems", "quantity_bunches"]
+
+
+class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
+    composition = CatalogCompositionSerializer(many=True, required=False)
+
+    class Meta:
+        model = CatalogItem
+        fields = ["id", "name_uz", "name_ru", "description_uz", "description_ru", "arrangement_type", "height_cm", "diameter_cm", "price", "florist_fee", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition"]
+        read_only_fields = ["quantity_sold", "quantity_stock_deducted"]
+
+
 class SocialPostSerializer(serializers.ModelSerializer):
     reply_count = serializers.IntegerField(read_only=True)
     lead_count = serializers.IntegerField(read_only=True)
     leads = serializers.SerializerMethodField()
+    catalog_items = SocialPostCatalogItemSerializer(many=True, required=False)
     class Meta:
         model = SocialPost
         fields = "__all__"
@@ -306,22 +325,63 @@ class SocialPostSerializer(serializers.ModelSerializer):
             if existing:
                 raise serializers.ValidationError({"permalink": f"Bu Instagram link allaqachon SocialPost id={existing.id} da bor."})
 
+    def _validate_catalog_items(self, post_data, catalog_items):
+        branch = post_data.get("branch") or getattr(self.instance, "branch", None)
+        for item in catalog_items:
+            quantity_total = item.get("quantity_total", 1)
+            for row in item.get("composition") or []:
+                batch = row["stock_batch"]
+                if branch and batch.branch_id != branch.id:
+                    raise serializers.ValidationError({"catalog_items": f"{batch.batch_number} boshqa filialga tegishli"})
+                needed = row["quantity_stems"] * quantity_total
+                if batch.remaining_stems < needed:
+                    raise serializers.ValidationError({"catalog_items": f"{batch.batch_number} partiyada yetarli qoldiq yo‘q. Kerak: {needed}, bor: {batch.remaining_stems}"})
+
+    def validate(self, attrs):
+        catalog_items = attrs.get("catalog_items") or []
+        self._validate_catalog_items(attrs, catalog_items)
+        return attrs
+
+    def _sync_catalog_items(self, post, catalog_items):
+        for item_data in catalog_items:
+            has_composition = "composition" in item_data
+            composition = item_data.pop("composition", None)
+            item_id = item_data.pop("id", None)
+            if not item_data.get("image_url") and post.image_url:
+                item_data["image_url"] = post.image_url
+            if not item_data.get("instagram_story_url") and post.post_type == "story" and post.permalink:
+                item_data["instagram_story_url"] = post.permalink
+            if item_id:
+                item = post.catalog_items.get(id=item_id)
+                for key, value in item_data.items():
+                    setattr(item, key, value)
+                item.branch = post.branch
+                item.social_post = post
+                item.save()
+            else:
+                item = CatalogItem.objects.create(branch=post.branch, social_post=post, **item_data)
+            if has_composition:
+                item.composition.all().delete()
+                CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=item, **row) for row in composition])
+
     def create(self, validated_data):
+        catalog_items = validated_data.pop("catalog_items", [])
         validated_data = self._fill_story_share_fields(validated_data)
         self._check_unique_media_id(validated_data)
-        return super().create(validated_data)
+        with transaction.atomic():
+            post = super().create(validated_data)
+            self._sync_catalog_items(post, catalog_items)
+        return post
 
     def update(self, instance, validated_data):
+        catalog_items = validated_data.pop("catalog_items", None)
         validated_data = self._fill_story_share_fields(validated_data)
         self._check_unique_media_id(validated_data)
-        return super().update(instance, validated_data)
-
-
-class CatalogCompositionSerializer(serializers.ModelSerializer):
-    batch_detail = StockBatchSerializer(source="stock_batch", read_only=True)
-    class Meta:
-        model = CatalogComposition
-        fields = ["id", "stock_batch", "batch_detail", "quantity_stems", "quantity_bunches"]
+        with transaction.atomic():
+            post = super().update(instance, validated_data)
+            if catalog_items is not None:
+                self._sync_catalog_items(post, catalog_items)
+        return post
 
 
 class CatalogItemSerializer(serializers.ModelSerializer):

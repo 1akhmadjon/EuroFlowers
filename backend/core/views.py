@@ -493,7 +493,7 @@ class LeadViewSet(ScopedViewSet):
 class SocialPostViewSet(ScopedViewSet):
     permission_page = "social_posts"
     write_roles = ["admin", "content"]
-    queryset = SocialPost.objects.select_related("branch").prefetch_related("leads__customer", "leads__catalog_usage__catalog_item").annotate(reply_count=Count("conversations", distinct=True), lead_count=Count("leads", distinct=True)).all()
+    queryset = SocialPost.objects.select_related("branch").prefetch_related("catalog_items__composition__stock_batch__variant__flower", "leads__customer", "leads__catalog_usage__catalog_item").annotate(reply_count=Count("conversations", distinct=True), lead_count=Count("leads", distinct=True)).all()
     serializer_class = SocialPostSerializer
     filterset_fields = ["branch", "post_type", "is_targeted", "is_active"]
     search_fields = ["title_uz", "title_ru", "media_id", "permalink"]
