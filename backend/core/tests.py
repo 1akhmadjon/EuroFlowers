@@ -4,7 +4,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import permission_matrix
-from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, resolve_instagram_event, resolve_telegram_update
+from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update
 from .tasks import split_location_reply
 
 
@@ -100,6 +100,21 @@ class BusinessRulesTests(TestCase):
         self.assertIsNone(lead.estimated_price)
         self.assertEqual(lead.stock_usage.count(), 0)
         self.assertIn("dona/pochka", lead.request_uz)
+
+    def test_pending_customer_reply_debounces_to_latest_message(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        first = conversation.messages.create(sender="customer", text="katalog")
+        second = conversation.messages.create(sender="customer", text="rasmlari bormi")
+        from unittest.mock import patch
+        with patch("core.services.create_ai_reply_for_conversation", side_effect=lambda conv: Message.objects.create(conversation=conv, sender="ai", text="Javob")) as mocked:
+            self.assertIsNone(process_pending_customer_reply(conversation.id, first.id))
+            reply = process_pending_customer_reply(conversation.id, second.id)
+            self.assertIsNotNone(reply)
+            self.assertIsNone(process_pending_customer_reply(conversation.id, second.id))
+        conversation.refresh_from_db()
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(conversation.ai_replied_to_message_id, second.id)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

@@ -671,7 +671,7 @@ def ai_reply(conversation):
             "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0), "composition": catalog_composition_summary(row)} for row in post_catalog],
         }
     sales_rules = (
-        " Qat'iy qoida: mijoz o‘zbek tilida, hatto kirill yozuvida yozsa ham javobni o‘zbek lotinida yoz, ruscha so‘z aralashtirma. Faqat mijoz aniq rus tilida yozsa rus tilida javob ber."
+        " Qat'iy til qoidasi: mijoz o‘zbek lotinida yozsa o‘zbek lotinida javob ber. Mijoz o‘zbek kirill harflarida yozsa o‘zbek kirill harflarida javob ber. Mijoz aniq rus tilida yozsa rus tilida javob ber. Mijoz ingliz tilida yozsa ham ingliz tilida javob berma; o‘zbek lotinida qisqa javob ber: 'Men faqat o‘zbek va rus tillarida yordam bera olaman 🌸 O‘zbek tilida davom etamizmi?' Inglizcha gap va so‘zlarni aralashtirma."
         " Gulga aloqasi yo‘q savollarga umuman javob berma: kod yozish, dasturlash, siyosat, din, boshqa biznes, umumiy maslahat, hazil yoki boshqa mavzularda savol kelsa, savolni bajarma. Qisqa javob ber: 'Men faqat EuroFlowers gullari, buket va savatlar bo‘yicha yordam bera olaman 🌸 Sizga buket yoki savat kerakmi?' Kod, retsept, matn, reja yoki boshqa ishni yozib berma."
         " Format qoidasi: javobda hech bir qatorni probel bilan boshlama. Bullet ishlatsang har qator to‘g‘ridan-to‘g‘ri '•' bilan boshlansin. '  Narx:' kabi oldida space bor qator yozma. Instagram uchun text plain bo‘lsin, markdown ishlatma."
         " Gul variantlarini taklif qilganda sarlavha bilan yoz: masalan 'Bizda bor Gortenziyalar:' yoki 'Hozir mavjud atirgullar:'. Keyin variantlarni bullet bilan ber."
@@ -826,13 +826,32 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
 
 
 def process_pending_customer_reply(conversation_id, expected_message_id):
-    conversation = Conversation.objects.select_related("customer", "branch", "social_post").filter(id=conversation_id).first()
-    if not conversation:
-        return None
-    latest = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    if not latest or latest.id != expected_message_id:
-        return None
-    return create_ai_reply_for_conversation(conversation)
+    stale_started_at = timezone.now() - timedelta(seconds=120)
+    with transaction.atomic():
+        conversation = Conversation.objects.select_for_update().select_related("customer", "branch", "social_post").filter(id=conversation_id).first()
+        if not conversation:
+            return None
+        latest = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+        if not latest or latest.id != expected_message_id:
+            return None
+        if conversation.ai_replied_to_message_id == latest.id:
+            return None
+        if conversation.ai_reply_started_for_message_id == latest.id and conversation.ai_reply_started_at and conversation.ai_reply_started_at > stale_started_at:
+            return None
+        conversation.ai_reply_started_for_message = latest
+        conversation.ai_reply_started_at = timezone.now()
+        conversation.save(update_fields=["ai_reply_started_for_message", "ai_reply_started_at", "updated_at"])
+    try:
+        conversation = Conversation.objects.select_related("customer", "branch", "social_post").get(id=conversation_id)
+        reply = create_ai_reply_for_conversation(conversation)
+    except Exception:
+        Conversation.objects.filter(id=conversation_id, ai_reply_started_for_message_id=expected_message_id).update(ai_reply_started_for_message=None, ai_reply_started_at=None)
+        raise
+    if reply:
+        Conversation.objects.filter(id=conversation_id, ai_reply_started_for_message_id=expected_message_id).update(ai_replied_to_message_id=expected_message_id, ai_reply_started_for_message=None, ai_reply_started_at=None)
+    else:
+        Conversation.objects.filter(id=conversation_id, ai_reply_started_for_message_id=expected_message_id).update(ai_reply_started_for_message=None, ai_reply_started_at=None)
+    return reply
 
 
 def flatten_interesting_payload(value, prefix=""):
