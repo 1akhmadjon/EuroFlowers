@@ -735,6 +735,7 @@ def dashboard(request):
         "daily_stats": serializers.ListField(child=serializers.DictField()),
         "top_selling_flowers": serializers.ListField(child=serializers.DictField()),
         "top_catalog_items": serializers.ListField(child=serializers.DictField()),
+        "recent_top_catalog_items": serializers.ListField(child=serializers.DictField()),
         "lead_statuses": serializers.ListField(child=serializers.DictField()),
         "arrangement_types": serializers.ListField(child=serializers.DictField()),
         "conversation_sources": serializers.ListField(child=serializers.DictField()),
@@ -779,6 +780,7 @@ def analytics(request):
         "daily_stats": analytics_daily_stats(period_leads, period_conversations, period_won_leads, period_start, period_end),
         "top_selling_flowers": top_selling_flowers(period_won_leads),
         "top_catalog_items": top_catalog_items(period_won_leads),
+        "recent_top_catalog_items": recent_top_catalog_items(period_won_leads),
         "lead_statuses": list(period_leads.values("status").annotate(count=Count("id")).order_by("status")),
         "arrangement_types": list(period_leads.values("arrangement_type").annotate(count=Count("id")).order_by("arrangement_type")),
         "conversation_sources": conversation_source_breakdown(period_conversations),
@@ -924,7 +926,11 @@ def top_selling_flowers(won_leads):
 
 
 def top_catalog_items(won_leads):
-    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__name_ru", "catalog_item__arrangement_type").annotate(quantity=Coalesce(Sum("quantity"), 0), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0"))).order_by("-quantity")[:20])
+    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__name_ru", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-quantity", "-last_sold_at")[:20])
+
+
+def recent_top_catalog_items(won_leads):
+    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__name_ru", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-last_sold_at", "-quantity")[:20])
 
 
 def conversation_source_breakdown(conversations):
