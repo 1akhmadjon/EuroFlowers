@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
-from .views import AuditLogViewSet, BranchViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, LeadStatusViewSet, LeadViewSet, NotificationViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, UserViewSet, ai_settings, business_settings, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
+from .views import AuditLogViewSet, BranchViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, LeadStatusViewSet, LeadViewSet, NotificationViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, UserViewSet, ai_settings, analytics, business_settings, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
 
 router = DefaultRouter()
 router.register("branches", BranchViewSet)
@@ -31,6 +31,7 @@ urlpatterns = [
     path("auth/token/blacklist/", TokenBlacklistView.as_view()),
     path("me/", me),
     path("dashboard/", dashboard),
+    path("analytics/", analytics),
     path("settings/", business_settings),
     path("ai/settings/", ai_settings),
     path("integrations/", integrations_settings),

@@ -3,7 +3,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import permission_matrix
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update
 from .tasks import split_location_reply
@@ -521,6 +521,24 @@ class ApiTests(TestCase):
         self.assertEqual(item.quantity_sold, 0)
         self.assertEqual(item.quantity_stock_deducted, 0)
         self.assertEqual(item.status, "available")
+
+    def test_analytics_and_dashboard_include_top_selling_flowers(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", name_ru="Analytics bouquet", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=4)
+        customer = Customer.objects.create(branch=self.branch, name="Analytics", phone="+998901234501", instagram_user_id="analytics")
+        lead = Lead.objects.create(customer=customer, branch=self.branch, status="won", request_uz="Analytics lead", arrangement_type="catalog", estimated_price=600000, source="instagram")
+        LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=2)
+        response = self.client.get("/api/analytics/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["daily_stats"]), 30)
+        self.assertEqual(data["summary"]["orders"], 1)
+        self.assertEqual(data["top_selling_flowers"][0]["name_uz"], "Atirgul API")
+        self.assertEqual(data["top_selling_flowers"][0]["stems"], 8)
+        self.assertEqual(data["top_catalog_items"][0]["catalog_item__name_uz"], "Analytics buket")
+        response = self.client.get("/api/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["top_selling_flowers"][0]["stems"], 8)
 
     def test_lead_move_keeps_kanban_position_between_two_leads(self):
         customer = Customer.objects.create(branch=self.branch, name="Kanban", phone="+998901234567", instagram_user_id="kanban")

@@ -22,7 +22,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock
@@ -656,6 +656,7 @@ def me(request):
         "period_customers": serializers.IntegerField(),
         "period_conversations": serializers.IntegerField(),
         "daily_stats": serializers.ListField(child=serializers.DictField()),
+        "top_selling_flowers": serializers.ListField(child=serializers.DictField()),
         "florist_revenue": serializers.DecimalField(max_digits=14, decimal_places=2),
         "flowers_sold_stems": serializers.IntegerField(),
     },
@@ -707,6 +708,7 @@ def dashboard(request):
         "period_customers": period_customers.count(),
         "period_conversations": period_conversations.count(),
         "daily_stats": dashboard_daily_stats(period_leads, period_conversations, period_start, period_end),
+        "top_selling_flowers": top_selling_flowers(period_won_leads)[:5],
         "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
         "flowers_sold_stems": abs(int(flowers_sold)),
         "conversion_rate": round((won_leads.count() / conversion_base) * 100, 2) if conversion_base else 0,
@@ -721,6 +723,66 @@ def dashboard(request):
         "branch_stock": list(stock.values("branch__id", "branch__name").annotate(stems=Sum("remaining_stems"), batches=Count("id")).order_by("branch__name")),
         "recent_leads": LeadSerializer(leads.select_related("customer", "branch")[:6], many=True).data,
         "recent_notifications": NotificationSerializer(notifications.filter(is_read=False)[:6], many=True).data,
+    }
+    return Response(data)
+
+
+@extend_schema(responses=inline_serializer(
+    name="Analytics",
+    fields={
+        "period": serializers.DictField(),
+        "summary": serializers.DictField(),
+        "daily_stats": serializers.ListField(child=serializers.DictField()),
+        "top_selling_flowers": serializers.ListField(child=serializers.DictField()),
+        "top_catalog_items": serializers.ListField(child=serializers.DictField()),
+        "lead_statuses": serializers.ListField(child=serializers.DictField()),
+        "arrangement_types": serializers.ListField(child=serializers.DictField()),
+        "conversation_sources": serializers.ListField(child=serializers.DictField()),
+        "revenue_by_source": serializers.ListField(child=serializers.DictField()),
+    },
+))
+@api_view(["GET"])
+def analytics(request):
+    if not has_page_permission(request.user, "dashboard", False):
+        return forbidden()
+    period_start, period_end = dashboard_period(request)
+    leads = Lead.objects.select_related("customer", "branch").all()
+    conversations = Conversation.objects.select_related("customer", "branch").all()
+    customers = Customer.objects.all()
+    stock_movements = StockMovement.objects.all()
+    profile = getattr(request.user, "profile", None)
+    if not request.user.is_superuser and profile:
+        branches = profile.branches.all()
+        leads = leads.filter(branch__in=branches)
+        conversations = conversations.filter(branch__in=branches)
+        customers = customers.filter(branch__in=branches)
+        stock_movements = stock_movements.filter(batch__branch__in=branches)
+    period_leads = apply_created_range(leads, period_start, period_end)
+    period_conversations = apply_created_range(conversations, period_start, period_end)
+    period_customers = apply_created_range(customers, period_start, period_end)
+    won_leads = leads.filter(status="won")
+    period_won_leads = apply_updated_range(won_leads, period_start, period_end)
+    period_stock_out = apply_created_range(stock_movements.filter(movement_type="out", quantity_stems__lt=0), period_start, period_end)
+    flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
+    data = {
+        "period": {"from": period_start, "to": period_end},
+        "summary": {
+            "leads": period_leads.count(),
+            "customers": period_customers.count(),
+            "conversations": period_conversations.count(),
+            "orders": period_won_leads.count(),
+            "revenue": period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
+            "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
+            "flowers_sold_stems": abs(int(flowers_sold)),
+            "conversion_rate": round((period_won_leads.count() / (period_conversations.count() or period_leads.count())) * 100, 2) if (period_conversations.count() or period_leads.count()) else 0,
+        },
+        "daily_stats": analytics_daily_stats(period_leads, period_conversations, period_won_leads, period_start, period_end),
+        "top_selling_flowers": top_selling_flowers(period_won_leads),
+        "top_catalog_items": top_catalog_items(period_won_leads),
+        "lead_statuses": list(period_leads.values("status").annotate(count=Count("id")).order_by("status")),
+        "arrangement_types": list(period_leads.values("arrangement_type").annotate(count=Count("id")).order_by("arrangement_type")),
+        "conversation_sources": conversation_source_breakdown(period_conversations),
+        "revenue_by_source": revenue_by_source(period_won_leads),
     }
     return Response(data)
 
@@ -808,6 +870,79 @@ def dashboard_daily_stats(leads, conversations, start, end):
         days.append({"date": current.isoformat(), "leads": lead_counts.get(current, 0), "conversations": conversation_counts.get(current, 0)})
         current += timedelta(days=1)
     return days
+
+
+def analytics_daily_stats(leads, conversations, won_leads, start, end):
+    start_date = timezone.localtime(start).date()
+    end_date = timezone.localtime(end).date()
+    lead_counts = {
+        row["day"]: row["count"]
+        for row in leads.annotate(day=TruncDate("created_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"))
+    }
+    conversation_counts = {
+        row["day"]: row["count"]
+        for row in conversations.annotate(day=TruncDate("created_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"))
+    }
+    order_rows = won_leads.annotate(day=TruncDate("updated_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"), revenue=Coalesce(Sum("estimated_price"), Decimal("0")))
+    order_counts = {row["day"]: row["count"] for row in order_rows}
+    revenue_counts = {row["day"]: row["revenue"] for row in order_rows}
+    days = []
+    current = start_date
+    while current <= end_date:
+        days.append({"date": current.isoformat(), "leads": lead_counts.get(current, 0), "conversations": conversation_counts.get(current, 0), "orders": order_counts.get(current, 0), "revenue": revenue_counts.get(current, Decimal("0"))})
+        current += timedelta(days=1)
+    return days
+
+
+def top_selling_flowers(won_leads):
+    lead_ids = list(won_leads.values_list("id", flat=True))
+    rows = {}
+    stock_rows = LeadStockUsage.objects.filter(lead_id__in=lead_ids).select_related("stock_batch__variant__flower").values(
+        "stock_batch__variant__flower_id",
+        "stock_batch__variant__flower__name_uz",
+        "stock_batch__variant__flower__name_ru",
+        "stock_batch__variant__color_uz",
+        "stock_batch__variant__color_ru",
+    ).annotate(stems=Coalesce(Sum("quantity_stems"), 0), bunches=Coalesce(Sum("quantity_bunches"), Decimal("0")))
+    for row in stock_rows:
+        key = (row["stock_batch__variant__flower_id"], row["stock_batch__variant__color_uz"] or "")
+        rows.setdefault(key, {"flower_id": row["stock_batch__variant__flower_id"], "name_uz": row["stock_batch__variant__flower__name_uz"], "name_ru": row["stock_batch__variant__flower__name_ru"], "color_uz": row["stock_batch__variant__color_uz"], "color_ru": row["stock_batch__variant__color_ru"], "stems": 0, "bunches": Decimal("0")})
+        rows[key]["stems"] += int(row["stems"] or 0)
+        rows[key]["bunches"] += row["bunches"] or Decimal("0")
+    catalog_usage = LeadCatalogUsage.objects.filter(lead_id__in=lead_ids).select_related("catalog_item").values("catalog_item_id").annotate(quantity=Coalesce(Sum("quantity"), 0))
+    catalog_quantities = {row["catalog_item_id"]: row["quantity"] for row in catalog_usage}
+    composition_rows = CatalogComposition.objects.filter(catalog_item_id__in=catalog_quantities.keys()).select_related("stock_batch__variant__flower")
+    for composition in composition_rows:
+        quantity = catalog_quantities.get(composition.catalog_item_id, 0)
+        variant = composition.stock_batch.variant
+        flower = variant.flower
+        key = (flower.id, variant.color_uz or "")
+        rows.setdefault(key, {"flower_id": flower.id, "name_uz": flower.name_uz, "name_ru": flower.name_ru, "color_uz": variant.color_uz, "color_ru": variant.color_ru, "stems": 0, "bunches": Decimal("0")})
+        rows[key]["stems"] += int(composition.quantity_stems * quantity)
+        rows[key]["bunches"] += composition.quantity_bunches * quantity
+    return sorted([dict(row, bunches=str(row["bunches"])) for row in rows.values()], key=lambda row: row["stems"], reverse=True)[:20]
+
+
+def top_catalog_items(won_leads):
+    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__name_ru", "catalog_item__arrangement_type").annotate(quantity=Coalesce(Sum("quantity"), 0), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0"))).order_by("-quantity")[:20])
+
+
+def conversation_source_breakdown(conversations):
+    rows = {"instagram": 0, "telegram": 0, "mini_app": 0}
+    for conversation in conversations.select_related("customer"):
+        external_id = conversation.customer.instagram_user_id if conversation.customer_id else ""
+        if external_id.startswith("telegram:"):
+            rows["telegram"] += 1
+        elif external_id.startswith("miniapp:"):
+            rows["mini_app"] += 1
+        else:
+            rows["instagram"] += 1
+    return [{"source": key, "count": value} for key, value in rows.items()]
+
+
+def revenue_by_source(won_leads):
+    rows = list(won_leads.values("source").annotate(orders=Count("id"), revenue=Coalesce(Sum("estimated_price"), Decimal("0"))).order_by("source"))
+    return [{"source": row["source"] or "unknown", "orders": row["orders"], "revenue": row["revenue"]} for row in rows]
 
 
 def apply_created_range(queryset, start, end):
