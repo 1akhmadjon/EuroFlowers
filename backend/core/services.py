@@ -613,12 +613,131 @@ def recent_customer_orders(customer):
     return orders
 
 
+def ai_catalog_rows(query="", limit=24):
+    queryset = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
+    if query:
+        queryset = queryset.filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
+    rows = []
+    for row in queryset[:limit]:
+        rows.append({
+            "id": row.id,
+            "name_uz": row.name_uz,
+            "name_ru": row.name_ru,
+            "type": row.arrangement_type,
+            "price": str(row.price),
+            "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
+            "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
+            "composition": catalog_composition_summary(row),
+        })
+    return rows
+
+
+def ai_stock_rows(query="", limit=24):
+    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")
+    if query:
+        queryset = queryset.filter(Q(variant__flower__name_uz__icontains=query) | Q(variant__flower__name_ru__icontains=query) | Q(variant__name_uz__icontains=query) | Q(variant__name_ru__icontains=query) | Q(variant__color_uz__icontains=query) | Q(variant__color_ru__icontains=query))
+    rows = []
+    for row in queryset[:limit]:
+        rows.append({
+            "batch_id": row.id,
+            "flower_uz": row.variant.flower.name_uz,
+            "flower_ru": row.variant.flower.name_ru,
+            "variant_uz": row.variant.name_uz,
+            "variant_ru": row.variant.name_ru,
+            "color_uz": row.variant.color_uz,
+            "color_ru": row.variant.color_ru,
+            "height_cm": row.height_cm,
+            "availability": "bor" if row.remaining_stems > row.minimum_sale_stems else "oz qoldi",
+            "stems_per_bunch": row.stems_per_bunch,
+            "minimum_sale_stems": row.minimum_sale_stems,
+            "price_per_stem": str(row.sale_price_per_stem),
+            "price_per_bunch": str(row.sale_price_per_bunch),
+        })
+    return rows
+
+
+def ai_basket_rows(limit=20):
+    return [{
+        "id": row.id,
+        "name_uz": row.name_uz,
+        "name_ru": row.name_ru,
+        "min": row.capacity_min_stems,
+        "max": row.capacity_max_stems,
+        "price": str(row.sale_price),
+    } for row in Packaging.objects.filter(packaging_type="basket", is_active=True, quantity__gt=0).order_by("sale_price")[:limit]]
+
+
+def ai_post_context(conversation):
+    if not conversation.social_post_id:
+        return None
+    post = conversation.social_post
+    post_catalog = CatalogItem.objects.filter(social_post=post, status="available").prefetch_related("composition__stock_batch__variant__flower")
+    return {
+        "type": post.post_type,
+        "title_uz": post.title_uz,
+        "title_ru": post.title_ru,
+        "description_uz": post.description_uz,
+        "description_ru": post.description_ru,
+        "price": str(post.price or ""),
+        "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0), "composition": catalog_composition_summary(row)} for row in post_catalog],
+    }
+
+
+def ai_tool_definitions():
+    empty_parameters = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+    return [
+        {"type": "function", "name": "get_catalog", "description": "Bugungi tayyor katalogdagi barcha available buket/savat/kompozitsiyalarni olish. Faqat mijoz katalog/tayyor variantlar so‘raganda yoki aniq katalog gulini tanlaganda chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Ixtiyoriy qidiruv matni, masalan pion yoki qizil atirgul"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
+        {"type": "function", "name": "search_stock", "description": "Skladdagi gullarni qidirish. Faqat mijoz custom buket/savat yasatmoqchi bo‘lsa yoki qaysi gul borligini so‘rasa chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Gul/rang/tur qidiruvi, bo‘sh string barcha asosiy gullar uchun"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
+        {"type": "function", "name": "get_baskets", "description": "Savatga custom kompozitsiya yasatishda mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
+        {"type": "function", "name": "get_recent_orders", "description": "Mijoz oldingi buyurtmalarini so‘raganda olish.", "parameters": empty_parameters, "strict": True},
+        {"type": "function", "name": "get_post_context", "description": "Conversation story/post/reel bilan bog‘langan bo‘lsa, o‘sha media ma’lumotini olish.", "parameters": empty_parameters, "strict": True},
+    ]
+
+
+def execute_ai_tool(name, arguments, conversation):
+    if name == "get_catalog":
+        rows = ai_catalog_rows(arguments.get("query", ""))
+        return {"items": rows, "count": len(rows)}
+    if name == "search_stock":
+        return {"items": ai_stock_rows(arguments.get("query", ""))}
+    if name == "get_baskets":
+        return {"items": ai_basket_rows()}
+    if name == "get_recent_orders":
+        return {"items": recent_customer_orders(conversation.customer)}
+    if name == "get_post_context":
+        return {"post": ai_post_context(conversation)}
+    return {"error": f"Unknown tool: {name}"}
+
+
+def ai_response_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "reply": {"type": "string"},
+            "detected_language": {"type": "string", "enum": ["uz", "ru"]},
+            "customer_name": {"type": ["string", "null"]},
+            "phone": {"type": ["string", "null"]},
+            "lead_ready": {"type": "boolean"},
+            "lead_request": {"type": ["string", "null"]},
+            "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
+            "estimated_price": {"type": ["number", "null"]},
+            "handoff": {"type": "boolean"},
+            "catalog_items": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"catalog_id": {"type": "integer"}, "quantity": {"type": "integer"}}, "required": ["catalog_id", "quantity"], "additionalProperties": False},
+            },
+            "stock_items": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"batch_id": {"type": "integer"}, "quantity_stems": {"type": "integer"}, "quantity_bunches": {"type": "number"}}, "required": ["batch_id", "quantity_stems", "quantity_bunches"], "additionalProperties": False},
+            },
+        },
+        "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items", "stock_items"],
+        "additionalProperties": False,
+    }
+
+
 def ai_reply(conversation):
     customer = conversation.customer
-    branch = conversation.branch
-    stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")[:120]
-    catalog = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")[:24]
-    baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0).order_by("sale_price")[:20]
     visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:24])
     session_messages = []
     fresh_session = False
@@ -634,116 +753,27 @@ def ai_reply(conversation):
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
-    catalog_rows = [{
-        "id": row.id,
-        "name_uz": row.name_uz,
-        "name_ru": row.name_ru,
-        "type": row.arrangement_type,
-        "price": str(row.price),
-        "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
-        "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
-        "composition": catalog_composition_summary(row),
-    } for row in catalog]
     context = {
         "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
         "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session, "ai_replies_count": ai_replies_count, "last_customer_message": last_customer_message},
-        "recent_orders": recent_customer_orders(customer),
-        "stock": [{
-            "batch_id": row.id,
-            "flower_uz": row.variant.flower.name_uz,
-            "flower_ru": row.variant.flower.name_ru,
-            "variant_uz": row.variant.name_uz,
-            "variant_ru": row.variant.name_ru,
-            "color_uz": row.variant.color_uz,
-            "color_ru": row.variant.color_ru,
-            "height_cm": row.height_cm,
-            "remaining_stems": row.remaining_stems,
-            "stems_per_bunch": row.stems_per_bunch,
-            "minimum_sale_stems": row.minimum_sale_stems,
-            "price_per_stem": str(row.sale_price_per_stem),
-            "price_per_bunch": str(row.sale_price_per_bunch),
-        } for row in stock],
-        "catalog_count": len(catalog_rows),
-        "catalog_names": [row["name_uz"] for row in catalog_rows],
-        "catalog": catalog_rows,
-        "baskets": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "min": row.capacity_min_stems, "max": row.capacity_max_stems, "price": str(row.sale_price)} for row in baskets],
-        "post": None,
+        "has_post_context": bool(conversation.social_post_id),
         "rules": {
             "florist_fee": str(business_settings.default_florist_fee),
-            "price_is_estimate": True,
-            "min_sale_reminder_uz": business_settings.min_sale_reminder_uz,
-            "min_sale_reminder_ru": business_settings.min_sale_reminder_ru,
-            "approximate_price_wording_uz": business_settings.approximate_price_wording_uz,
-            "approximate_price_wording_ru": business_settings.approximate_price_wording_ru,
-            "handoff_rules_uz": business_settings.handoff_rules_uz,
-            "handoff_rules_ru": business_settings.handoff_rules_ru,
             "working_hours": business_settings.working_hours,
         },
     }
-    if conversation.social_post:
-        post = conversation.social_post
-        post_catalog = CatalogItem.objects.filter(social_post=post, status="available").prefetch_related("composition__stock_batch__variant__flower")
-        context["post"] = {
-            "type": post.post_type,
-            "title_uz": post.title_uz,
-            "title_ru": post.title_ru,
-            "description_uz": post.description_uz,
-            "description_ru": post.description_ru,
-            "price": str(post.price or ""),
-            "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0), "composition": catalog_composition_summary(row)} for row in post_catalog],
-        }
     sales_rules = (
-        " Qat'iy til qoidasi: mijoz o‘zbek lotinida yozsa o‘zbek lotinida javob ber. Mijoz o‘zbek kirill harflarida yozsa o‘zbek kirill harflarida javob ber. Mijoz aniq rus tilida yozsa rus tilida javob ber. Mijoz ingliz tilida yozsa ham ingliz tilida javob berma; o‘zbek lotinida qisqa javob ber: 'Men faqat o‘zbek va rus tillarida yordam bera olaman 🌸 O‘zbek tilida davom etamizmi?' Inglizcha gap va so‘zlarni aralashtirma."
-        " Gulga aloqasi yo‘q savollarga umuman javob berma: kod yozish, dasturlash, siyosat, din, boshqa biznes, umumiy maslahat, hazil yoki boshqa mavzularda savol kelsa, savolni bajarma. Qisqa javob ber: 'Men faqat EuroFlowers gullari, buket va savatlar bo‘yicha yordam bera olaman 🌸 Sizga buket yoki savat kerakmi?' Kod, retsept, matn, reja yoki boshqa ishni yozib berma."
-        " Salomlashish qoidasi: conversation.has_ai_reply_in_session=false bo‘lsa va mijoz salomlashsa yoki yangi session boshlansa, bir marta salomlash. conversation.has_ai_reply_in_session=true bo‘lsa hech qachon 'Assalomu alaykum', 'Assalomu aleykum', 'Va alaykum assalom', 'Salom' deb boshlama; bevosita mijozning oxirgi savoliga javob ber."
-        " Format qoidasi: javobda hech bir qatorni probel bilan boshlama. Bullet ishlatsang har qator to‘g‘ridan-to‘g‘ri '•' bilan boshlansin. '  Narx:' kabi oldida space bor qator yozma. Instagram uchun text plain bo‘lsin, markdown ishlatma."
-        " Gul variantlarini taklif qilganda sarlavha bilan yoz: masalan 'Bizda bor Gortenziyalar:' yoki 'Hozir mavjud atirgullar:'. Keyin variantlarni bullet bilan ber."
-        " EuroFlowersda gulning o‘zi dona yoki pochka holida odatda sotilmaydi. Mijoz dona, nechta dona gul, pochka, 1 pochka, 3 pochka, gulni o‘zini olish, faqat atirgul kerak kabi so‘rasa, dona/pochka narxini aytma va hisoblama. Javob mazmuni shunday bo‘lsin: 'Bizda gulning o‘zi dona yoki pochka holida ko‘p hollarda sotilmaydi. Gulni buket qilib yoki savatga yasatib olishingiz mumkin. Ismingiz va telefon raqamingizni qoldirsangiz, operatorimiz aniq ma'lumot berib aloqaga chiqadi.'"
-        " Mijoz dona yoki pochka holida gul olmoqchi bo‘lsa, lead uchun ism va telefonni yig‘. Lead_request ichida aniq xulosa yoz: 'Mijoz gulni dona/pochka holida olmoqchi, operator aniqlashtirishi kerak.' Arrangement_type stems bo‘lsin, estimated_price null bo‘lsin, stock_items bo‘sh bo‘lsin."
-        " Story/post/reel/katalogdagi tayyor buket, savat yoki kompozitsiya narxi aniq hisoblanadi. Bunday tayyor gullarda hech qachon 'taxminan', 'taxminiy', 'taxminan narx' demagin. 'Narx: 800 000 so‘m' deb yoz."
-        " 'Taxminan' so‘zini faqat mijoz gulni yangidan buket/savat qilib yeg‘dirayotganda yoki custom hisob-kitobda ishlat: 'Jami taxminan: ... so‘m'."
-        " Gul variantini taklif qilganda dona yoki pochka narxini yozma. Faqat buket yoki savat qilib yig‘dirish mumkinligini ayt va qaysi format kerakligini so‘ra."
-        " Mijoz 'yasab berasizmi', 'yasabam beraslami', 'yasab beraslami', 'yasatmoqchiman', 'yasatmoxchiman', 'o‘zim yasatmoqchiman', 'ozim yasatmoxchiman', 'yig‘diraman', 'yigdirmoqchiman' desa bu custom buket/savat yig‘dirish niyati. Buni gulning o‘zini dona/pochka holida sotib olish deb tushunma. Bunday holatda katalogdagi tayyor buketlarni taklif qilma; 'Ha, albatta, xohishingizga qarab buket yoki savat qilib yasab beramiz' mazmunida javob berib, qaysi guldan, qanday rangda va buketmi yoki savatmi ekanini bitta savol bilan aniqlashtir."
-        " Mijoz 'tayyor buket kerakmas', 'tayyor kerak emas', 'o‘zim yasatmoqchiman', 'ozim yasatmoxchiman' desa katalog ro‘yxatini qayta yuborma. Faqat custom yig‘ish oqimida davom et."
-        " Mijoz 'skladda qanaqa gul bor', 'qanaqa gulla bor sklada', 'gul turlari bormi' desa bu custom yig‘ish uchun mavjud gul turlarini so‘rayapti. Katalogdagi tayyor buketlarni emas, stock kontekstdagi gul turlarini qisqa ro‘yxat qilib ber va qaysi guldan buket yoki savat kerakligini so‘ra."
-        " Mijoz 'tayyor buketlayam sotaslami yoki savatga yasalgan tayyor gulla', 'tayyor buket bormi', 'tayyor savat bormi', 'tayyor gulla bormi' desa bu ha/yo‘q savol emas, katalog so‘rovi. Javob: 'Ha, tayyor buket va savatdagi kompozitsiyalarimiz bor' mazmunida boshlansin va catalog kontekstdagi mavjud variantlarni nomi, turi, narxi bilan ro‘yxat qil. Bunday savolga 'Sizga buketmi yoki savatmi kerak?' deb qayta savol berma."
-        " Katalog ro‘yxati so‘ralganda catalog kontekstdagi barcha available itemlarni ko‘rsat: story/post/reelga bog‘langan bo‘lsa ham chiqar. Hech bir available itemni tashlab ketma. Javobdagi bullet soni context.catalog_count bilan teng bo‘lsin va context.catalog_names ichidagi hamma nomlar chiqsin."
-        " Katalog ro‘yxati so‘ralganda catalog_items array bo‘sh bo‘lsin. Faqat mijoz aniq bitta katalog gulini tanlasa yoki rasmini so‘rasa catalog_itemsga o‘sha bitta catalog_id va quantity=1 yoz."
-        " Mijoz 'ha' deb javob bersa, oldingi AI savolini historydan tushun. Agar oldingi savol katalog variantlari haqida bo‘lsa, variantlarni ko‘rsat yoki tanlashni so‘ra; hech qachon aynan bir xil savolni takrorlama."
-        " Agar mijoz story/post/reelni sent qilib yoki reply qilib 'shu', 'shundan kerak', 'narxi qancha' desa, 'Sizga qanday gul yoki buket kerak edi?' demagin. 'Bugungi tayyor variantlardan' deb boshlama. Story bo‘lsa 'Siz yozgan storydagi gul:', post bo‘lsa 'Siz yuborgan postdagi gul:', reel bo‘lsa 'Siz yuborgan reeldagi gul:' deb yoz."
-        " Agar conversation.post null bo‘lsa va mijoz oddiy katalogdan gul tanlasa, 'Siz yozgan postdagi/storydagi/reeldagi gul' deb yozma. Bunday holatda 'Katalogdagi gul:' yoki bevosita gul nomidan boshlagin. Catalog item social_postga bog‘langan bo‘lsa ham, mijoz post/story/reel yubormagan bo‘lsa post/story/reel deb atama."
-        " Agar mijoz yuborgan story/post/reel linki tizim izohida bazadan topilmadi deb kelsa yoki conversation.post bo‘sh bo‘lsa, oldingi post/reel/story yoki boshqa katalog gulini ishlatma. Javob ber: 'Bu yuborgan media bo‘yicha tizimda aniq ma'lumot topilmadi. Iltimos, qaysi gul ekanini yozib yuboring yoki ism-raqamingizni qoldiring, operatorimiz aniqlashtirib bog‘lanadi.'"
-        " Agar conversation contextida post mavjud bo‘lsa va mijoz 'bo‘yi nechchi', 'narxi qancha', 'bormi', 'qoldimi', 'shu gul', 'shu buket' kabi noaniq savol bersa, albatta o‘sha post/story/reeldagi katalog gulini nazarda tutyapti deb qabul qil. Bunday holatda 'Qaysi gulni nazarda tutyapsiz?' deb so‘rama."
-        " Mijoz story/post/reeldagi gul bo‘yini so‘rasa, catalog height_cm va compositiondagi gul bo‘yidan javob ber. Ma'lumot contextda bo‘lsa umumiy gul turini aniqlashtirishga qaytma."
-        " Javobda arrangement_type enum qiymatlarini inglizcha yozma: 'bouquet' emas 'buket', 'basket' emas 'savat', 'stems' emas 'gulning o‘zi' deb yoz. Lekin mijozga 'gulning o‘zi sotiladi' degan ma'noda yozma, chunki gulning o‘zi dona/pochka holida odatda sotilmaydi."
-        " 'Qabul qilamizmi?', 'davom ettiraymi?' kabi g‘alati yoki noaniq savollar yozma. Tayyor buket/savatni taklif qilganda oxirida tabiiy savol ber: 'Shu buketdan buyurtma qilmoqchimisiz?' yoki 'Shu savatdan nechta kerak bo‘ladi?'"
-        " 'Operator bilan muqobil yechim qilamizmi?', 'muqobil yechim qilamizmi?', 'operator bilan hal qilamizmi?' kabi g‘alati iboralarni yozma. Operator kerak bo‘lsa tabiiy yoz: 'Ismingiz va telefon raqamingizni qoldirsangiz, operatorimiz aniq ma'lumot berib aloqaga chiqadi.'"
-        " 'Sizga buketmi yoki savatdagi tayyor kompozitsiyami kerak?', 'Ajoyib! Sizga buketmi yoki savatdagi tayyor kompozitsiya kerakligini aniqlasak?', 'Ajoyib, buketga qaror qilganingiz uchun rahmat', 'Aniq narxni operator tasdiqlaydi' iboralarini yozma."
-        " Inglizcha 'Catalogue', 'catalog', 'composition' so‘zlarini mijozga yozma; o‘zbekcha 'Katalog', 'tarkib', 'kompozitsiya' deb yoz."
-        " Har bir katalog gulini ko‘rsatganda 'Shu buketdan buyurtma qilmoqchimisiz?' deb qayta-qayta so‘rama. Katalog ro‘yxati yoki rasm ko‘rsatish bosqichida oxirida bitta yengil savol yetarli: 'Qaysi biri yoqdi?' yoki 'Yana boshqasini ham ko‘rsataymi?'"
-        " Story/post/reel/katalogdagi tayyor gul haqida javob berganda katalog item ichidagi nechta dona gul ketganini yoki post flower_countni mijoz so‘ramasa yozma. Faqat nomi, buket/savat turi, narxi va katalogda nechta borligini ayt."
-        " Agar mijoz tayyor katalog buketiga nechta gul ketganini so‘rasa, catalog composition ma'lumotidan javob ber. Composition mavjud bo‘lsa 'katalogda ko‘rsatilmagan' demagin."
-        " Mijoz arzonlashtirish, skidka, chegirma, savdolashish yoki narxni tushirishni so‘rasa, chegirma va'da qilma va foiz aytma. Javob mazmuni shunday bo‘lsin: 'Hurmatli mijoz, bizning narxlarimiz shahardagi ko‘p gul do‘konlarga nisbatan ancha qulay. Chegirma yoki yakuniy narx masalasini operatorimiz bilan gaplashib ko‘rsangiz bo‘ladi 😊' Keyin ism va telefon raqamini so‘rab, lead_ready uchun kerakli ma'lumotlarni yig‘."
-        " recent_orders faqat mijozning eski buyurtmalari haqida ma'lumot berish uchun. Mijoz 'oldingi zakazim nima edi', 'oxirgi nima olgandim' desa shu ro‘yxatdan javob ber. Eski buyurtmani yangi lead deb yaratma, mijoz 'yana shundan olaman' yoki yangi buyurtmani aniq tasdiqlamaguncha lead_ready=false bo‘lsin."
-        " Agar conversation.fresh_session=true bo‘lsa va conversation.has_ai_reply_in_session=false bo‘lsa, mijoz ertasi kuni yoki uzoq tanaffusdan keyin yozgan bo‘ladi: salomlashuvdan boshlagin, oldingi suhbatdagi savollarni yoki takliflarni mijoz o‘zi eslatmasa eslatma. recent_ordersni ham faqat mijoz o‘zi oldingi zakaz haqida so‘rasa ishlat."
-        " Mijoz 'qanaqa tayyor gullar bor', 'katalog bormi', 'tayyor buketlar' desa rasm yuborishni so‘rama va har bir rasmni alohida tavsiflama. Catalog kontekstdagi barcha available gullarni nomi, turi, narxi, qoldiq soni bilan qisqa ro‘yxat qil. Oxirida 'Qaysi biri qiziq bo‘lsa, tanlang, rasmini ko‘rsataman' degan mazmunda bitta savol ber."
-        " Mijoz katalog ro‘yxatidan birini tanlasa yoki story/post/reeldagi tayyor gulni olmoqchi bo‘lsa, catalog_items arrayga catalog id va quantity yoz. Bir nechta tayyor buket/savat olsa ham hammasini catalog_itemsga yoz."
-        " Mijoz bir nechta tayyor katalog gullarni ko‘rib chiqqan bo‘lsa va oxirida aniq qaysini olishi noma'lum bo‘lsa, ism/telefon so‘rama. Avval 'Sizga qaysi biri yoqdi, qaysi guldan buyurtma qilamiz?' deb aniqlashtir."
-        " Mijoz custom buket yoki savat yig‘dirsa, stock_items arrayga batch_id, quantity_stems va quantity_bunches yoz. Bir nechta buket/savat bo‘lsa lead_request ichida har birining soni va tarkibi alohida aniq yozilsin."
-        " Mijoz hali 'olaman', 'rasmiylashtiring', 'zakaz qilaman', 'shu kerak' demagan bo‘lsa ism yoki telefon so‘rama va lead_ready=false qaytar. Avval ehtiyoj turini aniqlashtir: 'Sizga buket qilib beraylikmi yoki savatga yig‘amizmi?' kabi bitta chiroyli savol ber. 'Gulning o‘zini olmoqchimisiz?' deb so‘rama."
-        " CRM lead yaratishda arrangement_type aniq bo‘lsin: buket bo‘lsa bouquet, savat bo‘lsa basket, gulning o‘zi/donalab bo‘lsa stems, tayyor katalog guli bo‘lsa catalog. Tur aniq bo‘lmasa lead yaratma."
-        " Mijoz buket yoki savat tanlasa, javobda florist xizmatini alohida ayt: 'Florist xizmati 50 000 so‘mdan boshlanadi, gul hajmi va bezagiga qarab o‘zgaradi.'"
-        " Story, reel, post yoki katalogdagi tayyor buket/kompozitsiya haqida so‘ralsa florist xizmatini alohida aytma va narxga qo‘shma, chunki ular tayyor yasalgan sotuvdagi gullar."
-        " Tayyor katalog/post/story/reel narxida 'operator narxni tasdiqlaydi', 'aniq narxni operator tasdiqlaydi' dema. Bu narxlar aniq ko‘rsatiladi. Operator faqat buyurtma tafsilotlari, vaqt, yetkazish va mavjudlikni yakuniy kelishadi."
-        " Lead yaratish uchun JSON estimated_price qiymatida florist xizmatini alohida qo‘shib yuborma; tizim operator sotildi qilganda florist_fee maydonida yuritadi."
+        " Function calling qoidasi: javobni o‘zing yozasan, lekin real ma'lumot kerak bo‘lsa avval function tool chaqir. Salom, rahmat, umumiy savol yoki oddiy aniqlashtirish uchun tool chaqirma."
+        " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha item quantity=1 bo‘lsin."
+        " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa get_baskets chaqir."
+        " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
+        " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
+        " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
+        " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
+        " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
+        " Agar mijoz faqat salomlashsa, faqat qisqa salomlashib qanday yordam kerakligini so‘ra; katalog, post, story, reel yoki tayyor variantlar ro‘yxatini yozma."
     )
-    final_rules = (
-        " ENG MUHIM SO‘NGGI QOIDALAR: Agar conversation.ai_replies_count > 0 bo‘lsa yoki input history ichida assistant/ai xabari bor bo‘lsa, javobni salomlashuv bilan boshlash mutlaqo taqiqlanadi. "
-        "Bunday holatda birinchi so‘z 'Ha', 'Albatta', 'Tushunarli', 'Mayli' yoki bevosita javob bo‘lishi mumkin, lekin 'Assalomu', 'Salom', 'Va alaykum' bo‘lmasin. "
-        "Mijoz yasab berish/yasatish haqida so‘rasa, bu custom buket yoki savat xizmati; tayyor katalog taklif qilma va gulning o‘zi sotilmaydi qoidasi bilan adashtirma. "
-        "Mijoz tayyor buket kerakmas desa katalogni takrorlama. Tayyor katalog narxida operator narxni tasdiqlaydi demagin. Katalog ro‘yxatida barcha available itemlarni ko‘rsat va rasm yuborish uchun catalog_itemsni faqat aniq tanlangan bitta itemga quantity=1 qilib to‘ldir."
-    )
-    instructions = ai_settings.system_prompt + sales_rules + final_rules + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean, catalog_items array, stock_items array."
+    instructions = ai_settings.system_prompt + sales_rules + " Final javobni JSON qaytar: reply, detected_language, customer_name, phone, lead_ready, lead_request, arrangement_type, estimated_price, handoff, catalog_items, stock_items."
     api_key = openai_api_key()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -753,27 +783,31 @@ def ai_reply(conversation):
         "instructions": instructions + "\nKONTEKST:\n" + json.dumps(context, ensure_ascii=False),
         "input": history,
         "max_output_tokens": 2000,
+        "max_tool_calls": 4,
+        "tools": ai_tool_definitions(),
         "reasoning": {"effort": "minimal"},
-        "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": {
-            "type": "object",
-            "properties": {
-                "reply": {"type": "string"},
-                "detected_language": {"type": "string", "enum": ["uz", "ru"]},
-                "customer_name": {"type": ["string", "null"]},
-                "phone": {"type": ["string", "null"]},
-                "lead_ready": {"type": "boolean"},
-                "lead_request": {"type": ["string", "null"]},
-                "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
-                "estimated_price": {"type": ["number", "null"]},
-                "handoff": {"type": "boolean"},
-                "catalog_items": {"type": "array", "items": {"type": "object", "properties": {"catalog_id": {"type": "integer"}, "quantity": {"type": "integer"}}, "required": ["catalog_id", "quantity"], "additionalProperties": False}},
-                "stock_items": {"type": "array", "items": {"type": "object", "properties": {"batch_id": {"type": "integer"}, "quantity_stems": {"type": "integer"}, "quantity_bunches": {"type": "number"}}, "required": ["batch_id", "quantity_stems", "quantity_bunches"], "additionalProperties": False}}
-            },
-            "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items", "stock_items"],
-            "additionalProperties": False
-        }}},
+        "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
     }
     response = client.responses.create(**response_kwargs)
+    for _ in range(4):
+        function_calls = [item for item in response.output if getattr(item, "type", "") == "function_call"]
+        if not function_calls:
+            break
+        tool_outputs = []
+        for call in function_calls:
+            arguments = json.loads(call.arguments or "{}")
+            output = execute_ai_tool(call.name, arguments, conversation)
+            tool_outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(output, ensure_ascii=False)})
+        response = client.responses.create(
+            model=ai_settings.openai_model or settings.OPENAI_MODEL,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            max_output_tokens=2000,
+            max_tool_calls=4,
+            tools=ai_tool_definitions(),
+            reasoning={"effort": "minimal"},
+            text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
+        )
     try:
         result = json.loads(response.output_text)
     except json.JSONDecodeError:
