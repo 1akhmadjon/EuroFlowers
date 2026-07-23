@@ -613,11 +613,12 @@ def ai_reply(conversation):
         session_messages.append(message)
     history_messages = list(reversed(session_messages))
     history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in history_messages]
+    has_ai_reply_in_session = any(message.sender == "ai" for message in history_messages)
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
         "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
-        "conversation": {"fresh_session": fresh_session},
+        "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session},
         "recent_orders": recent_customer_orders(customer),
         "stock": [{
             "batch_id": row.id,
@@ -673,6 +674,7 @@ def ai_reply(conversation):
     sales_rules = (
         " Qat'iy til qoidasi: mijoz o‘zbek lotinida yozsa o‘zbek lotinida javob ber. Mijoz o‘zbek kirill harflarida yozsa o‘zbek kirill harflarida javob ber. Mijoz aniq rus tilida yozsa rus tilida javob ber. Mijoz ingliz tilida yozsa ham ingliz tilida javob berma; o‘zbek lotinida qisqa javob ber: 'Men faqat o‘zbek va rus tillarida yordam bera olaman 🌸 O‘zbek tilida davom etamizmi?' Inglizcha gap va so‘zlarni aralashtirma."
         " Gulga aloqasi yo‘q savollarga umuman javob berma: kod yozish, dasturlash, siyosat, din, boshqa biznes, umumiy maslahat, hazil yoki boshqa mavzularda savol kelsa, savolni bajarma. Qisqa javob ber: 'Men faqat EuroFlowers gullari, buket va savatlar bo‘yicha yordam bera olaman 🌸 Sizga buket yoki savat kerakmi?' Kod, retsept, matn, reja yoki boshqa ishni yozib berma."
+        " Salomlashish qoidasi: conversation.has_ai_reply_in_session=false bo‘lsa va mijoz salomlashsa yoki yangi session boshlansa, bir marta salomlash. conversation.has_ai_reply_in_session=true bo‘lsa hech qachon 'Assalomu alaykum', 'Va alaykum assalom', 'Salom' deb boshlama; bevosita mijozning oxirgi savoliga javob ber."
         " Format qoidasi: javobda hech bir qatorni probel bilan boshlama. Bullet ishlatsang har qator to‘g‘ridan-to‘g‘ri '•' bilan boshlansin. '  Narx:' kabi oldida space bor qator yozma. Instagram uchun text plain bo‘lsin, markdown ishlatma."
         " Gul variantlarini taklif qilganda sarlavha bilan yoz: masalan 'Bizda bor Gortenziyalar:' yoki 'Hozir mavjud atirgullar:'. Keyin variantlarni bullet bilan ber."
         " EuroFlowersda gulning o‘zi dona yoki pochka holida odatda sotilmaydi. Mijoz dona, nechta dona gul, pochka, 1 pochka, 3 pochka, gulni o‘zini olish, faqat atirgul kerak kabi so‘rasa, dona/pochka narxini aytma va hisoblama. Javob mazmuni shunday bo‘lsin: 'Bizda gulning o‘zi dona yoki pochka holida ko‘p hollarda sotilmaydi. Gulni buket qilib yoki savatga yasatib olishingiz mumkin. Ismingiz va telefon raqamingizni qoldirsangiz, operatorimiz aniq ma'lumot berib aloqaga chiqadi.'"
@@ -686,11 +688,12 @@ def ai_reply(conversation):
         " Mijoz story/post/reeldagi gul bo‘yini so‘rasa, catalog height_cm va compositiondagi gul bo‘yidan javob ber. Ma'lumot contextda bo‘lsa umumiy gul turini aniqlashtirishga qaytma."
         " Javobda arrangement_type enum qiymatlarini inglizcha yozma: 'bouquet' emas 'buket', 'basket' emas 'savat', 'stems' emas 'gulning o‘zi' deb yoz. Lekin mijozga 'gulning o‘zi sotiladi' degan ma'noda yozma, chunki gulning o‘zi dona/pochka holida odatda sotilmaydi."
         " 'Qabul qilamizmi?', 'davom ettiraymi?' kabi g‘alati yoki noaniq savollar yozma. Tayyor buket/savatni taklif qilganda oxirida tabiiy savol ber: 'Shu buketdan buyurtma qilmoqchimisiz?' yoki 'Shu savatdan nechta kerak bo‘ladi?'"
+        " 'Operator bilan muqobil yechim qilamizmi?', 'muqobil yechim qilamizmi?', 'operator bilan hal qilamizmi?' kabi g‘alati iboralarni yozma. Operator kerak bo‘lsa tabiiy yoz: 'Ismingiz va telefon raqamingizni qoldirsangiz, operatorimiz aniq ma'lumot berib aloqaga chiqadi.'"
         " Story/post/reel/katalogdagi tayyor gul haqida javob berganda katalog item ichidagi nechta dona gul ketganini yoki post flower_countni mijoz so‘ramasa yozma. Faqat nomi, buket/savat turi, narxi va katalogda nechta borligini ayt."
         " Agar mijoz tayyor katalog buketiga nechta gul ketganini so‘rasa, catalog composition ma'lumotidan javob ber. Composition mavjud bo‘lsa 'katalogda ko‘rsatilmagan' demagin."
         " Mijoz arzonlashtirish, skidka, chegirma, savdolashish yoki narxni tushirishni so‘rasa, chegirma va'da qilma va foiz aytma. Javob mazmuni shunday bo‘lsin: 'Hurmatli mijoz, bizning narxlarimiz shahardagi ko‘p gul do‘konlarga nisbatan ancha qulay. Chegirma yoki yakuniy narx masalasini operatorimiz bilan gaplashib ko‘rsangiz bo‘ladi 😊' Keyin ism va telefon raqamini so‘rab, lead_ready uchun kerakli ma'lumotlarni yig‘."
         " recent_orders faqat mijozning eski buyurtmalari haqida ma'lumot berish uchun. Mijoz 'oldingi zakazim nima edi', 'oxirgi nima olgandim' desa shu ro‘yxatdan javob ber. Eski buyurtmani yangi lead deb yaratma, mijoz 'yana shundan olaman' yoki yangi buyurtmani aniq tasdiqlamaguncha lead_ready=false bo‘lsin."
-        " Agar conversation.fresh_session=true bo‘lsa, mijoz ertasi kuni yoki uzoq tanaffusdan keyin yozgan bo‘ladi: salomlashuvdan boshlagin, oldingi suhbatdagi savollarni yoki takliflarni mijoz o‘zi eslatmasa eslatma. recent_ordersni ham faqat mijoz o‘zi oldingi zakaz haqida so‘rasa ishlat."
+        " Agar conversation.fresh_session=true bo‘lsa va conversation.has_ai_reply_in_session=false bo‘lsa, mijoz ertasi kuni yoki uzoq tanaffusdan keyin yozgan bo‘ladi: salomlashuvdan boshlagin, oldingi suhbatdagi savollarni yoki takliflarni mijoz o‘zi eslatmasa eslatma. recent_ordersni ham faqat mijoz o‘zi oldingi zakaz haqida so‘rasa ishlat."
         " Mijoz 'qanaqa tayyor gullar bor', 'katalog bormi', 'tayyor buketlar' desa rasm yuborishni so‘rama va har bir rasmni alohida tavsiflama. Catalog kontekstdagi barcha available gullarni nomi, turi, narxi, qoldiq soni bilan qisqa ro‘yxat qil. Oxirida 'Qaysi biri qiziq bo‘lsa, tanlang, rasmini ko‘rsataman' degan mazmunda bitta savol ber."
         " Mijoz katalog ro‘yxatidan birini tanlasa yoki story/post/reeldagi tayyor gulni olmoqchi bo‘lsa, catalog_items arrayga catalog id va quantity yoz. Bir nechta tayyor buket/savat olsa ham hammasini catalog_itemsga yoz."
         " Mijoz bir nechta tayyor katalog gullarni ko‘rib chiqqan bo‘lsa va oxirida aniq qaysini olishi noma'lum bo‘lsa, ism/telefon so‘rama. Avval 'Sizga qaysi biri yoqdi, qaysi guldan buyurtma qilamiz?' deb aniqlashtir."
