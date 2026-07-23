@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import catalog_image_for_conversation, create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update
+from .services import catalog_image_for_conversation, create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -158,11 +158,33 @@ class BusinessRulesTests(TestCase):
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value={"ok": True}) as image_mock:
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value={"ok": True}) as image_mock:
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
         image_mock.assert_called_once_with("555", reply_message.conversation, reply_message)
+        rich_mock.assert_called_once_with("555", "Mana rasmi")
         text_mock.assert_called_once_with("555", "Mana rasmi")
+
+    def test_telegram_catalog_rich_message_builds_table(self):
+        text = "Ha, tayyor buketlar bor.\n\n1) Pion buketi — 800 000 so‘m (10 dona mavjud)\n2) Pushti atirgul buketi — 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
+        rich = telegram_catalog_rich_message(text)
+        self.assertIsNotNone(rich)
+        self.assertIn("<table bordered striped>", rich["html"])
+        self.assertIn("<td>Pion buketi</td>", rich["html"])
+        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
+
+    def test_delayed_telegram_reply_prefers_rich_catalog_message(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:rich", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer_message = conversation.messages.create(sender="customer", text="tayyor buketlar")
+        reply_text = "Ha, tayyor buketlar bor.\n1) Pion buketi — 800 000 so‘m (10 dona mavjud)\n2) Pushti atirgul buketi — 500 000 so‘m (3 dona mavjud)\nQaysi biri yoqdi?"
+        reply_message = Message.objects.create(conversation=conversation, sender="ai", text=reply_text, metadata={"catalog_items": []})
+        from unittest.mock import patch
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value={"ok": True}) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value=None):
+            result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
+        self.assertEqual(result, reply_message.id)
+        rich_mock.assert_called_once_with("555", reply_text)
+        text_mock.assert_not_called()
 
     def test_catalog_list_metadata_does_not_trigger_image(self):
         self.item.status = "available"

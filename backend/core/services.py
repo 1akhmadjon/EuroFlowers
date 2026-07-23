@@ -1,6 +1,7 @@
 import json
 import re
 import requests
+from html import escape
 from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
@@ -520,6 +521,10 @@ def telegram_send(chat_id, text):
     return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
 
 
+def telegram_send_rich(chat_id, rich_message):
+    return telegram_api("sendRichMessage", {"chat_id": chat_id, "rich_message": rich_message})
+
+
 def telegram_send_image(chat_id, image_url):
     return telegram_api("sendPhoto", {"chat_id": chat_id, "photo": image_url})
 
@@ -538,6 +543,49 @@ def send_telegram_context_image(chat_id, conversation, reply=None):
 
 def telegram_sender_action(chat_id, action="typing"):
     return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
+
+
+def telegram_catalog_rows_from_text(text):
+    rows = []
+    for line in (text or "").splitlines():
+        match = re.match(r"^\s*(?:\d+[).]|•)\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\((?P<qty>[^)]*)\))?\s*$", line, flags=re.IGNORECASE)
+        if not match:
+            continue
+        quantity = match.group("qty") or ""
+        rows.append({
+            "name": match.group("name").strip(),
+            "price": normalize_ai_reply_text(match.group("price").strip()),
+            "quantity": quantity.replace("mavjud", "").strip(" ,.-") or "-",
+        })
+    return rows
+
+
+def telegram_catalog_rich_message(text):
+    rows = telegram_catalog_rows_from_text(text)
+    if len(rows) < 2:
+        return None
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:\d+[).]|•)\s*", line)), 0)
+    last_row_index = first_row_index + len(rows) - 1
+    intro = " ".join(lines[:first_row_index]).strip()
+    outro = " ".join(lines[last_row_index + 1:]).strip()
+    html = ""
+    if intro:
+        html += f"<p>{escape(intro)}</p>"
+    html += "<table bordered striped><caption>Tayyor katalog</caption><tr><th>Gul</th><th>Narx</th><th>Qoldiq</th></tr>"
+    for row in rows[:20]:
+        html += f"<tr><td>{escape(row['name'])}</td><td>{escape(row['price'])}</td><td>{escape(row['quantity'])}</td></tr>"
+    html += "</table>"
+    if outro:
+        html += f"<p>{escape(outro)}</p>"
+    return {"html": html, "skip_entity_detection": True}
+
+
+def telegram_send_catalog_rich_if_possible(chat_id, text):
+    rich_message = telegram_catalog_rich_message(text)
+    if not rich_message:
+        return None
+    return telegram_send_rich(chat_id, rich_message)
 
 
 def send_lead_recall(lead_id):
