@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_tool_definitions, catalog_image_for_conversation, create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_tool_definitions, catalog_image_for_conversation, create_ai_reply_for_conversation, deduct_catalog_stock, execute_ai_tool, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -243,6 +243,17 @@ class BusinessRulesTests(TestCase):
         rich_mock.assert_called_once_with("555", "Mana rasmi")
         text_mock.assert_called_once_with("555", "Mana rasmi")
 
+    def test_delayed_telegram_reply_skips_context_image_after_tool_image(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
+        reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Rasmini yubordim.", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}], "image_tool_results": [{"image_sent": True, "catalog_id": self.item.id}]})
+        from unittest.mock import patch
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None), patch("core.tasks.telegram_send", return_value={"ok": True}), patch("core.tasks.send_telegram_context_image", return_value={"ok": True}) as image_mock:
+            result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
+        self.assertEqual(result, reply_message.id)
+        image_mock.assert_not_called()
+
     def test_telegram_catalog_rich_message_builds_table(self):
         text = "Ha, tayyor buketlar bor.\n\n1. Pion buketi id 25 - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
         rich = telegram_catalog_rich_message(text)
@@ -314,6 +325,21 @@ class BusinessRulesTests(TestCase):
         self.assertIn("qanaqa gullar bor", tools["get_catalog"])
         self.assertIn("Umumiy 'qanaqa gullar bor' so‘rovida chaqirilmaydi", tools["search_stock"])
         self.assertIn("custom savat yasatmoqchi", tools["get_baskets"])
+        self.assertIn("send_catalog_image", tools)
+
+    def test_send_catalog_image_tool_uses_selected_catalog(self):
+        self.item.image_url = "https://example.com/oq-buket.jpg"
+        self.item.save(update_fields=["image_url", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="oq buket rasmi")
+        from unittest.mock import patch
+        with patch("core.services.telegram_send_image", return_value={"ok": True}) as image_mock:
+            result = execute_ai_tool("send_catalog_image", {"catalog_id": self.item.id}, conversation)
+        self.assertTrue(result["image_sent"])
+        self.assertEqual(result["catalog_id"], self.item.id)
+        image_mock.assert_called_once_with("123", "https://example.com/oq-buket.jpg")
+        self.assertTrue(Message.objects.filter(conversation=conversation, sender="system", metadata__catalog_id=self.item.id).exists())
 
     def test_delayed_telegram_reply_prefers_rich_catalog_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:rich", name="Ahmad", phone="+998901234567")

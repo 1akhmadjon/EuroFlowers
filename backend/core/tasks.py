@@ -58,10 +58,11 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        try:
-            send_instagram_context_image(recipient_id, reply.conversation, reply)
-        except Exception as exc:
-            print(f"INSTAGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} recipient={recipient_id} error={exc}", flush=True)
+        if not (reply.metadata or {}).get("image_tool_results"):
+            try:
+                send_instagram_context_image(recipient_id, reply.conversation, reply)
+            except Exception as exc:
+                print(f"INSTAGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} recipient={recipient_id} error={exc}", flush=True)
         for text in split_location_reply(reply.text):
             instagram_send(recipient_id, text)
         return reply.id
@@ -93,10 +94,11 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        try:
-            send_telegram_context_image(chat_id, reply.conversation, reply)
-        except Exception as exc:
-            print(f"TELEGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} chat={chat_id} error={exc}", flush=True)
+        if not (reply.metadata or {}).get("image_tool_results"):
+            try:
+                send_telegram_context_image(chat_id, reply.conversation, reply)
+            except Exception as exc:
+                print(f"TELEGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} chat={chat_id} error={exc}", flush=True)
         rich_sent = False
         try:
             rich_sent = bool(telegram_send_catalog_rich_if_possible(chat_id, reply.text))

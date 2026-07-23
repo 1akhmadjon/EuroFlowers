@@ -541,6 +541,29 @@ def send_telegram_context_image(chat_id, conversation, reply=None):
     return result
 
 
+def send_catalog_image_for_conversation(conversation, catalog_id):
+    item = CatalogItem.objects.filter(id=catalog_id, branch=conversation.branch).exclude(image_url="").first()
+    if not item or not item.image_url.startswith("https://"):
+        return {"ok": False, "image_sent": False, "catalog_id": catalog_id, "detail": "Rasm topilmadi"}
+    latest_customer_id = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("id", flat=True).first() or 0
+    marker = f"ai_tool_image_sent:customer:{latest_customer_id}:catalog:{item.id}:{item.image_url}"
+    existing = Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).first()
+    if existing:
+        return {"ok": True, "image_sent": True, "already_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": item.image_url}
+    recipient = conversation.customer.instagram_user_id or ""
+    if recipient.startswith("telegram:"):
+        result = telegram_send_image(recipient.split(":", 1)[1], item.image_url)
+        text = "Telegram image sent"
+    elif recipient:
+        result = instagram_send_image(recipient, item.image_url)
+        text = "Instagram image sent"
+    else:
+        result = {"mocked": True}
+        text = "Catalog image sent"
+    Message.objects.create(conversation=conversation, sender="system", text=text, metadata={"media_image_key": marker, "image_url": item.image_url, "catalog_id": item.id, "catalog_name": item.name_uz, "result": result})
+    return {"ok": True, "image_sent": True, "already_sent": False, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": item.image_url}
+
+
 def telegram_sender_action(chat_id, action="typing"):
     return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
@@ -813,6 +836,7 @@ def ai_tool_definitions():
         {"type": "function", "name": "get_baskets", "description": "Faqat mijoz custom savat yasatmoqchi/yig‘dirmoqchi bo‘lsa mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_recent_orders", "description": "Mijoz oldingi buyurtmalarini so‘raganda olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_post_context", "description": "Conversation story/post/reel bilan bog‘langan bo‘lsa, o‘sha media ma’lumotini olish.", "parameters": empty_parameters, "strict": True},
+        {"type": "function", "name": "send_catalog_image", "description": "Mijoz aniq katalogdagi buket/savat rasmini so‘raganda shu katalog item rasmini Instagram/Telegram chatga yuborish. Rasm so‘ralganda final javobdan oldin doim shu tool chaqiriladi.", "parameters": {"type": "object", "properties": {"catalog_id": {"type": "integer", "description": "Rasmi yuboriladigan CatalogItem id"}}, "required": ["catalog_id"], "additionalProperties": False}, "strict": True},
     ]
 
 
@@ -828,6 +852,8 @@ def execute_ai_tool(name, arguments, conversation):
         return {"items": recent_customer_orders(conversation.customer)}
     if name == "get_post_context":
         return {"post": ai_post_context(conversation)}
+    if name == "send_catalog_image":
+        return send_catalog_image_for_conversation(conversation, arguments.get("catalog_id"))
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -1036,7 +1062,8 @@ def ai_reply(conversation):
         " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. Katalog nomida ham 'id 25' kabi matn qo‘shma."
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
-        " Agar final catalog_items ichida item yuborsang, backend rasmni o‘zi yuboradi. Bunday javobda 'rasmni yuboraymi', 'rasmini ko‘rsataymi' yoki shunga o‘xshash savol yozma."
+        " Rasm yuborish faqat send_catalog_image tool orqali qilinadi. Final catalog_items rasm yuborish uchun emas, tanlangan katalogni metadata/lead uchun belgilashga ishlatiladi."
+        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq itemni top, keyin send_catalog_image(catalog_id) toolini chaqir. Final javobda 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rsataymi' dema, faqat 'Rasmini yubordim' deb yoz."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
@@ -1059,6 +1086,7 @@ def ai_reply(conversation):
         "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
     }
     response = client.responses.create(**response_kwargs)
+    image_tool_results = []
     for _ in range(4):
         function_calls = [item for item in response.output if getattr(item, "type", "") == "function_call"]
         if not function_calls:
@@ -1067,6 +1095,8 @@ def ai_reply(conversation):
         for call in function_calls:
             arguments = json.loads(call.arguments or "{}")
             output = execute_ai_tool(call.name, arguments, conversation)
+            if call.name == "send_catalog_image":
+                image_tool_results.append(output)
             tool_outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(output, ensure_ascii=False)})
         response = client.responses.create(
             model=ai_settings.openai_model or settings.OPENAI_MODEL,
@@ -1087,7 +1117,11 @@ def ai_reply(conversation):
         result = json.loads(response.output_text)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
+    if image_tool_results:
+        result["image_tool_results"] = image_tool_results
     result["reply"] = clean_catalog_listing_text(normalize_ai_reply_text(result.get("reply", "")))
+    if image_tool_results:
+        result["reply"] = re.sub(r"rasmni yuboraman|rasmini yuboraman|rasm yuboraman", "Rasmini yubordim", result["reply"], flags=re.IGNORECASE)
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
     if result.get("catalog_items"):
