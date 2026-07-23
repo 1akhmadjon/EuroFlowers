@@ -548,14 +548,12 @@ def telegram_sender_action(chat_id, action="typing"):
 def telegram_catalog_rows_from_text(text):
     rows = []
     for line in (text or "").splitlines():
-        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\((?P<qty>[^)]*)\))?\s*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\([^)]*\))?\s*$", line, flags=re.IGNORECASE)
         if not match:
             continue
-        quantity = match.group("qty") or ""
         rows.append({
             "name": match.group("name").strip(),
             "price": normalize_ai_reply_text(match.group("price").strip()),
-            "quantity": quantity.replace("mavjud", "").strip(" ,.-") or "-",
         })
     return rows
 
@@ -572,9 +570,9 @@ def telegram_catalog_rich_message(text):
     html = ""
     if intro:
         html += f"<p>{escape(intro)}</p>"
-    html += "<table bordered striped><caption>Tayyor katalog</caption><tr><th>Gul</th><th>Narx</th><th>Qoldiq</th></tr>"
+    html += "<table bordered striped><caption>Tayyor katalog</caption><tr><th>Gul</th><th>Narx</th></tr>"
     for row in rows[:20]:
-        html += f"<tr><td>{escape(row['name'])}</td><td>{escape(row['price'])}</td><td>{escape(row['quantity'])}</td></tr>"
+        html += f"<tr><td>{escape(row['name'])}</td><td>{escape(row['price'])}</td></tr>"
     html += "</table>"
     if outro:
         html += f"<p>{escape(outro)}</p>"
@@ -673,7 +671,6 @@ def ai_catalog_rows(query="", limit=24):
             "name_ru": row.name_ru,
             "type": row.arrangement_type,
             "price": str(row.price),
-            "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
             "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
             "composition": catalog_composition_summary(row),
         })
@@ -727,7 +724,7 @@ def ai_post_context(conversation):
         "description_uz": post.description_uz,
         "description_ru": post.description_ru,
         "price": str(post.price or ""),
-        "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "quantity_available": max(row.quantity_total - row.quantity_sold, 0), "composition": catalog_composition_summary(row)} for row in post_catalog],
+        "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "composition": catalog_composition_summary(row)} for row in post_catalog],
     }
 
 
@@ -988,6 +985,8 @@ def ai_reply(conversation):
         " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa faqat mijoz savat desa get_baskets chaqir; mijoz buket desa savat variantlarini sanama."
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
+        " Katalog ro‘yxatida hech qachon qoldiq soni, nechta borligi yoki 'mavjud: 3 dona' kabi matn yozma. Faqat nomi va narxini yoz."
+        " Katalog gulining tarkibi, qaysi guldan qancha ketgani yoki composition ma'lumotini faqat mijoz aniq so‘rasa ayt."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."

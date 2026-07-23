@@ -170,8 +170,10 @@ class BusinessRulesTests(TestCase):
         rich = telegram_catalog_rich_message(text)
         self.assertIsNotNone(rich)
         self.assertIn("<table bordered striped>", rich["html"])
+        self.assertNotIn("<th>Qoldiq</th>", rich["html"])
         self.assertIn("<td>Pion buketi</td>", rich["html"])
         self.assertIn("<td>800 000 so‘m</td>", rich["html"])
+        self.assertNotIn("<td>10 dona</td>", rich["html"])
 
     def test_ai_reply_handles_accidental_message_without_openai(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-accidental")
