@@ -740,16 +740,18 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
     normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s*\(?\bcatalog[_ ]?id\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bUZS\b", "so‘m", normalized, flags=re.IGNORECASE)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
 
 
 def remove_image_offer_after_selection(text):
     if not text:
         return ""
-    image_words = ["rasmni yuboraymi", "rasmini yuboraymi", "rasm yuboraymi", "rasmini ko‘rsataymi", "rasmini ko'rsataymi", "rasmni ko‘rsataymi", "rasmni ko'rsataymi"]
+    image_words = ["rasmni yuboraymi", "rasmini yuboraymi", "rasm yuboraymi", "rasmini ko‘rsataymi", "rasmini ko'rsataymi", "rasmni ko‘rsataymi", "rasmni ko'rsataymi", "rasmni ko‘rsatish", "rasmni ko'rsatish", "rasm ko‘rsatish", "rasm ko'rsatish"]
     cleaned = text
     for word in image_words:
         cleaned = re.sub(rf"(^|[.?!]\s+|\n)[^.?!\n]*{re.escape(word)}[^.?!\n]*[.?!]?", lambda match: match.group(1).strip() if match.group(1).strip() else "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"[^.?!\n]*\brasm\w*[^.?!\n]*(telefon|raqam|manzil|yetkaz)[^.?!\n]*[.?!]?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned or text
 
