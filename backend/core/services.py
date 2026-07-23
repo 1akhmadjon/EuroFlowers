@@ -747,14 +747,27 @@ def remove_premature_catalog_contact_request(text):
     if "katalog" not in lowered and "tayyor" not in lowered:
         return text
     markers = ["telefon", "raqam", "manzil", "yetkaz"]
+    cleaned = text
     for separator in [" Yoki ", "\nYoki ", " yoki ", "\nyoki "]:
-        head, sep, tail = text.rpartition(separator)
+        head, sep, tail = cleaned.rpartition(separator)
         if sep and any(marker in tail.lower() for marker in markers):
-            return head.rstrip()
-    lines = text.splitlines()
+            cleaned = head.rstrip()
+            break
+    lines = cleaned.splitlines()
+    if lines:
+        last = lines[-1]
+        lowered_last = last.lower()
+        marker_positions = [lowered_last.find(marker) for marker in markers if marker in lowered_last]
+        if marker_positions:
+            cut_at = min(marker_positions)
+            lines[-1] = last[:cut_at].rstrip(" .")
     while lines and any(marker in lines[-1].lower() for marker in markers):
         lines.pop()
-    return "\n".join(lines).rstrip()
+    cleaned = "\n".join(lines).rstrip()
+    cleaned_lines = cleaned.splitlines()
+    if cleaned != text and (not cleaned_lines or "?" not in cleaned_lines[-1]):
+        cleaned = cleaned.rstrip() + "\n\nQaysi biri yoqdi, rasmini ko‘rsataman?"
+    return cleaned
 
 
 def ai_reply(conversation):
@@ -843,7 +856,7 @@ def ai_reply(conversation):
     result["reply"] = normalize_ai_reply_text(result.get("reply", ""))
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
-    if not result.get("lead_ready") and not result.get("catalog_items"):
+    if not result.get("catalog_items"):
         result["reply"] = remove_premature_catalog_contact_request(result["reply"])
     return result
 
