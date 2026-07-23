@@ -745,6 +745,11 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"[^.?!\n]*(yetkazish/sana/vaqt|sana/vaqt|yetkazish vaqti)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
     normalized = re.sub(r"\bxom\s+(pion|pioni|gul|guli)\b", r"\1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\bolmaysizmi\b", "yuborasizmi", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\btaqsimlandisini\b", "taqsimlanishini", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bQani,\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s*yoki alohida 10 dona novdali atirgul sifatida yetkazib beraylikmi", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"Coral Charm katalogi tayyor gul bo‘lsa, katalogdan tekshirib chiqay[.?!]?\s*", "Coral Charm dan custom buket qilib tayyorlab beramiz. ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s*katalogdan ko‘rsatib beraymi\??", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
@@ -858,7 +863,9 @@ def ai_reply(conversation):
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
+        " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
         " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."
+        " Coral Charm, pion, atirgul kabi stock gul nomlarini mijoz custom yasatish kontekstida aytsa, katalogga o‘tkazma. Katalog faqat mijoz tayyor buket/katalog/story/post/reel so‘raganda ishlatiladi."
         " Mijoz aniq gul, miqdor, telefon va manzilni yuborgan bo‘lsa, keyingi savol faqat ism bo‘lsin. Mijoz ismini yozsa lead_ready=true qaytar."
         " 'Flarisla', 'floristla', 'floristlar', 'florisla' kabi yozuvlar florist xizmatini bildiradi, gul nomi emas. Bunday savolga 'Ha, floristlarimiz chiroyli qilib yig‘ib beradi' deb qisqa javob ber."
         " Ichki cheklovlarni mijozga yozma: 'so‘ramaymiz', 'taqiqlanadi', 'hozir so‘ramaymiz' kabi iboralarni ishlatma."
