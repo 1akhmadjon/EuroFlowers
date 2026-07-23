@@ -891,6 +891,10 @@ def ai_response_schema():
 def normalize_ai_reply_text(text):
     normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
     normalized = normalized.replace("—", "-").replace("–", "-")
+    normalized = re.sub(r"operator\s*/\s*jamoa", "operatorlarimiz", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bjamoamiz\b", "operatorlarimiz", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bjamoa\b", "operatorlarimiz", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\boperatorimiz\b", "operatorlarimiz", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"(?m)^\s*•\s*", "", normalized)
     normalized = re.sub(r"\(([^()]{1,80})\)", r"\1", normalized)
     normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
@@ -912,6 +916,8 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"[^.?!\n]*stokdan topolmadim[^.?!\n]*[.?!]?", "Bu gul bo‘yicha aniq ma'lumotni operatorimiz tekshirib beradi.", normalized, flags=re.IGNORECASE).strip()
     normalized = re.sub(r"[^.?!\n]*Pochka odatda[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
     normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+(Do[‘'ʻ`]?kon manzili:|Manzil:)", r"\n\n\1", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\.\s+(Operatorlarimiz siz bilan bog[‘'ʻ`]?lanadi)", r".\n\n\1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
 
@@ -1132,7 +1138,7 @@ def ai_reply(conversation):
         " Yetkazish, sana, vaqt va manzilni mijoz buyurtmani aniq tasdiqlamaguncha so‘rama. Custom jarayonda avval gul/rang/miqdor/buket-savatni aniqlashtir."
         " 'olmaysizmi?' kabi g‘alati savol yozma. 'Yozib yuborasizmi?' yoki 'Tasdiqlaysizmi?' deb yoz."
         " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
-        " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operator/jamoa bog‘lanishini ayt."
+        " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operatorlarimiz bog‘lanishini ayt. Hech qachon 'operator/jamoa', 'jamoa' yoki 'operatorimiz' deb yozma, faqat 'operatorlarimiz' deb yoz."
         " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. 'catalog id 24', 'id yuboring', '24 deb yozing' kabi gaplar mutlaqo taqiqlanadi."
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
