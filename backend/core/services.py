@@ -817,6 +817,8 @@ def ai_reply(conversation):
         result = json.loads(response.output_text)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
+    if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
+        result["catalog_items"] = []
     return result
 
 
