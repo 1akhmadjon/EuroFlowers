@@ -531,27 +531,32 @@ class ApiTests(TestCase):
 
     def test_mini_app_lead_history_returns_customer_orders(self):
         branch = Branch.objects.create(name="Mini", code="MINI")
-        flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="hydrangea")
-        variant = FlowerVariant.objects.create(flower=flower, name_uz="Blue", name_ru="Blue", color_uz="Moviy", color_ru="Синий")
-        batch = StockBatch.objects.create(branch=branch, variant=variant, batch_number="M-1", height_cm=50, stems_per_bunch=5, received_stems=50, remaining_stems=50, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=100000, minimum_sale_stems=1)
-        packaging = Packaging.objects.create(branch=branch, packaging_type="basket", name_uz="Mini savat", name_ru="Мини корзина", size="S", capacity_min_stems=1, capacity_max_stems=10, quantity=5, sale_price=120000)
+        CatalogItem.objects.create(branch=branch, name_uz="Mini katalog", name_ru="Мини каталог", arrangement_type="bouquet", price=250000, status="available")
         init_data = 'user={"id":777,"first_name":"Ali"}'
-        payload = {"init_data": init_data, "branch": branch.id, "arrangement_type": "basket", "items": [{"stock_batch": batch.id, "quantity_stems": 3}], "packaging": packaging.id, "name": "Ali", "phone": "901234567", "note": "Bugun kerak"}
-        response = APIClient().post("/api/mini-app/leads/", payload, format="json")
+        payload = {"init_data": init_data, "branch": branch.id, "arrangement_type": "basket", "request_text": "7 ta gortenziya savatga", "name": "Ali", "phone": "901234567", "note": "Bugun kerak"}
+        from unittest.mock import patch
+        quote = {"branch": branch, "lines": [{"type": "custom_text", "request_text": "7 ta gortenziya savatga"}], "packaging": None, "florist_fee": "50000", "estimated_price": "750000", "price_is_estimate": True, "ai_note": "Taxminiy narx"}
+        with patch("core.views.mini_app_custom_quote_ai", return_value=quote):
+            response = APIClient().post("/api/mini-app/leads/", payload, format="json")
         self.assertEqual(response.status_code, 201)
         lead = Lead.objects.get(source="mini_app")
         self.assertEqual(lead.customer.instagram_user_id, "miniapp:777")
         self.assertEqual(lead.customer.phone, "+998901234567")
-        self.assertEqual(lead.details["lines"][0]["quantity_stems"], 3)
+        self.assertEqual(lead.details["lines"][0]["request_text"], "7 ta gortenziya savatga")
+        self.assertTrue(lead.details["price_is_estimate"])
         response = APIClient().get("/api/mini-app/me/", {"init_data": init_data})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["customer"]["name"], "Ali")
         self.assertEqual(len(data["orders"]), 1)
-        self.assertEqual(data["orders"][0]["details"]["lines"][0]["flower_uz"], "Gortenziya")
+        self.assertEqual(data["orders"][0]["details"]["lines"][0]["type"], "custom_text")
         response = APIClient().get("/api/mini-app/catalog/", {"init_data": init_data, "branch": branch.id})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.json()["orders"]), 1)
+        catalog_data = response.json()
+        self.assertEqual(len(catalog_data["orders"]), 1)
+        self.assertNotIn("stock", catalog_data)
+        self.assertNotIn("packaging", catalog_data)
+        self.assertEqual(catalog_data["catalog"][0]["name_uz"], "Mini katalog")
 
     def test_catalog_create_rejects_short_stock_for_total_quantity(self):
         payload = {

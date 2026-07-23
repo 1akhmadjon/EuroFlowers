@@ -26,7 +26,7 @@ from .branching import default_branch
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock, telegram_send
+from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, mini_app_custom_quote_ai, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock, telegram_send
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -1024,10 +1024,12 @@ def mini_app_branch(branch_id=None):
 
 def mini_app_quote_payload(data):
     branch = mini_app_branch(data.get("branch"))
-    business, _ = BusinessSettings.objects.get_or_create(pk=1)
+    if data["arrangement_type"] in ["bouquet", "basket"]:
+        quote = mini_app_custom_quote_ai(data["request_text"], data["arrangement_type"])
+        quote["branch"] = branch
+        return quote
     total = Decimal("0")
     lines = []
-    stems_total = 0
     for item in data["items"]:
         if item.get("catalog_item"):
             catalog = CatalogItem.objects.filter(id=item["catalog_item"], status="available").first()
@@ -1038,26 +1040,8 @@ def mini_app_quote_payload(data):
             total += line_total
             lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "name_ru": catalog.name_ru, "quantity": quantity, "unit_price": str(catalog.price), "total": str(line_total)})
             continue
-        batch = StockBatch.objects.select_related("variant__flower").filter(id=item.get("stock_batch"), is_active=True).first()
-        if not batch:
-            raise ValueError("Sklad partiyasi topilmadi")
-        quantity_stems = item.get("quantity_stems") or item.get("quantity") or batch.minimum_sale_stems
-        if quantity_stems < batch.minimum_sale_stems:
-            raise ValueError(f"{batch.variant.flower.name_uz} uchun minimal sotuv {batch.minimum_sale_stems} dona")
-        if quantity_stems > batch.remaining_stems:
-            raise ValueError(f"{batch.batch_number} partiyada yetarli qoldiq yo‘q")
-        line_total = batch.sale_price_per_stem * quantity_stems
-        stems_total += quantity_stems
-        total += line_total
-        lines.append({"type": "stock", "id": batch.id, "flower_uz": batch.variant.flower.name_uz, "flower_ru": batch.variant.flower.name_ru, "variant_uz": batch.variant.name_uz, "color_uz": batch.variant.color_uz, "quantity_stems": quantity_stems, "price_per_stem": str(batch.sale_price_per_stem), "total": str(line_total)})
-    packaging = None
-    if data["arrangement_type"] in ["bouquet", "basket"]:
-        total += business.default_florist_fee
-    if data["arrangement_type"] == "basket":
-        packaging = Packaging.objects.filter(id=data.get("packaging"), is_active=True).first() if data.get("packaging") else Packaging.objects.filter(packaging_type="basket", is_active=True, capacity_min_stems__lte=max(stems_total, 1), capacity_max_stems__gte=max(stems_total, 1)).order_by("sale_price").first()
-        if packaging:
-            total += packaging.sale_price
-    return {"branch": branch, "lines": lines, "packaging": PackagingSerializer(packaging).data if packaging else None, "florist_fee": str(business.default_florist_fee if data["arrangement_type"] in ["bouquet", "basket"] else Decimal("0")), "estimated_price": str(total), "price_is_estimate": True}
+        raise ValueError("Mini app katalogda faqat catalog_item ishlatiladi")
+    return {"branch": branch, "lines": lines, "packaging": None, "florist_fee": str(Decimal("0")), "estimated_price": str(total), "price_is_estimate": False, "ai_note": ""}
 
 
 def mini_app_request_text(arrangement_type, quote, note=""):
@@ -1066,15 +1050,18 @@ def mini_app_request_text(arrangement_type, quote, note=""):
     for row in quote["lines"]:
         if row["type"] == "catalog":
             lines.append(f"- {row['name_uz']}: {row['quantity']} ta, {row['total']} so‘m")
-        else:
+        elif row["type"] == "stock":
             name = f"{row['flower_uz']} {row['variant_uz']} {row['color_uz']}".strip()
             lines.append(f"- {name}: {row['quantity_stems']} dona, {row['total']} so‘m")
+        elif row["type"] == "custom_text":
+            lines.append(f"- Mijoz matni: {row['request_text']}")
     if quote.get("packaging"):
         packaging = quote["packaging"]
         lines.append(f"- Savat/qadoq: {packaging['name_uz']} ({packaging.get('size', '')}), {packaging['sale_price']} so‘m")
     if Decimal(str(quote["florist_fee"])) > 0:
         lines.append(f"- Florist xizmati: {quote['florist_fee']} so‘m")
-    lines.append(f"Jami taxminan: {quote['estimated_price']} so‘m")
+    total_label = "Jami taxminan" if quote.get("price_is_estimate") else "Jami"
+    lines.append(f"{total_label}: {quote['estimated_price']} so‘m")
     if note:
         lines.append(f"Izoh: {note}")
     return "\n".join(lines)
@@ -1092,7 +1079,7 @@ def mini_app_me(request):
     return Response({"customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
 
 
-@extend_schema(parameters=[MiniAppInitSerializer], responses=inline_serializer(name="MiniAppCatalog", fields={"catalog": CatalogItemSerializer(many=True), "stock": StockBatchSerializer(many=True), "packaging": PackagingSerializer(many=True), "customer": CustomerSerializer(allow_null=True), "orders": serializers.ListField(child=serializers.DictField())}))
+@extend_schema(parameters=[MiniAppInitSerializer], responses=inline_serializer(name="MiniAppCatalog", fields={"catalog": CatalogItemSerializer(many=True), "customer": CustomerSerializer(allow_null=True), "orders": serializers.ListField(child=serializers.DictField())}))
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def mini_app_catalog(request):
@@ -1101,13 +1088,11 @@ def mini_app_catalog(request):
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
     catalog = CatalogItem.objects.filter(status="available").select_related("branch", "social_post")[:50]
-    stock = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("branch", "variant__flower")[:100]
-    packaging = Packaging.objects.filter(is_active=True)[:50]
     customer = mini_app_customer(identity)
-    return Response({"catalog": CatalogItemSerializer(catalog, many=True).data, "stock": StockBatchSerializer(stock, many=True).data, "packaging": PackagingSerializer(packaging, many=True).data, "customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
+    return Response({"catalog": CatalogItemSerializer(catalog, many=True).data, "customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
 
 
-@extend_schema(request=MiniAppQuoteSerializer, responses=inline_serializer(name="MiniAppQuoteResponse", fields={"lines": serializers.ListField(child=serializers.DictField()), "packaging": serializers.DictField(allow_null=True), "florist_fee": serializers.CharField(), "estimated_price": serializers.CharField(), "price_is_estimate": serializers.BooleanField()}))
+@extend_schema(request=MiniAppQuoteSerializer, responses=inline_serializer(name="MiniAppQuoteResponse", fields={"lines": serializers.ListField(child=serializers.DictField()), "packaging": serializers.DictField(allow_null=True), "florist_fee": serializers.CharField(), "estimated_price": serializers.CharField(), "price_is_estimate": serializers.BooleanField(), "ai_note": serializers.CharField(allow_blank=True)}))
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def mini_app_quote(request):
@@ -1136,7 +1121,7 @@ def mini_app_lead(request):
     phone = normalize_phone(serializer.validated_data["phone"]) or serializer.validated_data["phone"]
     customer, _ = Customer.objects.update_or_create(instagram_user_id=f"miniapp:{mini_user}", defaults={"name": serializer.validated_data["name"], "phone": phone, "branch": quote["branch"], "language": "uz"})
     request_text = mini_app_request_text(serializer.validated_data["arrangement_type"], quote, serializer.validated_data.get("note", ""))
-    details = {"lines": quote["lines"], "packaging": quote["packaging"], "florist_fee": quote["florist_fee"], "estimated_price": quote["estimated_price"], "price_is_estimate": quote["price_is_estimate"], "note": serializer.validated_data.get("note", "")}
+    details = {"lines": quote["lines"], "packaging": quote["packaging"], "florist_fee": quote["florist_fee"], "estimated_price": quote["estimated_price"], "price_is_estimate": quote["price_is_estimate"], "ai_note": quote.get("ai_note", ""), "note": serializer.validated_data.get("note", "")}
     lead = Lead.objects.create(customer=customer, branch=quote["branch"], status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app", details=details)
     for row in quote["lines"]:
         if row["type"] == "catalog":

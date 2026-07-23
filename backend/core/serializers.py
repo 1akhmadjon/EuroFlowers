@@ -778,9 +778,25 @@ class MiniAppLineSerializer(serializers.Serializer):
 
 class MiniAppQuoteSerializer(serializers.Serializer):
     init_data = serializers.CharField(required=False, allow_blank=True)
-    arrangement_type = serializers.ChoiceField(choices=["bouquet", "basket", "stems", "catalog"])
-    items = MiniAppLineSerializer(many=True)
+    arrangement_type = serializers.ChoiceField(choices=["bouquet", "basket", "catalog"])
+    items = MiniAppLineSerializer(many=True, required=False)
     packaging = serializers.IntegerField(required=False, allow_null=True)
+    request_text = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        arrangement_type = attrs.get("arrangement_type")
+        items = attrs.get("items") or []
+        request_text = (attrs.get("request_text") or "").strip()
+        if arrangement_type == "catalog":
+            if not items:
+                raise serializers.ValidationError({"items": "Katalog buyurtmasi uchun catalog_item yuboring"})
+            if any(not row.get("catalog_item") for row in items):
+                raise serializers.ValidationError({"items": "Mini app katalogda faqat catalog_item ishlatiladi"})
+        elif not request_text:
+            raise serializers.ValidationError({"request_text": "Yasatish uchun mijoz yozgan matn kerak"})
+        attrs["items"] = items
+        attrs["request_text"] = request_text
+        return attrs
 
 
 class MiniAppLeadSerializer(MiniAppQuoteSerializer):

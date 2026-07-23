@@ -731,6 +731,60 @@ def ai_post_context(conversation):
     }
 
 
+def mini_app_custom_quote_ai(request_text, arrangement_type):
+    business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
+    ai_settings, _ = AISettings.objects.get_or_create(pk=1)
+    api_key = openai_api_key()
+    florist_fee = business_settings.default_florist_fee
+    if not api_key:
+        return {
+            "lines": [{"type": "custom_text", "request_text": request_text}],
+            "packaging": None,
+            "florist_fee": str(florist_fee),
+            "estimated_price": str(florist_fee),
+            "price_is_estimate": True,
+            "ai_note": "Taxminiy narxni operator aniqlashtirib beradi.",
+        }
+    context = {
+        "request_text": request_text,
+        "arrangement_type": arrangement_type,
+        "florist_fee": str(florist_fee),
+        "stock": ai_stock_rows("", limit=60),
+        "baskets": ai_basket_rows() if arrangement_type == "basket" else [],
+        "rule": "Mijozga stock ro‘yxatini ko‘rsatma. Faqat taxminiy umumiy narx qaytar. Florist haqini narxga qo‘sh.",
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "estimated_price": {"type": "number"},
+            "ai_note": {"type": "string"},
+        },
+        "required": ["estimated_price", "ai_note"],
+        "additionalProperties": False,
+    }
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model=ai_settings.openai_model or settings.OPENAI_MODEL,
+        instructions="EuroFlowers mini app uchun custom buket/savat taxminiy narxini hisobla. Narx taxminiy, florist haqi qo‘shilgan bo‘lsin. Javob faqat JSON.",
+        input=json.dumps(context, ensure_ascii=False),
+        max_output_tokens=700,
+        reasoning={"effort": "minimal"},
+        text={"format": {"type": "json_schema", "name": "mini_app_quote", "strict": True, "schema": schema}},
+    )
+    data = json.loads(response.output_text)
+    estimated_price = Decimal(str(data["estimated_price"])).quantize(Decimal("1"))
+    if estimated_price < florist_fee:
+        estimated_price = florist_fee
+    return {
+        "lines": [{"type": "custom_text", "request_text": request_text}],
+        "packaging": None,
+        "florist_fee": str(florist_fee),
+        "estimated_price": str(estimated_price),
+        "price_is_estimate": True,
+        "ai_note": data.get("ai_note") or "Taxminiy narx, operator aniq ma'lumot beradi.",
+    }
+
+
 def ai_tool_definitions():
     empty_parameters = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     return [
