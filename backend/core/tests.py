@@ -199,6 +199,16 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("Atirgul Hermosa", rich["html"])
         self.assertNotIn("50 ta", rich["html"])
 
+    def test_telegram_catalog_rich_message_adds_missing_currency(self):
+        text = "Quyidagi tayyor katalog mavjud narxlar so‘mda:\n1) Pion buketi - 800 000\n2) Pushti atirgul buketi - 500 000\n3) Qizil atirgul buketi - 400 000\nQaysi birini tanlaysiz? Yoki boshqa variant/miqdor kerakmi?"
+        rich = telegram_catalog_rich_message(text)
+        self.assertIsNotNone(rich)
+        self.assertIn("<td>Pion buketi</td>", rich["html"])
+        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
+        self.assertIn("<td>500 000 so‘m</td>", rich["html"])
+        self.assertNotIn("Yoki boshqa variant", rich["html"])
+        self.assertIn("Qaysi biri sizga ma&#x27;qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.", rich["html"])
+
     def test_ai_reply_handles_accidental_message_without_openai(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-accidental")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)

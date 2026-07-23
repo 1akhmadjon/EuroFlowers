@@ -549,14 +549,21 @@ def clean_catalog_item_name(value):
     return re.sub(r"\s+\bid\s*\d+\b", "", (value or "").strip(), flags=re.IGNORECASE).strip()
 
 
+def clean_catalog_price(value):
+    price = normalize_ai_reply_text((value or "").strip())
+    if not re.search(r"(so[‘'ʻ`]m|som|сум)", price, flags=re.IGNORECASE):
+        price = f"{price} so‘m"
+    return price
+
+
 def clean_catalog_listing_text(text):
     cleaned = re.sub(r"(?im)^[^\S\n]*[-]?[^\S\n]*Tarkibi\s*:.*?(?=(?:\d+[).]\s*)|\n|$)", "", text or "")
     cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
     lines = []
     for line in cleaned.splitlines():
-        match = re.match(r"^(?P<prefix>\s*(?:\d+[).])\s*)(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))(?:\b|$).*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^(?P<prefix>\s*(?:\d+[).])\s*)(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*)(?:\s*(?:so[‘'ʻ`]m|som|сум))?(?:\b|$).*$", line, flags=re.IGNORECASE)
         if match:
-            line = f"{match.group('prefix')}{clean_catalog_item_name(match.group('name'))} - {match.group('price').strip()}"
+            line = f"{match.group('prefix')}{clean_catalog_item_name(match.group('name'))} - {clean_catalog_price(match.group('price'))}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -565,12 +572,12 @@ def telegram_catalog_rows_from_text(text):
     rows = []
     cleaned = clean_catalog_listing_text(text)
     for line in cleaned.splitlines():
-        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*(?:\s*(?:so[‘'ʻ`]m|som|сум))?)\s*$", line, flags=re.IGNORECASE)
         if not match:
             continue
         rows.append({
             "name": clean_catalog_item_name(match.group("name")),
-            "price": normalize_ai_reply_text(match.group("price").strip()),
+            "price": clean_catalog_price(match.group("price")),
         })
     return rows
 
@@ -1003,7 +1010,8 @@ def ai_reply(conversation):
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxatida hech qachon qoldiq soni, nechta borligi yoki 'mavjud: 3 dona' kabi matn yozma. Faqat nomi va narxini yoz."
         " Katalog ro‘yxatida tarkib, gul navi, rang, qaysi guldan qancha ketgani yoki '50 ta' kabi sonlarni yozma. Bularni faqat mijoz aniq 'tarkibi nima' yoki 'qaysi guldan qancha ketgan' deb so‘rasa ayt."
-        " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
+        " Katalog ro‘yxatida har bir qatorda narx yonida albatta 'so‘m' yoz: '1. Pion buketi - 800 000 so‘m'. 'Narxlar so‘mda' deb tepada umumiy yozib, qatorda so‘mni tashlab ketma."
+        " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.' 'Yoki boshqa variant/miqdor kerakmi' deb so‘rama."
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
         " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
