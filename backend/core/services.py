@@ -547,7 +547,9 @@ def telegram_sender_action(chat_id, action="typing"):
 
 def telegram_catalog_rows_from_text(text):
     rows = []
-    for line in (text or "").splitlines():
+    cleaned = re.sub(r"(?im)^[^\S\n]*[-]?[^\S\n]*Tarkibi\s*:.*?(?=(?:\d+[).]\s*)|\n|$)", "", text or "")
+    cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
+    for line in cleaned.splitlines():
         match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\([^)]*\))?\s*$", line, flags=re.IGNORECASE)
         if not match:
             continue
@@ -562,11 +564,12 @@ def telegram_catalog_rich_message(text):
     rows = telegram_catalog_rows_from_text(text)
     if len(rows) < 2:
         return None
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    cleaned = re.sub(r"(?im)^[^\S\n]*[-]?[^\S\n]*Tarkibi\s*:.*?(?=(?:\d+[).]\s*)|\n|$)", "", text or "")
+    cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:\d+[).])\s*", line)), 0)
-    last_row_index = first_row_index + len(rows) - 1
     intro = " ".join(lines[:first_row_index]).strip()
-    outro = " ".join(lines[last_row_index + 1:]).strip()
+    outro = "Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman."
     html = ""
     if intro:
         html += f"<p>{escape(intro)}</p>"
@@ -574,8 +577,7 @@ def telegram_catalog_rich_message(text):
     for row in rows[:20]:
         html += f"<tr><td>{escape(row['name'])}</td><td>{escape(row['price'])}</td></tr>"
     html += "</table>"
-    if outro:
-        html += f"<p>{escape(outro)}</p>"
+    html += f"<p>{escape(outro)}</p>"
     return {"html": html, "skip_entity_detection": True}
 
 
