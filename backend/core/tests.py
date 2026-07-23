@@ -166,12 +166,13 @@ class BusinessRulesTests(TestCase):
         text_mock.assert_called_once_with("555", "Mana rasmi")
 
     def test_telegram_catalog_rich_message_builds_table(self):
-        text = "Ha, tayyor buketlar bor.\n\n1. Pion buketi - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
+        text = "Ha, tayyor buketlar bor.\n\n1. Pion buketi id 25 - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
         rich = telegram_catalog_rich_message(text)
         self.assertIsNotNone(rich)
         self.assertIn("<table bordered striped>", rich["html"])
         self.assertNotIn("<th>Qoldiq</th>", rich["html"])
         self.assertIn("<td>Pion buketi</td>", rich["html"])
+        self.assertNotIn("id 25", rich["html"])
         self.assertIn("<td>800 000 so‘m</td>", rich["html"])
         self.assertNotIn("<td>10 dona</td>", rich["html"])
         self.assertIn("Qaysi biri sizga ma&#x27;qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.", rich["html"])

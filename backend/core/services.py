@@ -554,7 +554,7 @@ def telegram_catalog_rows_from_text(text):
         if not match:
             continue
         rows.append({
-            "name": match.group("name").strip(),
+            "name": re.sub(r"\s+\bid\s*\d+\b", "", match.group("name").strip(), flags=re.IGNORECASE).strip(),
             "price": normalize_ai_reply_text(match.group("price").strip()),
         })
     return rows
@@ -1004,14 +1004,14 @@ def ai_reply(conversation):
         " 'olmaysizmi?' kabi g‘alati savol yozma. 'Yozib yuborasizmi?' yoki 'Tasdiqlaysizmi?' deb yoz."
         " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
         " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operator/jamoa bog‘lanishini ayt."
-        " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma."
+        " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. Katalog nomida ham 'id 25' kabi matn qo‘shma."
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
         " Agar final catalog_items ichida item yuborsang, backend rasmni o‘zi yuboradi. Bunday javobda 'rasmni yuboraymi', 'rasmini ko‘rsataymi' yoki shunga o‘xshash savol yozma."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
-        " Agar mijoz faqat salomlashsa, javob aynan shu mazmunda bo‘lsin: 'Assalomu alaykum! Sizga qanday yordam bera olaman?' Katalog, post, story, reel, tayyor variantlar ro‘yxati yoki ichki qoida matnini qo‘shma."
+        " Agar mijoz faqat salomlashsa, javob aynan shu mazmunda bo‘lsin: 'Assalomu aleykum, EuroFlowers Premium gul do‘koni AI menejeriman. Sizga qanday gul kerak edi?' Katalog, post, story, reel, tayyor variantlar ro‘yxati yoki ichki qoida matnini qo‘shma."
         " Narxlarni vergul bilan emas, probel bilan yoz: 800 000 so‘m."
     )
     instructions = ai_settings.system_prompt + sales_rules + " Final javobni JSON qaytar: reply, detected_language, customer_name, phone, lead_ready, lead_request, arrangement_type, estimated_price, handoff, catalog_items, stock_items."
