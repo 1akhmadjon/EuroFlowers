@@ -768,10 +768,12 @@ def ai_reply(conversation):
         " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa get_baskets chaqir."
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
+        " Katalog ro‘yxati bosqichida ism, telefon, manzil yoki yetkazish vaqtini so‘rama. Faqat qaysi buket/savat yoqqanini so‘ra."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
-        " Agar mijoz faqat salomlashsa, faqat qisqa salomlashib qanday yordam kerakligini so‘ra; katalog, post, story, reel yoki tayyor variantlar ro‘yxatini yozma."
+        " Agar mijoz faqat salomlashsa, javob aynan shu mazmunda bo‘lsin: 'Assalomu alaykum! Sizga qanday yordam bera olaman?' Katalog, post, story, reel, tayyor variantlar ro‘yxati yoki ichki qoida matnini qo‘shma."
+        " Narxlarni vergul bilan emas, probel bilan yoz: 800 000 so‘m."
     )
     instructions = ai_settings.system_prompt + sales_rules + " Final javobni JSON qaytar: reply, detected_language, customer_name, phone, lead_ready, lead_request, arrangement_type, estimated_price, handoff, catalog_items, stock_items."
     api_key = openai_api_key()
