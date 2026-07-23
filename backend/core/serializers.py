@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from .branching import default_branch
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
@@ -16,10 +17,9 @@ class BranchSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    branches = BranchSerializer(many=True, read_only=True)
     class Meta:
         model = UserProfile
-        fields = ["role", "language", "branches"]
+        fields = ["role", "language"]
 
 
 class PagePermissionSerializer(serializers.ModelSerializer):
@@ -78,7 +78,6 @@ class UserSerializer(serializers.ModelSerializer):
 class UserWriteSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(choices=UserProfile.ROLE_CHOICES, write_only=True, required=False)
     language = serializers.ChoiceField(choices=[("uz", "O‘zbek"), ("ru", "Русский")], write_only=True, required=False)
-    branch_ids = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), many=True, write_only=True, required=False)
     permissions = PagePermissionInputSerializer(many=True, required=False)
     password = serializers.CharField(write_only=True, required=False, min_length=6)
     profile = UserProfileSerializer(read_only=True)
@@ -86,7 +85,7 @@ class UserWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "username", "first_name", "last_name", "email", "password", "is_active", "role", "language", "branch_ids", "permissions", "profile", "permission_matrix"]
+        fields = ["id", "username", "first_name", "last_name", "email", "password", "is_active", "role", "language", "permissions", "profile", "permission_matrix"]
 
     def get_permission_matrix(self, obj) -> list[dict[str, Any]]:
         return permission_matrix(obj)
@@ -123,10 +122,6 @@ class UserWriteSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         role = validated_data.pop("role", "operator")
         language = validated_data.pop("language", "uz")
-        branches_provided = "branch_ids" in validated_data
-        branches = validated_data.pop("branch_ids", [])
-        if not branches_provided and role != "developer":
-            branches = list(Branch.objects.filter(is_active=True))
         permissions = validated_data.pop("permissions", None)
         password = validated_data.pop("password", None)
         user = User(**validated_data)
@@ -136,14 +131,13 @@ class UserWriteSerializer(serializers.ModelSerializer):
             user.set_unusable_password()
         user.save()
         profile = UserProfile.objects.create(user=user, role=role, language=language)
-        profile.branches.set(branches)
+        profile.branches.set([default_branch()])
         self.save_permissions(user, permissions)
         return user
 
     def update(self, instance, validated_data):
         role = validated_data.pop("role", None)
         language = validated_data.pop("language", None)
-        branches = validated_data.pop("branch_ids", None)
         permissions = validated_data.pop("permissions", None)
         password = validated_data.pop("password", None)
         for key, value in validated_data.items():
@@ -157,8 +151,6 @@ class UserWriteSerializer(serializers.ModelSerializer):
         if language is not None:
             profile.language = language
         profile.save()
-        if branches is not None:
-            profile.branches.set(branches)
         self.save_permissions(instance, permissions)
         return instance
 
@@ -178,12 +170,11 @@ class FlowerVariantSerializer(serializers.ModelSerializer):
 
 class StockBatchSerializer(serializers.ModelSerializer):
     variant_detail = FlowerVariantSerializer(source="variant", read_only=True)
-    branch_detail = BranchSerializer(source="branch", read_only=True)
     remaining_bunches = serializers.IntegerField(read_only=True)
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     class Meta:
         model = StockBatch
-        fields = "__all__"
+        exclude = ["branch"]
 
     def to_internal_value(self, data):
         if getattr(self, "partial", False):
@@ -192,6 +183,10 @@ class StockBatchSerializer(serializers.ModelSerializer):
                 if value == "":
                     data.pop(key)
         return super().to_internal_value(data)
+
+    def create(self, validated_data):
+        validated_data.setdefault("branch", default_branch())
+        return super().create(validated_data)
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -206,7 +201,11 @@ class StockMovementSerializer(serializers.ModelSerializer):
 class PackagingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Packaging
-        fields = "__all__"
+        exclude = ["branch"]
+
+    def create(self, validated_data):
+        validated_data.setdefault("branch", default_branch())
+        return super().create(validated_data)
 
 
 class PackagingMovementSerializer(serializers.ModelSerializer):
@@ -243,7 +242,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
     catalog_items = SocialPostCatalogItemSerializer(many=True, required=False)
     class Meta:
         model = SocialPost
-        fields = "__all__"
+        exclude = ["branch"]
         extra_kwargs = {"media_id": {"required": False}, "post_type": {"required": False}}
 
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
@@ -341,6 +340,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({"catalog_items": f"{batch.batch_number} partiyada yetarli qoldiq yo‘q. Kerak: {needed}, bor: {batch.remaining_stems}"})
 
     def validate(self, attrs):
+        attrs.setdefault("branch", default_branch())
         catalog_items = attrs.get("catalog_items") or []
         self._validate_catalog_items(attrs, catalog_items)
         return attrs
@@ -389,14 +389,14 @@ class SocialPostSerializer(serializers.ModelSerializer):
 
 class CatalogItemSerializer(serializers.ModelSerializer):
     composition = CatalogCompositionSerializer(many=True, required=False)
-    branch_detail = BranchSerializer(source="branch", read_only=True)
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     class Meta:
         model = CatalogItem
-        fields = "__all__"
+        exclude = ["branch"]
         read_only_fields = ["created_by", "sold_at", "stock_deducted_at"]
 
     def validate(self, attrs):
+        attrs.setdefault("branch", getattr(self.instance, "branch", None) or default_branch())
         composition = attrs.get("composition")
         quantity_total = attrs.get("quantity_total", getattr(self.instance, "quantity_total", 1))
         if composition is None and self.instance:
@@ -449,7 +449,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     total_spent = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     class Meta:
         model = Customer
-        fields = "__all__"
+        exclude = ["branch"]
 
 
 class MessageSerializer(serializers.ModelSerializer):
@@ -466,7 +466,7 @@ class ConversationSerializer(serializers.ModelSerializer):
     source_label = serializers.SerializerMethodField()
     class Meta:
         model = Conversation
-        fields = "__all__"
+        exclude = ["branch"]
 
     def get_last_message(self, obj) -> dict[str, Any] | None:
         message = obj.messages.last()
@@ -505,12 +505,10 @@ class LeadMoveSerializer(serializers.Serializer):
 class LeadColumnReorderSerializer(serializers.Serializer):
     status = serializers.CharField(max_length=40)
     lead_ids = serializers.ListField(child=serializers.IntegerField(min_value=1))
-    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
 
 
 class LeadSerializer(serializers.ModelSerializer):
     customer_detail = CustomerSerializer(source="customer", read_only=True)
-    branch_detail = BranchSerializer(source="branch", read_only=True)
     status_detail = serializers.SerializerMethodField()
     stock_usage = serializers.SerializerMethodField()
     packaging_usage = serializers.SerializerMethodField()
@@ -524,7 +522,7 @@ class LeadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lead
-        fields = "__all__"
+        exclude = ["branch"]
         extra_kwargs = {"customer": {"required": False}}
 
     @extend_schema_field(serializers.DictField(allow_null=True))
@@ -584,6 +582,9 @@ class LeadSerializer(serializers.ModelSerializer):
         from .services import normalize_phone
         normalized = normalize_phone(phone) or phone
         branch = attrs.get("branch")
+        if not branch:
+            branch = default_branch()
+            attrs["branch"] = branch
         customer = Customer.objects.filter(phone=normalized).first() if normalized else None
         if customer:
             updates = []
@@ -615,6 +616,7 @@ class LeadSerializer(serializers.ModelSerializer):
         stock_rows = validated_data.pop("stock_usage_input", None)
         packaging_rows = validated_data.pop("packaging_usage_input", None)
         catalog_rows = validated_data.pop("catalog_usage_input", None)
+        validated_data.setdefault("branch", default_branch())
         customer = self._customer_from_attrs(validated_data)
         lead = Lead.objects.create(customer=customer, **validated_data)
         self._save_usage(lead, stock_rows, packaging_rows, catalog_rows)
@@ -637,7 +639,7 @@ class LeadSerializer(serializers.ModelSerializer):
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
-        fields = "__all__"
+        exclude = ["branch"]
 
 
 class LeadStatusSerializer(serializers.ModelSerializer):
@@ -753,7 +755,6 @@ class PackagingMovementRequestSerializer(serializers.Serializer):
 
 class MiniAppInitSerializer(serializers.Serializer):
     init_data = serializers.CharField(required=False, allow_blank=True)
-    branch = serializers.IntegerField(required=False)
 
 
 class MiniAppLineSerializer(serializers.Serializer):
@@ -765,7 +766,6 @@ class MiniAppLineSerializer(serializers.Serializer):
 
 class MiniAppQuoteSerializer(serializers.Serializer):
     init_data = serializers.CharField(required=False, allow_blank=True)
-    branch = serializers.IntegerField(required=False)
     arrangement_type = serializers.ChoiceField(choices=["bouquet", "basket", "stems", "catalog"])
     items = MiniAppLineSerializer(many=True)
     packaging = serializers.IntegerField(required=False, allow_null=True)

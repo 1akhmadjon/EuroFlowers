@@ -22,6 +22,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
+from .branching import default_branch
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
@@ -35,7 +36,7 @@ class CreatedAtRangeFilter(django_filters.FilterSet):
 class LeadFilter(CreatedAtRangeFilter):
     class Meta:
         model = Lead
-        fields = ["branch", "status", "arrangement_type", "assigned_to", "social_post", "created_at"]
+        fields = ["status", "arrangement_type", "assigned_to", "social_post", "created_at"]
 
 
 def schedule_lead_recall(lead):
@@ -87,7 +88,7 @@ class PackagingMovementFilter(CreatedAtRangeFilter):
 class ConversationFilter(CreatedAtRangeFilter):
     class Meta:
         model = Conversation
-        fields = ["branch", "status", "assigned_to", "created_at"]
+        fields = ["status", "assigned_to", "created_at"]
 
 
 class AuditLogFilter(CreatedAtRangeFilter):
@@ -116,10 +117,7 @@ class ScopedViewSet(viewsets.ModelViewSet):
     permission_classes = [RolePermission]
 
     def branch_ids(self):
-        profile = getattr(self.request.user, "profile", None)
-        if self.request.user.is_superuser or not profile:
-            return None
-        return list(profile.branches.values_list("id", flat=True))
+        return None
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -212,14 +210,9 @@ class StockBatchViewSet(ScopedViewSet):
     write_roles = ["admin", "warehouse"]
     queryset = StockBatch.objects.select_related("branch", "variant__flower").all()
     serializer_class = StockBatchSerializer
-    filterset_fields = ["branch", "variant", "height_cm", "is_active"]
+    filterset_fields = ["variant", "height_cm", "is_active"]
     search_fields = ["batch_number", "variant__flower__name_uz", "variant__flower__name_ru", "variant__name_uz", "variant__color_uz"]
     ordering_fields = ["received_at", "remaining_stems", "sale_price_per_stem", "height_cm"]
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        branch_ids = self.branch_ids()
-        return queryset.filter(branch_id__in=branch_ids) if branch_ids is not None else queryset
 
     def perform_create(self, serializer):
         batch = serializer.save()
@@ -255,20 +248,13 @@ class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = StockMovementSerializer
     filterset_class = StockMovementFilter
 
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        profile = getattr(self.request.user, "profile", None)
-        if self.request.user.is_superuser or not profile:
-            return queryset
-        return queryset.filter(batch__branch__in=profile.branches.all())
-
 
 class PackagingViewSet(ScopedViewSet):
     permission_page = "inventory"
     write_roles = ["admin", "warehouse"]
     queryset = Packaging.objects.select_related("branch").all()
     serializer_class = PackagingSerializer
-    filterset_fields = ["branch", "packaging_type", "is_active"]
+    filterset_fields = ["packaging_type", "is_active"]
     search_fields = ["name_uz", "name_ru"]
 
     def perform_create(self, serializer):
@@ -305,26 +291,14 @@ class PackagingMovementViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PackagingMovementSerializer
     filterset_class = PackagingMovementFilter
 
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        profile = getattr(self.request.user, "profile", None)
-        if self.request.user.is_superuser or not profile:
-            return queryset
-        return queryset.filter(packaging__branch__in=profile.branches.all())
-
 
 class CatalogItemViewSet(ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
     queryset = CatalogItem.objects.select_related("branch", "social_post").prefetch_related("composition__stock_batch__variant__flower").all()
     serializer_class = CatalogItemSerializer
-    filterset_fields = ["branch", "status", "arrangement_type"]
+    filterset_fields = ["status", "arrangement_type"]
     search_fields = ["name_uz", "name_ru", "description_uz", "description_ru"]
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        branch_ids = self.branch_ids()
-        return queryset.filter(branch_id__in=branch_ids) if branch_ids is not None else queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -354,7 +328,7 @@ class CustomerViewSet(ScopedViewSet):
     write_roles = ["admin", "operator"]
     queryset = Customer.objects.select_related("branch").annotate(purchases_count=Count("leads", filter=Q(leads__status="won")), total_spent=Coalesce(Sum("leads__estimated_price", filter=Q(leads__status="won")), Decimal("0"))).all()
     serializer_class = CustomerSerializer
-    filterset_fields = ["branch", "language", "is_blocked"]
+    filterset_fields = ["language", "is_blocked"]
     search_fields = ["name", "phone", "instagram_username"]
 
     def get_queryset(self):
@@ -388,10 +362,9 @@ class LeadViewSet(ScopedViewSet):
         with transaction.atomic():
             extra = {}
             if "sort_order" not in serializer.validated_data:
-                branch = serializer.validated_data.get("branch")
+                branch = serializer.validated_data.get("branch") or default_branch()
                 status_value = serializer.validated_data.get("status", "new")
-                if branch:
-                    extra["sort_order"] = next_lead_sort_order(branch, status_value)
+                extra["sort_order"] = next_lead_sort_order(branch, status_value)
             lead = serializer.save(**extra)
             if lead.status == "won":
                 try:
@@ -443,18 +416,11 @@ class LeadViewSet(ScopedViewSet):
         lead_ids = serializer.validated_data["lead_ids"]
         if len(lead_ids) != len(set(lead_ids)):
             return Response({"lead_ids": "Lead id takrorlanmasligi kerak"}, status=status.HTTP_400_BAD_REQUEST)
-        branch = serializer.validated_data.get("branch")
         scoped_queryset = self.get_queryset()
         leads = list(scoped_queryset.filter(id__in=lead_ids))
         if len(leads) != len(set(lead_ids)):
             return Response({"lead_ids": "Lead topilmadi yoki sizda ruxsat yo‘q"}, status=status.HTTP_400_BAD_REQUEST)
-        if leads:
-            branch = branch or leads[0].branch
-        if not branch:
-            return Response({"branch": "Bo‘sh column tartibi uchun branch kerak"}, status=status.HTTP_400_BAD_REQUEST)
-        if any(lead.branch_id != branch.id for lead in leads):
-            return Response({"lead_ids": "Bitta column tartibi faqat bitta filial leadlari bilan yuboriladi"}, status=status.HTTP_400_BAD_REQUEST)
-        target_existing_ids = set(scoped_queryset.filter(branch=branch, status=status_value).values_list("id", flat=True))
+        target_existing_ids = set(scoped_queryset.filter(status=status_value).values_list("id", flat=True))
         incoming_ids = set(lead_ids)
         missing_ids = target_existing_ids - incoming_ids
         if missing_ids:
@@ -496,7 +462,7 @@ class SocialPostViewSet(ScopedViewSet):
     write_roles = ["admin", "content"]
     queryset = SocialPost.objects.select_related("branch").prefetch_related("catalog_items__composition__stock_batch__variant__flower", "leads__customer", "leads__catalog_usage__catalog_item").annotate(reply_count=Count("conversations", distinct=True), lead_count=Count("leads", distinct=True)).all()
     serializer_class = SocialPostSerializer
-    filterset_fields = ["branch", "post_type", "is_targeted", "is_active"]
+    filterset_fields = ["post_type", "is_targeted", "is_active"]
     search_fields = ["title_uz", "title_ru", "media_id", "permalink"]
 
 
@@ -580,7 +546,7 @@ class NotificationViewSet(ScopedViewSet):
     permission_page = "notifications"
     queryset = Notification.objects.select_related("branch").all()
     serializer_class = NotificationSerializer
-    filterset_fields = ["branch", "notification_type", "is_read"]
+    filterset_fields = ["notification_type", "is_read"]
     write_roles = ["admin", "operator", "florist", "warehouse", "content"]
     http_method_names = ["get", "post", "head", "options"]
 
@@ -650,7 +616,6 @@ def me(request):
         "stock_stems": serializers.IntegerField(),
         "low_stock": serializers.IntegerField(),
         "lead_pipeline": serializers.ListField(child=serializers.DictField()),
-        "branch_stock": serializers.ListField(child=serializers.DictField()),
         "recent_leads": LeadSerializer(many=True),
         "recent_notifications": NotificationSerializer(many=True),
         "revenue_today": serializers.DecimalField(max_digits=14, decimal_places=2),
@@ -683,16 +648,6 @@ def dashboard(request):
     catalog = CatalogItem.objects.all()
     notifications = Notification.objects.all()
     conversations = Conversation.objects.all()
-    profile = getattr(request.user, "profile", None)
-    if not request.user.is_superuser and profile:
-        branches = profile.branches.all()
-        stock = stock.filter(branch__in=branches)
-        stock_movements = stock_movements.filter(batch__branch__in=branches)
-        leads = leads.filter(branch__in=branches)
-        customers = customers.filter(branch__in=branches)
-        catalog = catalog.filter(branch__in=branches)
-        notifications = notifications.filter(branch__in=branches)
-        conversations = conversations.filter(branch__in=branches)
     won_leads = leads.filter(status="won")
     period_leads = apply_created_range(leads, period_start, period_end)
     period_customers = apply_created_range(customers, period_start, period_end)
@@ -728,7 +683,6 @@ def dashboard(request):
         "stock_stems": stock.aggregate(value=Coalesce(Sum("remaining_stems"), 0))["value"],
         "low_stock": stock.filter(remaining_stems__lte=F("minimum_sale_stems")).count(),
         "lead_pipeline": list(leads.values("status").annotate(count=Count("id")).order_by("status")),
-        "branch_stock": list(stock.values("branch__id", "branch__name").annotate(stems=Sum("remaining_stems"), batches=Count("id")).order_by("branch__name")),
         "recent_leads": LeadSerializer(leads.select_related("customer", "branch")[:6], many=True).data,
         "recent_notifications": NotificationSerializer(notifications.filter(is_read=False)[:6], many=True).data,
     }
@@ -759,13 +713,6 @@ def analytics(request):
     conversations = Conversation.objects.select_related("customer", "branch").all()
     customers = Customer.objects.all()
     stock_movements = StockMovement.objects.all()
-    profile = getattr(request.user, "profile", None)
-    if not request.user.is_superuser and profile:
-        branches = profile.branches.all()
-        leads = leads.filter(branch__in=branches)
-        conversations = conversations.filter(branch__in=branches)
-        customers = customers.filter(branch__in=branches)
-        stock_movements = stock_movements.filter(batch__branch__in=branches)
     period_leads = apply_created_range(leads, period_start, period_end)
     period_conversations = apply_created_range(conversations, period_start, period_end)
     period_customers = apply_created_range(customers, period_start, period_end)
@@ -1064,7 +1011,6 @@ def mini_app_order_rows(customer):
         "status": row.status,
         "status_label": statuses.get(row.status, row.status),
         "source": row.source,
-        "branch": BranchSerializer(row.branch).data,
         "arrangement_type": row.arrangement_type,
         "request": row.request_uz or row.request_ru,
         "estimated_price": row.estimated_price,
@@ -1073,21 +1019,18 @@ def mini_app_order_rows(customer):
 
 
 def mini_app_branch(branch_id=None):
-    branch = Branch.objects.filter(id=branch_id, is_active=True).first() if branch_id else None
-    return branch or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
+    return default_branch()
 
 
 def mini_app_quote_payload(data):
     branch = mini_app_branch(data.get("branch"))
-    if not branch:
-        raise ValueError("Filial topilmadi")
     business, _ = BusinessSettings.objects.get_or_create(pk=1)
     total = Decimal("0")
     lines = []
     stems_total = 0
     for item in data["items"]:
         if item.get("catalog_item"):
-            catalog = CatalogItem.objects.filter(id=item["catalog_item"], branch=branch, status="available").first()
+            catalog = CatalogItem.objects.filter(id=item["catalog_item"], status="available").first()
             if not catalog:
                 raise ValueError("Katalog guli topilmadi")
             quantity = item.get("quantity") or 1
@@ -1095,7 +1038,7 @@ def mini_app_quote_payload(data):
             total += line_total
             lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "name_ru": catalog.name_ru, "quantity": quantity, "unit_price": str(catalog.price), "total": str(line_total)})
             continue
-        batch = StockBatch.objects.select_related("variant__flower").filter(id=item.get("stock_batch"), branch=branch, is_active=True).first()
+        batch = StockBatch.objects.select_related("variant__flower").filter(id=item.get("stock_batch"), is_active=True).first()
         if not batch:
             raise ValueError("Sklad partiyasi topilmadi")
         quantity_stems = item.get("quantity_stems") or item.get("quantity") or batch.minimum_sale_stems
@@ -1111,7 +1054,7 @@ def mini_app_quote_payload(data):
     if data["arrangement_type"] in ["bouquet", "basket"]:
         total += business.default_florist_fee
     if data["arrangement_type"] == "basket":
-        packaging = Packaging.objects.filter(id=data.get("packaging"), branch=branch, is_active=True).first() if data.get("packaging") else Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, capacity_min_stems__lte=max(stems_total, 1), capacity_max_stems__gte=max(stems_total, 1)).order_by("sale_price").first()
+        packaging = Packaging.objects.filter(id=data.get("packaging"), is_active=True).first() if data.get("packaging") else Packaging.objects.filter(packaging_type="basket", is_active=True, capacity_min_stems__lte=max(stems_total, 1), capacity_max_stems__gte=max(stems_total, 1)).order_by("sale_price").first()
         if packaging:
             total += packaging.sale_price
     return {"branch": branch, "lines": lines, "packaging": PackagingSerializer(packaging).data if packaging else None, "florist_fee": str(business.default_florist_fee if data["arrangement_type"] in ["bouquet", "basket"] else Decimal("0")), "estimated_price": str(total), "price_is_estimate": True}
@@ -1157,10 +1100,9 @@ def mini_app_catalog(request):
         identity = mini_app_identity(request.query_params.get("init_data", ""))
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
-    branch = mini_app_branch(request.query_params.get("branch"))
-    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("branch", "social_post")[:50]
-    stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("branch", "variant__flower")[:100]
-    packaging = Packaging.objects.filter(branch=branch, is_active=True)[:50]
+    catalog = CatalogItem.objects.filter(status="available").select_related("branch", "social_post")[:50]
+    stock = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("branch", "variant__flower")[:100]
+    packaging = Packaging.objects.filter(is_active=True)[:50]
     customer = mini_app_customer(identity)
     return Response({"catalog": CatalogItemSerializer(catalog, many=True).data, "stock": StockBatchSerializer(stock, many=True).data, "packaging": PackagingSerializer(packaging, many=True).data, "customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
 
@@ -1198,11 +1140,11 @@ def mini_app_lead(request):
     lead = Lead.objects.create(customer=customer, branch=quote["branch"], status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app", details=details)
     for row in quote["lines"]:
         if row["type"] == "catalog":
-            catalog_item = CatalogItem.objects.filter(id=row["id"], branch=quote["branch"]).first()
+            catalog_item = CatalogItem.objects.filter(id=row["id"]).first()
             if catalog_item:
                 LeadCatalogUsage.objects.create(lead=lead, catalog_item=catalog_item, quantity=row["quantity"])
         elif row["type"] == "stock":
-            batch = StockBatch.objects.filter(id=row["id"], branch=quote["branch"]).first()
+            batch = StockBatch.objects.filter(id=row["id"]).first()
             if batch:
                 LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=row["quantity_stems"], quantity_bunches=Decimal(row["quantity_stems"]) / Decimal(batch.stems_per_bunch))
     Notification.objects.create(branch=quote["branch"], notification_type="lead", title_uz=f"Mini app lead: {customer}", title_ru=f"Mini app лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)

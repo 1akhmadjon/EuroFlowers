@@ -379,7 +379,7 @@ class ApiTests(TestCase):
         response = self.client.get("/api/audit/")
         self.assertEqual(response.status_code, 403)
 
-    def test_user_create_without_branch_ids_gets_active_branches(self):
+    def test_single_branch_mode_hides_branch_fields_and_defaults_branch(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
         response = self.client.post("/api/users/", {
@@ -391,6 +391,13 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         created = User.objects.get(username="branch-default")
         self.assertIn(self.branch, list(created.profile.branches.all()))
+        self.assertNotIn("branches", response.json()["profile"])
+        response = self.client.post("/api/packaging/", {"packaging_type": "basket", "name_uz": "Branchsiz savat", "name_ru": "Basket", "quantity": 1, "sale_price": "100000.00"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertNotIn("branch", response.json())
+        response = self.client.get("/api/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("branch_stock", response.json())
 
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
