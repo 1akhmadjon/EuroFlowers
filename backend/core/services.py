@@ -1107,6 +1107,62 @@ def ingest_customer_message(conversation, message_text, instagram_message_id="",
     return message
 
 
+def recent_catalog_item_for_conversation(conversation):
+    for message in conversation.messages.exclude(metadata={}).order_by("-created_at")[:20]:
+        for row in (message.metadata or {}).get("catalog_items") or []:
+            catalog_id = row.get("catalog_id")
+            quantity = int(row.get("quantity") or 0)
+            if catalog_id and quantity > 0:
+                item = CatalogItem.objects.filter(id=catalog_id, branch=conversation.branch).first()
+                if item:
+                    return item
+        media_key = (message.metadata or {}).get("media_image_key") or ""
+        match = re.search(r":catalog:(\d+):", media_key)
+        if match:
+            item = CatalogItem.objects.filter(id=match.group(1), branch=conversation.branch).first()
+            if item:
+                return item
+    return None
+
+
+def normalize_lead_catalog_items(result, conversation):
+    rows = []
+    for row in result.get("catalog_items") or []:
+        catalog_id = row.get("catalog_id")
+        item = CatalogItem.objects.filter(id=catalog_id, branch=conversation.branch).first() if catalog_id else None
+        if item:
+            rows.append({"catalog_id": item.id, "quantity": max(1, int(row.get("quantity") or 1))})
+    if rows:
+        result["catalog_items"] = rows
+        return rows
+    fallback = recent_catalog_item_for_conversation(conversation)
+    if fallback:
+        rows = [{"catalog_id": fallback.id, "quantity": 1}]
+        result["catalog_items"] = rows
+        if not result.get("estimated_price"):
+            result["estimated_price"] = fallback.price
+    return rows
+
+
+def fallback_lead_request(result, conversation):
+    catalog_rows = []
+    for row in result.get("catalog_items") or []:
+        item = CatalogItem.objects.filter(id=row.get("catalog_id"), branch=conversation.branch).first()
+        if item:
+            catalog_rows.append(f"{item.name_uz} - {int(row.get('quantity') or 1)} dona")
+    if catalog_rows:
+        return "; ".join(catalog_rows)
+    stock_rows = []
+    for row in result.get("stock_items") or []:
+        batch = StockBatch.objects.select_related("variant__flower").filter(id=row.get("batch_id"), branch=conversation.branch).first()
+        quantity = int(row.get("quantity_stems") or 0)
+        if batch and quantity > 0:
+            stock_rows.append(f"{batch.variant.flower.name_uz} {batch.variant.name_uz} - {quantity} dona")
+    if stock_rows:
+        return "; ".join(stock_rows)
+    return conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or result.get("reply") or "Instagram buyurtma"
+
+
 def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
@@ -1146,6 +1202,10 @@ def create_ai_reply_for_conversation(conversation):
         result["lead_ready"] = False
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
+    if result.get("lead_ready"):
+        normalize_lead_catalog_items(result, conversation)
+        if not result.get("lead_request"):
+            result["lead_request"] = fallback_lead_request(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("lead_ready") and result.get("lead_request"):
         request_text = result["lead_request"]

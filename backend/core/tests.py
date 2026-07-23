@@ -103,6 +103,32 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(lead.stock_usage.count(), 0)
         self.assertIn("dona/pochka", lead.request_uz)
 
+    def test_ai_lead_ready_without_request_uses_recent_catalog_item(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-4", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        wrong_item = CatalogItem.objects.create(branch=self.branch, name_uz="Boshqa buket", arrangement_type="bouquet", price=100000)
+        Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
+        conversation.messages.create(sender="customer", text="Shuni olaman")
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value={
+            "reply": "Rahmat, buyurtma qabul qilindi.",
+            "detected_language": "uz",
+            "customer_name": "Ahmad",
+            "phone": "+998901234567",
+            "lead_ready": True,
+            "lead_request": None,
+            "arrangement_type": "bouquet",
+            "estimated_price": 800000,
+            "handoff": False,
+            "catalog_items": [{"catalog_id": wrong_item.id + 9999, "quantity": 1}],
+            "stock_items": [],
+        }):
+            reply = create_ai_reply_for_conversation(conversation)
+        lead = Lead.objects.get(customer=customer)
+        self.assertTrue(reply.metadata["lead_ready"])
+        self.assertIn(self.item.name_uz, lead.request_uz)
+        self.assertEqual(lead.catalog_usage.get().catalog_item, self.item)
+
     def test_pending_customer_reply_debounces_to_latest_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
