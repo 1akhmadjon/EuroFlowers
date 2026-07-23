@@ -750,6 +750,8 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"\s*yoki alohida 10 dona novdali atirgul sifatida yetkazib beraylikmi", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"Coral Charm katalogi tayyor gul bo‘lsa, katalogdan tekshirib chiqay[.?!]?\s*", "Coral Charm dan custom buket qilib tayyorlab beramiz. ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s*katalogdan ko‘rsatib beraymi\??", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"[^.?!\n]*stokdan topolmadim[^.?!\n]*[.?!]?", "Bu gul bo‘yicha aniq ma'lumotni operatorimiz tekshirib beradi.", normalized, flags=re.IGNORECASE).strip()
+    normalized = re.sub(r"[^.?!\n]*Pochka odatda[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
     normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
@@ -866,6 +868,7 @@ def ai_reply(conversation):
         " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
         " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."
         " Coral Charm, pion, atirgul kabi stock gul nomlarini mijoz custom yasatish kontekstida aytsa, katalogga o‘tkazma. Katalog faqat mijoz tayyor buket/katalog/story/post/reel so‘raganda ishlatiladi."
+        " Tool natijasida gul topilmasa yoki noaniq bo‘lsa, uzun variantlar sanama. Qisqa yoz: 'Bu gul bo‘yicha aniq ma'lumotni operatorimiz tekshirib beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?'"
         " Mijoz aniq gul, miqdor, telefon va manzilni yuborgan bo‘lsa, keyingi savol faqat ism bo‘lsin. Mijoz ismini yozsa lead_ready=true qaytar."
         " 'Flarisla', 'floristla', 'floristlar', 'florisla' kabi yozuvlar florist xizmatini bildiradi, gul nomi emas. Bunday savolga 'Ha, floristlarimiz chiroyli qilib yig‘ib beradi' deb qisqa javob ber."
         " Ichki cheklovlarni mijozga yozma: 'so‘ramaymiz', 'taqiqlanadi', 'hozir so‘ramaymiz' kabi iboralarni ishlatma."
