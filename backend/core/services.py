@@ -941,9 +941,12 @@ def clean_image_reply_text(text):
     cleaned = re.sub(r"(?i)[^.?!\n]*rasmni yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
     cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
     cleaned = re.sub(r"(?i)[^.?!\n]*rasm yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuborildi[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmi yuborildi[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)^Rasmini yubordim[.!\s]*", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmni yuboraymi[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuboraymi[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini ko[‘'ʻ`]?rmoqchimisiz[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmni ko[‘'ʻ`]?rmoqchimisiz[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)\s*rasmi yuborildi[.!\s]*", ". ", cleaned).strip()
+    cleaned = re.sub(r"(?i)\s*rasmini yuborildi[.!\s]*", ". ", cleaned).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned or text
 
