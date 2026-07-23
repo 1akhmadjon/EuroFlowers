@@ -740,6 +740,23 @@ def normalize_ai_reply_text(text):
     return re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
 
 
+def remove_premature_catalog_contact_request(text):
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "katalog" not in lowered and "tayyor" not in lowered:
+        return text
+    markers = ["telefon", "raqam", "manzil", "yetkaz"]
+    for separator in [" Yoki ", "\nYoki ", " yoki ", "\nyoki "]:
+        head, sep, tail = text.rpartition(separator)
+        if sep and any(marker in tail.lower() for marker in markers):
+            return head.rstrip()
+    lines = text.splitlines()
+    while lines and any(marker in lines[-1].lower() for marker in markers):
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
 def ai_reply(conversation):
     customer = conversation.customer
     visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:24])
@@ -826,6 +843,8 @@ def ai_reply(conversation):
     result["reply"] = normalize_ai_reply_text(result.get("reply", ""))
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
+    if not result.get("lead_ready") and not result.get("catalog_items"):
+        result["reply"] = remove_premature_catalog_contact_request(result["reply"])
     return result
 
 
