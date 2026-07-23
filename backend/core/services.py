@@ -737,7 +737,8 @@ def ai_response_schema():
 
 
 def normalize_ai_reply_text(text):
-    return re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
+    normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
+    return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
 
 
 def remove_premature_catalog_contact_request(text):
