@@ -337,6 +337,20 @@ class CustomerViewSet(ScopedViewSet):
             return queryset
         return queryset.exclude(Q(name="") | Q(phone=""))
 
+    def destroy(self, request, *args, **kwargs):
+        customer = self.get_object()
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            customer.name = ""
+            customer.phone = ""
+            customer.instagram_username = ""
+            customer.instagram_user_id = f"deleted:{customer.id}"
+            customer.notes = (customer.notes + "\n" if customer.notes else "") + "Client arxivlandi. Lead tarixi saqlandi."
+            customer.is_blocked = True
+            customer.save(update_fields=["name", "phone", "instagram_username", "instagram_user_id", "notes", "is_blocked", "updated_at"])
+            return Response({"detail": "Client arxivlandi. Lead tarixi saqlandi.", "id": customer.id, "archived": True})
+
 
 class LeadStatusViewSet(ScopedViewSet):
     permission_page = "crm"

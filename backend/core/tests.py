@@ -562,6 +562,20 @@ class ApiTests(TestCase):
         ids = [row["instagram_user_id"] for row in response.json()["results"]]
         self.assertIn("placeholder", ids)
 
+    def test_customer_delete_archives_when_leads_exist(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="delete-me", name="Ahmad", phone="+998901234567")
+        Lead.objects.create(customer=customer, branch=self.branch, request_uz="Test buyurtma")
+        response = self.client.delete(f"/api/customers/{customer.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["archived"])
+        customer.refresh_from_db()
+        self.assertEqual(customer.name, "")
+        self.assertEqual(customer.phone, "")
+        self.assertEqual(customer.instagram_user_id, f"deleted:{customer.id}")
+        response = self.client.get("/api/customers/")
+        ids = [row["id"] for row in response.json()["results"]]
+        self.assertNotIn(customer.id, ids)
+
     def test_social_post_response_includes_lead_ids(self):
         post = SocialPost.objects.create(branch=self.branch, post_type="story", title_uz="Story buket", title_ru="Story bouquet", is_active=True)
         customer = Customer.objects.create(branch=self.branch, name="Madina", phone="+998901234567", instagram_user_id="ig-lead")
