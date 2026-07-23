@@ -129,6 +129,58 @@ class BusinessRulesTests(TestCase):
         self.assertIn(self.item.name_uz, lead.request_uz)
         self.assertEqual(lead.catalog_usage.get().catalog_item, self.item)
 
+    def test_catalog_browsing_does_not_create_lead_and_overrides_wrong_catalog(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-5", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        pushti = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", arrangement_type="bouquet", price=500000)
+        conversation.messages.create(sender="customer", text="Pushti atirgul korsat")
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value={
+            "reply": "Mana pushti atirgul buketi haqida ma'lumot. Narxi 500 000 so‘m.",
+            "detected_language": "uz",
+            "customer_name": "Ahmad",
+            "phone": "+998901234567",
+            "lead_ready": True,
+            "lead_request": "Qizil atirgul buketi - 1 dona",
+            "arrangement_type": "bouquet",
+            "estimated_price": 500000,
+            "handoff": True,
+            "catalog_items": [{"catalog_id": self.item.id, "quantity": 1}],
+            "stock_items": [],
+        }):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertFalse(reply.metadata["lead_ready"])
+        self.assertFalse(reply.metadata["handoff"])
+        self.assertEqual(reply.metadata["catalog_items"], [{"catalog_id": pushti.id, "quantity": 1}])
+        self.assertFalse(Lead.objects.filter(customer=customer).exists())
+
+    def test_order_intent_overrides_wrong_catalog_with_reply_text(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-6", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        pushti = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", arrangement_type="bouquet", price=500000)
+        qizil = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil atirgul buketi", arrangement_type="bouquet", price=400000)
+        conversation.messages.create(sender="customer", text="Shundan ham zakaz qvor")
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value={
+            "reply": "Rahmat, pushti atirgul buketi uchun buyurtma qabul qilindi.",
+            "detected_language": "uz",
+            "customer_name": "Ahmad",
+            "phone": "+998901234567",
+            "lead_ready": True,
+            "lead_request": "Qizil atirgul buketi - 1 dona",
+            "arrangement_type": "catalog",
+            "estimated_price": 500000,
+            "handoff": False,
+            "catalog_items": [{"catalog_id": qizil.id, "quantity": 1}],
+            "stock_items": [],
+        }):
+            reply = create_ai_reply_for_conversation(conversation)
+        lead = Lead.objects.get(customer=customer)
+        self.assertTrue(reply.metadata["lead_ready"])
+        self.assertEqual(reply.metadata["catalog_items"], [{"catalog_id": pushti.id, "quantity": 1}])
+        self.assertEqual(lead.catalog_usage.get().catalog_item, pushti)
+        self.assertIn("Pushti atirgul buketi", lead.request_uz)
+
     def test_pending_customer_reply_debounces_to_latest_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)

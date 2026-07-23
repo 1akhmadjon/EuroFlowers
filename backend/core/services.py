@@ -1125,7 +1125,45 @@ def recent_catalog_item_for_conversation(conversation):
     return None
 
 
+def compact_match_text(value):
+    return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower()).strip()
+
+
+def catalog_item_from_text(conversation, *values):
+    texts = [compact_match_text(value) for value in values if value]
+    for text in texts:
+        for item in CatalogItem.objects.filter(branch=conversation.branch):
+            name = compact_match_text(item.name_uz)
+            if name and name in text:
+                return item
+            tokens = [token for token in name.split() if token not in {"buketi", "buket", "guldasta", "kompozitsiya"}]
+            if len(tokens) >= 2 and all(token in text for token in tokens[:2]):
+                return item
+    return None
+
+
+def recent_customer_texts(conversation, limit=6):
+    return list(conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True)[:limit])
+
+
+def has_recent_order_intent(conversation):
+    text = compact_match_text(" ".join(recent_customer_texts(conversation)))
+    patterns = ["olaman", "zakaz", "buyurtma", "qvor", "qilvor", "qilib bering", "qiliber", "rasmiylashtir", "shu kerak", "shuni kerak"]
+    return any(pattern in text for pattern in patterns)
+
+
+def is_catalog_browsing_intent(conversation):
+    latest = compact_match_text(recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else "")
+    patterns = ["korsat", "ko rsat", "koʻrsat", "ko rsating", "rasm", "qanaqa", "qanday", "katalog", "bor", "narxi", "qancha"]
+    return any(pattern in latest for pattern in patterns)
+
+
 def normalize_lead_catalog_items(result, conversation):
+    inferred = catalog_item_from_text(conversation, result.get("reply"), recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else "", result.get("lead_request"))
+    if inferred:
+        result["catalog_items"] = [{"catalog_id": inferred.id, "quantity": 1}]
+        result["estimated_price"] = float(inferred.price)
+        return result["catalog_items"]
     rows = []
     for row in result.get("catalog_items") or []:
         catalog_id = row.get("catalog_id")
@@ -1140,7 +1178,7 @@ def normalize_lead_catalog_items(result, conversation):
         rows = [{"catalog_id": fallback.id, "quantity": 1}]
         result["catalog_items"] = rows
         if not result.get("estimated_price"):
-            result["estimated_price"] = fallback.price
+            result["estimated_price"] = float(fallback.price)
     return rows
 
 
@@ -1195,6 +1233,12 @@ def create_ai_reply_for_conversation(conversation):
     if direct_stems_request:
         result["estimated_price"] = None
         result["stock_items"] = []
+    if result.get("catalog_items"):
+        normalize_lead_catalog_items(result, conversation)
+    if result.get("lead_ready") and is_catalog_browsing_intent(conversation) and not has_recent_order_intent(conversation):
+        result["lead_ready"] = False
+        result["handoff"] = False
+        result["lead_request"] = None
     if result.get("lead_ready") and not customer.name:
         result["lead_ready"] = False
         result["reply"] = "Buyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
@@ -1204,6 +1248,10 @@ def create_ai_reply_for_conversation(conversation):
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
     if result.get("lead_ready"):
         normalize_lead_catalog_items(result, conversation)
+        request_catalog = catalog_item_from_text(conversation, result.get("lead_request"))
+        selected_catalog_id = (result.get("catalog_items") or [{}])[0].get("catalog_id")
+        if selected_catalog_id and (not request_catalog or request_catalog.id != selected_catalog_id):
+            result["lead_request"] = None
         if not result.get("lead_request"):
             result["lead_request"] = fallback_lead_request(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
