@@ -209,6 +209,18 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("Yoki boshqa variant", rich["html"])
         self.assertIn("Qaysi biri sizga ma&#x27;qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.", rich["html"])
 
+    def test_telegram_catalog_rich_message_handles_dash_bullets(self):
+        text = "Hozirda katalogimizda quyidagi tayyor buketlar bor:\n- Pion buketi - 800 000 so‘m Pion Sarah Bernhardt och pushti\n- Pushti atirgul buketi - 500 000 so‘m Atirgul Hermosa pushti\n- Qizil atirgul buketi - 400 000 so‘m Atirgul Red Naomi qizil\nSiz tayyor buketlardan birini olmoqchimisiz yoki maxsus buket yasatmoqchimisiz?"
+        rich = telegram_catalog_rich_message(text)
+        self.assertIsNotNone(rich)
+        self.assertIn("<td>Pion buketi</td>", rich["html"])
+        self.assertIn("<td>Pushti atirgul buketi</td>", rich["html"])
+        self.assertIn("<td>Qizil atirgul buketi</td>", rich["html"])
+        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
+        self.assertNotIn("Sarah Bernhardt", rich["html"])
+        self.assertNotIn("Hermosa", rich["html"])
+        self.assertNotIn("maxsus buket", rich["html"])
+
     def test_ai_reply_handles_accidental_message_without_openai(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-accidental")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)

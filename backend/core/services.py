@@ -561,7 +561,7 @@ def clean_catalog_listing_text(text):
     cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
     lines = []
     for line in cleaned.splitlines():
-        match = re.match(r"^(?P<prefix>\s*(?:\d+[).])\s*)(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*)(?:\s*(?:so[‘'ʻ`]m|som|сум))?(?:\b|$).*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^(?P<prefix>\s*(?:(?:\d+[).])|[-*])\s*)(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*)(?:\s*(?:so[‘'ʻ`]m|som|сум))?(?:\b|$).*$", line, flags=re.IGNORECASE)
         if match:
             line = f"{match.group('prefix')}{clean_catalog_item_name(match.group('name'))} - {clean_catalog_price(match.group('price'))}"
         lines.append(line)
@@ -572,7 +572,7 @@ def telegram_catalog_rows_from_text(text):
     rows = []
     cleaned = clean_catalog_listing_text(text)
     for line in cleaned.splitlines():
-        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*(?:\s*(?:so[‘'ʻ`]m|som|сум))?)\s*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^\s*(?:(?:\d+[).])|[-*])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*(?:\s*(?:so[‘'ʻ`]m|som|сум))?)\s*$", line, flags=re.IGNORECASE)
         if not match:
             continue
         rows.append({
@@ -588,7 +588,7 @@ def telegram_catalog_rich_message(text):
         return None
     cleaned = clean_catalog_listing_text(text)
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:\d+[).])\s*", line)), 0)
+    first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:(?:\d+[).])|[-*])\s*", line)), 0)
     intro = " ".join(lines[:first_row_index]).strip()
     outro = "Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman."
     html = ""
@@ -1013,6 +1013,7 @@ def ai_reply(conversation):
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxatida hech qachon qoldiq soni, nechta borligi yoki 'mavjud: 3 dona' kabi matn yozma. Faqat nomi va narxini yoz."
         " Katalog ro‘yxatida tarkib, gul navi, rang, qaysi guldan qancha ketgani yoki '50 ta' kabi sonlarni yozma. Bularni faqat mijoz aniq 'tarkibi nima' yoki 'qaysi guldan qancha ketgan' deb so‘rasa ayt."
+        " Katalog ro‘yxatini faqat raqamlangan formatda yoz: '1. Pion buketi - 800 000 so‘m'. Defisli bullet bilan '- Pion buketi' deb boshlama."
         " Katalog ro‘yxatida har bir qatorda narx yonida albatta 'so‘m' yoz: '1. Pion buketi - 800 000 so‘m'. 'Narxlar so‘mda' deb tepada umumiy yozib, qatorda so‘mni tashlab ketma."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.' 'Yoki boshqa variant/miqdor kerakmi' deb so‘rama."
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
