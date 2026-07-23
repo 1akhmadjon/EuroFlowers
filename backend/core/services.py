@@ -634,6 +634,16 @@ def ai_reply(conversation):
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
+    catalog_rows = [{
+        "id": row.id,
+        "name_uz": row.name_uz,
+        "name_ru": row.name_ru,
+        "type": row.arrangement_type,
+        "price": str(row.price),
+        "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
+        "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
+        "composition": catalog_composition_summary(row),
+    } for row in catalog]
     context = {
         "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
         "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session, "ai_replies_count": ai_replies_count, "last_customer_message": last_customer_message},
@@ -653,16 +663,9 @@ def ai_reply(conversation):
             "price_per_stem": str(row.sale_price_per_stem),
             "price_per_bunch": str(row.sale_price_per_bunch),
         } for row in stock],
-        "catalog": [{
-            "id": row.id,
-            "name_uz": row.name_uz,
-            "name_ru": row.name_ru,
-            "type": row.arrangement_type,
-            "price": str(row.price),
-            "quantity_available": max(row.quantity_total - row.quantity_sold, 0),
-            "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
-            "composition": catalog_composition_summary(row),
-        } for row in catalog],
+        "catalog_count": len(catalog_rows),
+        "catalog_names": [row["name_uz"] for row in catalog_rows],
+        "catalog": catalog_rows,
         "baskets": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "min": row.capacity_min_stems, "max": row.capacity_max_stems, "price": str(row.sale_price)} for row in baskets],
         "post": None,
         "rules": {
@@ -704,7 +707,7 @@ def ai_reply(conversation):
         " Mijoz 'tayyor buket kerakmas', 'tayyor kerak emas', 'o‘zim yasatmoqchiman', 'ozim yasatmoxchiman' desa katalog ro‘yxatini qayta yuborma. Faqat custom yig‘ish oqimida davom et."
         " Mijoz 'skladda qanaqa gul bor', 'qanaqa gulla bor sklada', 'gul turlari bormi' desa bu custom yig‘ish uchun mavjud gul turlarini so‘rayapti. Katalogdagi tayyor buketlarni emas, stock kontekstdagi gul turlarini qisqa ro‘yxat qilib ber va qaysi guldan buket yoki savat kerakligini so‘ra."
         " Mijoz 'tayyor buketlayam sotaslami yoki savatga yasalgan tayyor gulla', 'tayyor buket bormi', 'tayyor savat bormi', 'tayyor gulla bormi' desa bu ha/yo‘q savol emas, katalog so‘rovi. Javob: 'Ha, tayyor buket va savatdagi kompozitsiyalarimiz bor' mazmunida boshlansin va catalog kontekstdagi mavjud variantlarni nomi, turi, narxi bilan ro‘yxat qil. Bunday savolga 'Sizga buketmi yoki savatmi kerak?' deb qayta savol berma."
-        " Katalog ro‘yxati so‘ralganda catalog kontekstdagi barcha available itemlarni ko‘rsat: story/post/reelga bog‘langan bo‘lsa ham chiqar. Hech bir available itemni tashlab ketma."
+        " Katalog ro‘yxati so‘ralganda catalog kontekstdagi barcha available itemlarni ko‘rsat: story/post/reelga bog‘langan bo‘lsa ham chiqar. Hech bir available itemni tashlab ketma. Javobdagi bullet soni context.catalog_count bilan teng bo‘lsin va context.catalog_names ichidagi hamma nomlar chiqsin."
         " Katalog ro‘yxati so‘ralganda catalog_items array bo‘sh bo‘lsin. Faqat mijoz aniq bitta katalog gulini tanlasa yoki rasmini so‘rasa catalog_itemsga o‘sha bitta catalog_id va quantity=1 yoz."
         " Mijoz 'ha' deb javob bersa, oldingi AI savolini historydan tushun. Agar oldingi savol katalog variantlari haqida bo‘lsa, variantlarni ko‘rsat yoki tanlashni so‘ra; hech qachon aynan bir xil savolni takrorlama."
         " Agar mijoz story/post/reelni sent qilib yoki reply qilib 'shu', 'shundan kerak', 'narxi qancha' desa, 'Sizga qanday gul yoki buket kerak edi?' demagin. 'Bugungi tayyor variantlardan' deb boshlama. Story bo‘lsa 'Siz yozgan storydagi gul:', post bo‘lsa 'Siz yuborgan postdagi gul:', reel bo‘lsa 'Siz yuborgan reeldagi gul:' deb yoz."
