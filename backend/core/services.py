@@ -470,7 +470,7 @@ def send_instagram_context_image(recipient_id, conversation, reply=None):
     image = catalog_image_for_conversation(conversation, reply)
     if not image:
         return None
-    marker = f"instagram_image_sent:{image['source']}:{image['image_url']}"
+    marker = f"instagram_image_sent:reply:{getattr(reply, 'id', 0)}:{image['source']}:{image['image_url']}"
     if Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).exists():
         return None
     result = instagram_send_image(recipient_id, image["image_url"])
@@ -528,7 +528,7 @@ def send_telegram_context_image(chat_id, conversation, reply=None):
     image = catalog_image_for_conversation(conversation, reply)
     if not image:
         return None
-    marker = f"telegram_image_sent:{image['source']}:{image['image_url']}"
+    marker = f"telegram_image_sent:reply:{getattr(reply, 'id', 0)}:{image['source']}:{image['image_url']}"
     if Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).exists():
         return None
     result = telegram_send_image(chat_id, image["image_url"])
