@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_tool_definitions, catalog_image_for_conversation, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, execute_ai_tool, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, execute_ai_tool, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -62,6 +62,14 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("ko‘rmoqchimisiz", cleaned)
         self.assertIn("Qizil atirgul buketi", cleaned)
         self.assertIn("400 000 so‘m", cleaned)
+
+    def test_catalog_order_cleanup_removes_custom_questions(self):
+        text = "Pion buketi rasmini jo‘natdim. Yana yordam kerakmi? o‘lcham, paket, yetkazib berish vaqtini ayting"
+        cleaned = clean_catalog_order_reply_text(clean_image_reply_text(text))
+        self.assertNotIn("jo‘natdim", cleaned)
+        self.assertNotIn("o‘lcham", cleaned)
+        self.assertNotIn("paket", cleaned)
+        self.assertIn("Pion buketi", cleaned)
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
