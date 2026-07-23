@@ -741,6 +741,12 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s*\(?\bcatalog[_ ]?id\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\bUZS\b", "so‘m", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"[^.?!\n]*(so‘ramaymiz|so'ramaymiz|taqiqlanadi)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = re.sub(r"[^.?!\n]*(yetkazish/sana/vaqt|sana/vaqt|yetkazish vaqti)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = re.sub(r"\bxom\s+(pion|pioni|gul|guli)\b", r"\1", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bolmaysizmi\b", "yuborasizmi", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
 
 
@@ -836,6 +842,11 @@ def ai_reply(conversation):
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
+        " 'Flarisla', 'floristla', 'floristlar', 'florisla' kabi yozuvlar florist xizmatini bildiradi, gul nomi emas. Bunday savolga 'Ha, floristlarimiz chiroyli qilib yig‘ib beradi' deb qisqa javob ber."
+        " Ichki cheklovlarni mijozga yozma: 'so‘ramaymiz', 'taqiqlanadi', 'hozir so‘ramaymiz' kabi iboralarni ishlatma."
+        " Mijoz manzil va telefonni yozgan, lekin ismi yo‘q bo‘lsa, faqat ismini so‘ra. Telefonni qayta so‘rama."
+        " Yetkazish, sana, vaqt va manzilni mijoz buyurtmani aniq tasdiqlamaguncha so‘rama. Custom jarayonda avval gul/rang/miqdor/buket-savatni aniqlashtir."
+        " 'olmaysizmi?' kabi g‘alati savol yozma. 'Yozib yuborasizmi?' yoki 'Tasdiqlaysizmi?' deb yoz."
         " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
         " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operator/jamoa bog‘lanishini ayt."
         " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma."
