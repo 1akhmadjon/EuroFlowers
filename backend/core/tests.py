@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update
-from .tasks import process_delayed_instagram_reply, split_location_reply
+from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
 class BusinessRulesTests(TestCase):
@@ -148,6 +148,21 @@ class BusinessRulesTests(TestCase):
         self.assertIsNone(result)
         typing_mock.assert_not_called()
         reply_mock.assert_not_called()
+
+    def test_delayed_telegram_reply_sends_catalog_image(self):
+        self.item.status = "available"
+        self.item.image_url = "https://example.com/oq-buket.jpg"
+        self.item.save(update_fields=["status", "image_url", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
+        reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
+        from unittest.mock import patch
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value={"ok": True}) as image_mock:
+            result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
+        self.assertEqual(result, reply_message.id)
+        image_mock.assert_called_once_with("555", reply_message.conversation, reply_message)
+        text_mock.assert_called_once_with("555", "Mana rasmi")
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

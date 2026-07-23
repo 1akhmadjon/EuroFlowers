@@ -448,7 +448,7 @@ def instagram_send_image(recipient_id, image_url):
     return response.json()
 
 
-def instagram_catalog_image_for_conversation(conversation, reply=None):
+def catalog_image_for_conversation(conversation, reply=None):
     catalog_ids = []
     if reply and reply.metadata:
         catalog_ids = [row.get("catalog_id") for row in reply.metadata.get("catalog_items", []) if row.get("catalog_id")]
@@ -467,7 +467,7 @@ def instagram_catalog_image_for_conversation(conversation, reply=None):
 
 
 def send_instagram_context_image(recipient_id, conversation, reply=None):
-    image = instagram_catalog_image_for_conversation(conversation, reply)
+    image = catalog_image_for_conversation(conversation, reply)
     if not image:
         return None
     marker = f"instagram_image_sent:{image['source']}:{image['image_url']}"
@@ -518,6 +518,22 @@ def telegram_api(method, payload):
 
 def telegram_send(chat_id, text):
     return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+
+
+def telegram_send_image(chat_id, image_url):
+    return telegram_api("sendPhoto", {"chat_id": chat_id, "photo": image_url})
+
+
+def send_telegram_context_image(chat_id, conversation, reply=None):
+    image = catalog_image_for_conversation(conversation, reply)
+    if not image:
+        return None
+    marker = f"telegram_image_sent:{image['source']}:{image['image_url']}"
+    if Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).exists():
+        return None
+    result = telegram_send_image(chat_id, image["image_url"])
+    Message.objects.create(conversation=conversation, sender="system", text="Telegram image sent", metadata={"media_image_key": marker, "image_url": image["image_url"], "result": result})
+    return result
 
 
 def telegram_sender_action(chat_id, action="typing"):
