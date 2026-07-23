@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -203,6 +203,25 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(reply.metadata["catalog_items"], [{"catalog_id": pushti.id, "quantity": 1}])
         self.assertEqual(lead.catalog_usage.get().catalog_item, pushti)
         self.assertIn("Pushti atirgul buketi", lead.request_uz)
+
+    def test_lead_request_enrichment_adds_pickup(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-pickup", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="Borib olaman")
+        conversation.messages.create(sender="customer", text="907776677")
+        conversation.messages.create(sender="customer", text="Ahmad")
+        enriched = enrich_lead_request_text("Pion buketi - 1 dona", conversation)
+        self.assertEqual(enriched, "Pion buketi - 1 dona, borib olib ketish")
+
+    def test_lead_request_enrichment_adds_delivery_details(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-delivery", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="Xadra 9 ga ertaga soat 19:00 larga kerak")
+        conversation.messages.create(sender="customer", text="907776677")
+        conversation.messages.create(sender="customer", text="Ahmad")
+        enriched = enrich_lead_request_text("Pion buketi - 1 dona", conversation)
+        self.assertIn("Pion buketi - 1 dona", enriched)
+        self.assertIn("Xadra 9 manzilga yetkazib berish kerak ertaga soat 19:00 larga", enriched)
 
     def test_pending_customer_reply_debounces_to_latest_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")

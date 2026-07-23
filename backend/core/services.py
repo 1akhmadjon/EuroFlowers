@@ -1261,6 +1261,69 @@ def recent_customer_texts(conversation, limit=6):
     return list(conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True)[:limit])
 
 
+def is_contact_or_name_text(text, customer=None):
+    value = (text or "").strip()
+    if not value:
+        return True
+    if normalize_phone(value):
+        return True
+    lowered = compact_match_text(value)
+    if any(pattern in lowered for pattern in ["borib", "olaman", "opket", "yetkaz", "dastafka", "dostavka", "manzil", "kerak", "ertaga", "bugun", "soat"]):
+        return False
+    if customer and customer.name and compact_match_text(value) == compact_match_text(customer.name):
+        return True
+    return bool(re.fullmatch(r"[A-Za-zА-Яа-яЁёʻ‘'` -]{2,40}", value) and len(value.split()) <= 2)
+
+
+def lead_customer_context_texts(conversation):
+    customer = conversation.customer
+    rows = []
+    for text in reversed(recent_customer_texts(conversation, limit=20)):
+        value = (text or "").strip()
+        lowered = compact_match_text(value)
+        if is_contact_or_name_text(value, customer):
+            continue
+        if any(pattern in lowered for pattern in ["salom", "assalomu", "rasm", "korsat", "ko rsat", "nechpul", "qancha", "dastafka nechpul"]):
+            continue
+        rows.append(value)
+    return rows
+
+
+def extract_lead_fulfillment_note(conversation):
+    texts = lead_customer_context_texts(conversation)
+    joined = compact_match_text(" ".join(texts))
+    if any(pattern in joined for pattern in ["borib ol", "borb opket", "opket", "olib ket", "do kondan olib", "dokondan olib"]):
+        return "borib olib ketish"
+    delivery_text = ""
+    for text in reversed(texts):
+        lowered = compact_match_text(text)
+        if any(pattern in lowered for pattern in ["yetkaz", "dostavka", "dastafka", "manzil", "ko cha", "mahalla", "dom", "uy"]) or re.search(r"\b\w+\s+\d+\s+ga\b", lowered):
+            delivery_text = text
+            break
+    if not delivery_text:
+        return ""
+    cleaned = re.sub(r"\b(kerak|bo[‘'ʻ`]?ladi|qiling|qib ber|qilib ber|yetkazib berish|dastafka|dostavka)\b", " ", delivery_text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,-")
+    match = re.match(r"(.+?)\s+ga\s+(.+)$", cleaned, flags=re.IGNORECASE)
+    if match:
+        address = match.group(1).strip(" .,-")
+        time_note = match.group(2).strip(" .,-")
+        if time_note:
+            return f"{address} manzilga yetkazib berish kerak {time_note}"
+        return f"{address} manzilga yetkazib berish kerak"
+    return f"{cleaned} manzilga yetkazib berish kerak" if cleaned else "yetkazib berish kerak"
+
+
+def enrich_lead_request_text(request_text, conversation):
+    base = (request_text or "").strip(" .")
+    note = extract_lead_fulfillment_note(conversation)
+    if not note:
+        return base
+    if note.lower() in base.lower():
+        return base
+    return f"{base}, {note}" if base else note
+
+
 def has_recent_order_intent(conversation):
     text = compact_match_text(" ".join(recent_customer_texts(conversation)))
     patterns = ["olaman", "zakaz", "buyurtma", "qvor", "qilvor", "qilib bering", "qiliber", "rasmiylashtir", "shu kerak", "shuni kerak"]
@@ -1371,6 +1434,7 @@ def create_ai_reply_for_conversation(conversation):
             result["lead_request"] = None
         if not result.get("lead_request"):
             result["lead_request"] = fallback_lead_request(result, conversation)
+        result["lead_request"] = enrich_lead_request_text(result["lead_request"], conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("lead_ready") and result.get("lead_request"):
         request_text = result["lead_request"]
