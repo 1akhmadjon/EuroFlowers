@@ -123,7 +123,10 @@ class UserWriteSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         role = validated_data.pop("role", "operator")
         language = validated_data.pop("language", "uz")
+        branches_provided = "branch_ids" in validated_data
         branches = validated_data.pop("branch_ids", [])
+        if not branches_provided and role != "developer":
+            branches = list(Branch.objects.filter(is_active=True))
         permissions = validated_data.pop("permissions", None)
         password = validated_data.pop("password", None)
         user = User(**validated_data)

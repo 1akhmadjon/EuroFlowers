@@ -379,6 +379,19 @@ class ApiTests(TestCase):
         response = self.client.get("/api/audit/")
         self.assertEqual(response.status_code, 403)
 
+    def test_user_create_without_branch_ids_gets_active_branches(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
+        response = self.client.post("/api/users/", {
+            "username": "branch-default",
+            "password": "Password123!",
+            "role": "operator",
+            "permissions": [{"page": "conversations", "can_view": True, "can_control": True}]
+        }, format="json")
+        self.assertEqual(response.status_code, 201)
+        created = User.objects.get(username="branch-default")
+        self.assertIn(self.branch, list(created.profile.branches.all()))
+
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
