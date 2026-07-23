@@ -132,7 +132,7 @@ class BusinessRulesTests(TestCase):
     def test_catalog_browsing_does_not_create_lead_and_overrides_wrong_catalog(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-5", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
-        pushti = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", arrangement_type="bouquet", price=500000)
+        pushti = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", arrangement_type="bouquet", price=500000, status="available")
         conversation.messages.create(sender="customer", text="Pushti atirgul korsat")
         from unittest.mock import patch
         with patch("core.services.ai_reply", return_value={
@@ -157,8 +157,8 @@ class BusinessRulesTests(TestCase):
     def test_order_intent_overrides_wrong_catalog_with_reply_text(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-6", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
-        pushti = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", arrangement_type="bouquet", price=500000)
-        qizil = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil atirgul buketi", arrangement_type="bouquet", price=400000)
+        pushti = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", arrangement_type="bouquet", price=500000, status="available")
+        qizil = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil atirgul buketi", arrangement_type="bouquet", price=400000, status="available")
         conversation.messages.create(sender="customer", text="Shundan ham zakaz qvor")
         from unittest.mock import patch
         with patch("core.services.ai_reply", return_value={
@@ -326,20 +326,36 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Umumiy 'qanaqa gullar bor' so‘rovida chaqirilmaydi", tools["search_stock"])
         self.assertIn("custom savat yasatmoqchi", tools["get_baskets"])
         self.assertIn("send_catalog_image", tools)
+        self.assertIn("Catalog id ishlatilmaydi", tools["send_catalog_image"])
 
     def test_send_catalog_image_tool_uses_selected_catalog(self):
+        self.item.status = "available"
         self.item.image_url = "https://example.com/oq-buket.jpg"
-        self.item.save(update_fields=["image_url", "updated_at"])
+        self.item.save(update_fields=["status", "image_url", "updated_at"])
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         conversation.messages.create(sender="customer", text="oq buket rasmi")
         from unittest.mock import patch
         with patch("core.services.telegram_send_image", return_value={"ok": True}) as image_mock:
-            result = execute_ai_tool("send_catalog_image", {"catalog_id": self.item.id}, conversation)
+            result = execute_ai_tool("send_catalog_image", {"query": "Oq buket"}, conversation)
         self.assertTrue(result["image_sent"])
-        self.assertEqual(result["catalog_id"], self.item.id)
+        self.assertEqual(result["catalog_name"], self.item.name_uz)
+        self.assertNotIn("catalog_id", result)
         image_mock.assert_called_once_with("123", "https://example.com/oq-buket.jpg")
         self.assertTrue(Message.objects.filter(conversation=conversation, sender="system", metadata__catalog_id=self.item.id).exists())
+
+    def test_ai_catalog_tool_does_not_expose_ids_or_composition(self):
+        self.item.status = "available"
+        self.item.image_url = "https://example.com/oq-buket.jpg"
+        self.item.save(update_fields=["status", "image_url", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:tool-contract")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        result = execute_ai_tool("get_catalog", {"query": ""}, conversation)
+        row = result["items"][0]
+        self.assertIn("name_uz", row)
+        self.assertIn("price", row)
+        self.assertNotIn("id", row)
+        self.assertNotIn("composition", row)
 
     def test_delayed_telegram_reply_prefers_rich_catalog_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:rich", name="Ahmad", phone="+998901234567")

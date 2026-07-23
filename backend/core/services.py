@@ -541,15 +541,15 @@ def send_telegram_context_image(chat_id, conversation, reply=None):
     return result
 
 
-def send_catalog_image_for_conversation(conversation, catalog_id):
-    item = CatalogItem.objects.filter(id=catalog_id, branch=conversation.branch).exclude(image_url="").first()
+def send_catalog_image_for_conversation(conversation, query):
+    item = catalog_item_from_text(conversation, query)
     if not item or not item.image_url.startswith("https://"):
-        return {"ok": False, "image_sent": False, "catalog_id": catalog_id, "detail": "Rasm topilmadi"}
+        return {"ok": False, "image_sent": False, "catalog_name": str(query or ""), "detail": "Rasm topilmadi"}
     latest_customer_id = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("id", flat=True).first() or 0
     marker = f"ai_tool_image_sent:customer:{latest_customer_id}:catalog:{item.id}:{item.image_url}"
     existing = Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).first()
     if existing:
-        return {"ok": True, "image_sent": True, "already_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": item.image_url}
+        return {"ok": True, "image_sent": True, "already_sent": True, "catalog_name": item.name_uz}
     recipient = conversation.customer.instagram_user_id or ""
     if recipient.startswith("telegram:"):
         result = telegram_send_image(recipient.split(":", 1)[1], item.image_url)
@@ -561,7 +561,7 @@ def send_catalog_image_for_conversation(conversation, catalog_id):
         result = {"mocked": True}
         text = "Catalog image sent"
     Message.objects.create(conversation=conversation, sender="system", text=text, metadata={"media_image_key": marker, "image_url": item.image_url, "catalog_id": item.id, "catalog_name": item.name_uz, "result": result})
-    return {"ok": True, "image_sent": True, "already_sent": False, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": item.image_url}
+    return {"ok": True, "image_sent": True, "already_sent": False, "catalog_name": item.name_uz}
 
 
 def telegram_sender_action(chat_id, action="typing"):
@@ -706,19 +706,17 @@ def recent_customer_orders(customer):
 
 
 def ai_catalog_rows(query="", limit=24):
-    queryset = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
+    queryset = CatalogItem.objects.filter(status="available").select_related("social_post").order_by("-created_at")
     if query:
         queryset = queryset.filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
     rows = []
     for row in queryset[:limit]:
         rows.append({
-            "id": row.id,
             "name_uz": row.name_uz,
             "name_ru": row.name_ru,
             "type": row.arrangement_type,
             "price": str(row.price),
             "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
-            "composition": catalog_composition_summary(row),
         })
     return rows
 
@@ -762,7 +760,7 @@ def ai_post_context(conversation):
     if not conversation.social_post_id:
         return None
     post = conversation.social_post
-    post_catalog = CatalogItem.objects.filter(social_post=post, status="available").prefetch_related("composition__stock_batch__variant__flower")
+    post_catalog = CatalogItem.objects.filter(social_post=post, status="available")
     return {
         "type": post.post_type,
         "title_uz": post.title_uz,
@@ -770,7 +768,7 @@ def ai_post_context(conversation):
         "description_uz": post.description_uz,
         "description_ru": post.description_ru,
         "price": str(post.price or ""),
-        "catalog": [{"id": row.id, "name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "composition": catalog_composition_summary(row)} for row in post_catalog],
+        "catalog": [{"name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "has_image": bool(row.image_url)} for row in post_catalog],
     }
 
 
@@ -836,7 +834,7 @@ def ai_tool_definitions():
         {"type": "function", "name": "get_baskets", "description": "Faqat mijoz custom savat yasatmoqchi/yig‘dirmoqchi bo‘lsa mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_recent_orders", "description": "Mijoz oldingi buyurtmalarini so‘raganda olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_post_context", "description": "Conversation story/post/reel bilan bog‘langan bo‘lsa, o‘sha media ma’lumotini olish.", "parameters": empty_parameters, "strict": True},
-        {"type": "function", "name": "send_catalog_image", "description": "Mijoz aniq katalogdagi buket/savat rasmini so‘raganda shu katalog item rasmini Instagram/Telegram chatga yuborish. Rasm so‘ralganda final javobdan oldin doim shu tool chaqiriladi.", "parameters": {"type": "object", "properties": {"catalog_id": {"type": "integer", "description": "Rasmi yuboriladigan CatalogItem id"}}, "required": ["catalog_id"], "additionalProperties": False}, "strict": True},
+        {"type": "function", "name": "send_catalog_image", "description": "Mijoz aniq katalogdagi buket/savat rasmini so‘raganda shu katalog item rasmini Instagram/Telegram chatga yuborish. Rasm so‘ralganda final javobdan oldin doim shu tool chaqiriladi. Catalog id ishlatilmaydi, katalog nomi yoki mijoz yozgan nom bilan chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Rasmi yuboriladigan katalog nomi, masalan Pushti atirgul buketi"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
     ]
 
 
@@ -853,7 +851,7 @@ def execute_ai_tool(name, arguments, conversation):
     if name == "get_post_context":
         return {"post": ai_post_context(conversation)}
     if name == "send_catalog_image":
-        return send_catalog_image_for_conversation(conversation, arguments.get("catalog_id"))
+        return send_catalog_image_for_conversation(conversation, arguments.get("query"))
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -872,7 +870,7 @@ def ai_response_schema():
             "handoff": {"type": "boolean"},
             "catalog_items": {
                 "type": "array",
-                "items": {"type": "object", "properties": {"catalog_id": {"type": "integer"}, "quantity": {"type": "integer"}}, "required": ["catalog_id", "quantity"], "additionalProperties": False},
+                "items": {"type": "object", "properties": {"catalog_name": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["catalog_name", "quantity"], "additionalProperties": False},
             },
             "stock_items": {
                 "type": "array",
@@ -891,6 +889,10 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"\(([^()]{1,80})\)", r"\1", normalized)
     normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s*\(?\bcatalog[_ ]?id\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bcatalog\s+id\s*\d+\b", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"[^.?!\n]*(id\s*yuboring|\d+\s*deb yozing)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = re.sub(r"(?im)^\s*[-]?\s*(Tarkibi|Kompozitsiya|Mavjudligi)\s*:.*$", "", normalized)
+    normalized = re.sub(r"(?im)^\s*\d+(?:\.\d+)?\s*bunch(?:lik)?\.?$", "", normalized)
     normalized = re.sub(r"\bUZS\b", "so‘m", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"[^.?!\n]*(so‘ramaymiz|so'ramaymiz|taqiqlanadi)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
     normalized = re.sub(r"[^.?!\n]*(yetkazish/sana/vaqt|sana/vaqt|yetkazish vaqti)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
@@ -989,15 +991,9 @@ def shorten_ai_reply_text(text, max_sentences=4, max_chars=420):
 
 def ai_reply(conversation):
     customer = conversation.customer
-    visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:24])
-    session_messages = []
-    fresh_session = False
-    for index, message in enumerate(visible_messages):
-        if index and session_messages[-1].created_at - message.created_at >= timedelta(hours=24):
-            fresh_session = True
-            break
-        session_messages.append(message)
-    history_messages = list(reversed(session_messages))
+    visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:100])
+    fresh_session = bool(len(visible_messages) > 1 and visible_messages[0].created_at - visible_messages[1].created_at >= timedelta(hours=24))
+    history_messages = list(reversed(visible_messages))
     history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in history_messages]
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
@@ -1031,7 +1027,7 @@ def ai_reply(conversation):
     sales_rules = (
         " Function calling qoidasi: javobni o‘zing yozasan, lekin real ma'lumot kerak bo‘lsa avval function tool chaqir. Salom, rahmat, umumiy savol yoki oddiy aniqlashtirish uchun tool chaqirma."
         " Umumiy 'qanaqa gullar bor', 'qanday gullar bor', 'gullar bormi', 'nimalar bor', 'tayyor gullar bormi' kabi so‘rovlar tayyor katalog so‘rovi hisoblanadi: get_catalog chaqir, search_stock chaqirma."
-        " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha item quantity=1 bo‘lsin."
+        " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha katalog nomi quantity=1 bo‘lsin."
         " Custom yasatish/yig‘dirish konteksti faqat mijoz 'yasatmoqchiman', 'yig‘dirmoqchiman', 'yasab berasizlarmi', 'buket yasatishga', 'savat yasatishga', 'savatga yig‘ib' kabi aniq aytsa boshlanadi. Shundagina search_stock chaqir."
         " Custom yasatishga qanaqa gullar bor deb so‘ralsa search_stock chaqir, lekin stock narxlarini yozma. Faqat gul nomi, rangi va bo‘yini qisqa sanab, qaysi guldan yig‘ib beraylik deb so‘ra."
         " Savat custom kerak bo‘lsa get_baskets chaqir; mijoz savat desa mos savat variantini tanlashni so‘ra yoki gul miqdoriga qarab bitta mos savatni taxminan tavsiya qil. Mijoz buket desa savat variantlarini sanama."
@@ -1059,18 +1055,18 @@ def ai_reply(conversation):
         " 'olmaysizmi?' kabi g‘alati savol yozma. 'Yozib yuborasizmi?' yoki 'Tasdiqlaysizmi?' deb yoz."
         " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
         " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operator/jamoa bog‘lanishini ayt."
-        " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. Katalog nomida ham 'id 25' kabi matn qo‘shma."
+        " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. 'catalog id 24', 'id yuboring', '24 deb yozing' kabi gaplar mutlaqo taqiqlanadi."
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
         " Rasm yuborish faqat send_catalog_image tool orqali qilinadi. Final catalog_items rasm yuborish uchun emas, tanlangan katalogni metadata/lead uchun belgilashga ishlatiladi."
-        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq itemni top, keyin send_catalog_image(catalog_id) toolini chaqir. Final javobda 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rsataymi' dema, faqat 'Rasmini yubordim' deb yoz."
+        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq item nomini top, keyin send_catalog_image(query=katalog nomi) toolini chaqir. Final javobda 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rsataymi' dema, faqat 'Rasmini yubordim' deb yoz."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
         " Agar mijoz faqat salomlashsa, javob aynan shu mazmunda bo‘lsin: 'Assalomu aleykum, EuroFlowers Premium gul do‘koni AI menejeriman. Sizga qanday gul kerak edi?' Katalog, post, story, reel, tayyor variantlar ro‘yxati yoki ichki qoida matnini qo‘shma."
         " Narxlarni vergul bilan emas, probel bilan yoz: 800 000 so‘m."
     )
-    instructions = ai_settings.system_prompt + sales_rules + " Final javobni JSON qaytar: reply, detected_language, customer_name, phone, lead_ready, lead_request, arrangement_type, estimated_price, handoff, catalog_items, stock_items."
+    instructions = ai_settings.system_prompt + sales_rules + " Final javobni JSON qaytar: reply, detected_language, customer_name, phone, lead_ready, lead_request, arrangement_type, estimated_price, handoff, catalog_items, stock_items. catalog_items ichida catalog_name va quantity yoziladi, hech qachon catalog_id yozilmaydi."
     api_key = openai_api_key()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -1147,13 +1143,13 @@ def recent_catalog_item_for_conversation(conversation):
             catalog_id = row.get("catalog_id")
             quantity = int(row.get("quantity") or 0)
             if catalog_id and quantity > 0:
-                item = CatalogItem.objects.filter(id=catalog_id, branch=conversation.branch).first()
+                item = CatalogItem.objects.filter(id=catalog_id).first()
                 if item:
                     return item
         media_key = (message.metadata or {}).get("media_image_key") or ""
         match = re.search(r":catalog:(\d+):", media_key)
         if match:
-            item = CatalogItem.objects.filter(id=match.group(1), branch=conversation.branch).first()
+            item = CatalogItem.objects.filter(id=match.group(1)).first()
             if item:
                 return item
     return None
@@ -1166,7 +1162,7 @@ def compact_match_text(value):
 def catalog_item_from_text(conversation, *values):
     texts = [compact_match_text(value) for value in values if value]
     for text in texts:
-        for item in CatalogItem.objects.filter(branch=conversation.branch):
+        for item in CatalogItem.objects.filter(status="available"):
             name = compact_match_text(item.name_uz)
             if name and name in text:
                 return item
@@ -1201,7 +1197,9 @@ def normalize_lead_catalog_items(result, conversation):
     rows = []
     for row in result.get("catalog_items") or []:
         catalog_id = row.get("catalog_id")
-        item = CatalogItem.objects.filter(id=catalog_id, branch=conversation.branch).first() if catalog_id else None
+        item = CatalogItem.objects.filter(id=catalog_id).first() if catalog_id else None
+        if not item and row.get("catalog_name"):
+            item = catalog_item_from_text(conversation, row.get("catalog_name"))
         if item:
             rows.append({"catalog_id": item.id, "quantity": max(1, int(row.get("quantity") or 1))})
     if rows:
@@ -1219,7 +1217,7 @@ def normalize_lead_catalog_items(result, conversation):
 def fallback_lead_request(result, conversation):
     catalog_rows = []
     for row in result.get("catalog_items") or []:
-        item = CatalogItem.objects.filter(id=row.get("catalog_id"), branch=conversation.branch).first()
+        item = CatalogItem.objects.filter(id=row.get("catalog_id")).first()
         if item:
             catalog_rows.append(f"{item.name_uz} - {int(row.get('quantity') or 1)} dona")
     if catalog_rows:
@@ -1308,7 +1306,7 @@ def create_ai_reply_for_conversation(conversation):
             details=details,
         )
         for row in result.get("catalog_items") or []:
-            catalog_item = CatalogItem.objects.filter(id=row.get("catalog_id"), branch=conversation.branch).first()
+            catalog_item = CatalogItem.objects.filter(id=row.get("catalog_id")).first()
             quantity = int(row.get("quantity") or 1)
             if catalog_item and quantity > 0:
                 LeadCatalogUsage.objects.create(lead=lead, catalog_item=catalog_item, quantity=quantity)
