@@ -1,13 +1,24 @@
 from celery import shared_task
 import threading
 import time
-from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_due_lead_recalls, send_instagram_context_image, send_lead_recall, send_telegram_context_image, should_start_ai_reply, telegram_send, telegram_send_catalog_rich_if_possible, telegram_sender_action
+from .services import SHOP_LOCATION_LINK, instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_due_lead_recalls, send_lead_recall, should_start_ai_reply, telegram_send, telegram_send_catalog_rich_if_possible, telegram_sender_action
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
 
 
 def split_location_reply(text):
+    if SHOP_LOCATION_LINK in text:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        address_index = None
+        for index, line in enumerate(lines):
+            lowered = line.lower()
+            if SHOP_LOCATION_LINK in line or "bobur" in lowered or "lokatsiya" in lowered or "manzil" in lowered:
+                address_index = index
+                break
+        if address_index and address_index > 0:
+            return ["\n".join(lines[:address_index]), "\n".join(lines[address_index:])]
+        return [text]
     if not all(link in text for link in LOCATION_LINKS):
         return [text]
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -58,11 +69,6 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        if not (reply.metadata or {}).get("image_tool_results"):
-            try:
-                send_instagram_context_image(recipient_id, reply.conversation, reply)
-            except Exception as exc:
-                print(f"INSTAGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} recipient={recipient_id} error={exc}", flush=True)
         for text in split_location_reply(reply.text):
             instagram_send(recipient_id, text)
         return reply.id
@@ -94,11 +100,6 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        if not (reply.metadata or {}).get("image_tool_results"):
-            try:
-                send_telegram_context_image(chat_id, reply.conversation, reply)
-            except Exception as exc:
-                print(f"TELEGRAM_CONTEXT_IMAGE_SEND_FAILED conversation={conversation_id} chat={chat_id} error={exc}", flush=True)
         rich_sent = False
         try:
             rich_sent = bool(telegram_send_catalog_rich_if_possible(chat_id, reply.text))

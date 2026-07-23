@@ -13,6 +13,12 @@ from openai import OpenAI
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
 
 
+SHOP_ADDRESS = "Bobur ko‘chasi 10"
+SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTbofDyT"
+SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
+SHOP_WORKING_HOURS = "24/7"
+
+
 def normalize_instagram_permalink(value):
     return (value or "").split("?")[0].rstrip("/")
 
@@ -919,11 +925,25 @@ def is_accidental_message(text):
 def remove_image_offer_after_selection(text):
     if not text:
         return ""
-    image_words = ["rasmni yuboraymi", "rasmini yuboraymi", "rasm yuboraymi", "rasmini ko‘rsataymi", "rasmini ko'rsataymi", "rasmni ko‘rsataymi", "rasmni ko'rsataymi", "rasmni ko‘rsatish", "rasmni ko'rsatish", "rasm ko‘rsatish", "rasm ko'rsatish"]
+    image_words = ["rasmni yuboraymi", "rasmini yuboraymi", "rasm yuboraymi", "rasmni yuboraman", "rasmini yuboraman", "rasm yuboraman", "rasmini ko‘rsataymi", "rasmini ko'rsataymi", "rasmni ko‘rsataymi", "rasmni ko'rsataymi", "rasmini ko‘rmoqchimisiz", "rasmini ko'rmoqchimisiz", "rasmini kormoqchimisiz", "rasmni ko‘rmoqchimisiz", "rasmni ko'rmoqchimisiz", "rasmni kormoqchimisiz", "rasmni ko‘rsatish", "rasmni ko'rsatish", "rasm ko‘rsatish", "rasm ko'rsatish"]
     cleaned = text
     for word in image_words:
         cleaned = re.sub(rf"(^|[.?!]\s+|\n)[^.?!\n]*{re.escape(word)}[^.?!\n]*[.?!]?", lambda match: match.group(1).strip() if match.group(1).strip() else "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"[^.?!\n]*\brasm\w*[^.?!\n]*(telefon|raqam|manzil|yetkaz)[^.?!\n]*[.?!]?", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned or text
+
+
+def clean_image_reply_text(text):
+    if not text:
+        return ""
+    cleaned = re.sub(r"(?i)\bMana,?\s*", "", text).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmni yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasm yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuborildi[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)[^.?!\n]*rasmi yuborildi[^.?!\n]*[.?!]?", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)^Rasmini yubordim[.!\s]*", "", cleaned).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned or text
 
@@ -1021,7 +1041,10 @@ def ai_reply(conversation):
         "has_post_context": bool(conversation.social_post_id),
         "rules": {
             "florist_fee": str(business_settings.default_florist_fee),
-            "working_hours": business_settings.working_hours,
+            "working_hours": SHOP_WORKING_HOURS,
+            "shop_address": SHOP_ADDRESS,
+            "shop_location_link": SHOP_LOCATION_LINK,
+            "shop_orientir": SHOP_ORIENTIR,
         },
     }
     sales_rules = (
@@ -1042,6 +1065,8 @@ def ai_reply(conversation):
         " Custom buket/savat uchun narx aytilsa faqat taxminiy deb ayt. Florist haqi 50 000 so‘mdan boshlanishini va obyomga qarab o‘zgarishini ayt. Aniq narxni operator hisoblab berishini yoz."
         " Custom savat hisobida gullar narxi, mos savat va florist haqini taxminiy qo‘shib ayt; keyin 'Aniq narxni operatorimiz hisoblab beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?' deb so‘ra."
         " Mijoz 'nimaga ism raqam kerak' yoki shunga o‘xshash so‘rasa javob aynan shu mazmunda bo‘lsin: 'Ism va raqamingiz operatorimiz sizga aloqaga chiqib, aniq ma'lumotlarni berishi uchun kerak.'"
+        " Mijoz do‘kon manzili, lokatsiya, qayerdaligi, ish vaqti yoki borib olib ketish haqida so‘rasa mijoz manzilini so‘rama. Do‘kon manzilini yoz: Bobur ko‘chasi 10, lokatsiya linki https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
+        " Mijoz borib olib ketmoqchi bo‘lsa, ism va telefon olingandan keyingi yakuniy javobda buyurtma qabul qilinganini ayt va do‘kon manzilini alohida blokda yoz: Bobur ko‘chasi 10, https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
         " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
         " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."
@@ -1059,7 +1084,7 @@ def ai_reply(conversation):
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
         " Rasm yuborish faqat send_catalog_image tool orqali qilinadi. Final catalog_items rasm yuborish uchun emas, tanlangan katalogni metadata/lead uchun belgilashga ishlatiladi."
-        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq item nomini top, keyin send_catalog_image(query=katalog nomi) toolini chaqir. Final javobda 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rsataymi' dema, faqat 'Rasmini yubordim' deb yoz."
+        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq item nomini top, keyin send_catalog_image(query=katalog nomi) toolini chaqir. Final javobda 'mana rasmi', 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rmoqchimisiz', 'rasmini ko‘rsataymi' dema. Rasm tool orqali yuborilgan bo‘lsa matnda faqat buket nomi va narxini yoz."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
@@ -1117,7 +1142,7 @@ def ai_reply(conversation):
         result["image_tool_results"] = image_tool_results
     result["reply"] = clean_catalog_listing_text(normalize_ai_reply_text(result.get("reply", "")))
     if image_tool_results:
-        result["reply"] = re.sub(r"rasmni yuboraman|rasmini yuboraman|rasm yuboraman", "Rasmini yubordim", result["reply"], flags=re.IGNORECASE)
+        result["reply"] = clean_image_reply_text(result["reply"])
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
     if result.get("catalog_items"):

@@ -227,7 +227,7 @@ class BusinessRulesTests(TestCase):
         typing_mock.assert_not_called()
         reply_mock.assert_not_called()
 
-    def test_delayed_telegram_reply_sends_catalog_image(self):
+    def test_delayed_telegram_reply_does_not_auto_send_catalog_image(self):
         self.item.status = "available"
         self.item.image_url = "https://example.com/oq-buket.jpg"
         self.item.save(update_fields=["status", "image_url", "updated_at"])
@@ -236,10 +236,9 @@ class BusinessRulesTests(TestCase):
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value={"ok": True}) as image_mock:
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
-        image_mock.assert_called_once_with("555", reply_message.conversation, reply_message)
         rich_mock.assert_called_once_with("555", "Mana rasmi")
         text_mock.assert_called_once_with("555", "Mana rasmi")
 
@@ -249,10 +248,9 @@ class BusinessRulesTests(TestCase):
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Rasmini yubordim.", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}], "image_tool_results": [{"image_sent": True, "catalog_id": self.item.id}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None), patch("core.tasks.telegram_send", return_value={"ok": True}), patch("core.tasks.send_telegram_context_image", return_value={"ok": True}) as image_mock:
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None), patch("core.tasks.telegram_send", return_value={"ok": True}):
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
-        image_mock.assert_not_called()
 
     def test_telegram_catalog_rich_message_builds_table(self):
         text = "Ha, tayyor buketlar bor.\n\n1. Pion buketi id 25 - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
@@ -364,7 +362,7 @@ class BusinessRulesTests(TestCase):
         reply_text = "Ha, tayyor buketlar bor.\n1. Pion buketi - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\nQaysi biri yoqdi?"
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text=reply_text, metadata={"catalog_items": []})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value={"ok": True}) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value=None):
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value={"ok": True}) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
         rich_mock.assert_called_once_with("555", reply_text)
@@ -388,6 +386,13 @@ class BusinessRulesTests(TestCase):
         self.assertIn("CTVJzD4O", messages[0])
         self.assertIn("CTVJfPoq", messages[1])
         self.assertIn("Qaysi manzilga", messages[1])
+
+    def test_new_location_reply_splits_after_confirmation(self):
+        text = "Rahmat, buyurtmangiz qabul qilindi.\n\nManzil: Bobur ko‘chasi 10\nhttps://yandex.uz/maps/-/CTbofDyT\nIsh vaqti: 24/7"
+        messages = split_location_reply(text)
+        self.assertEqual(messages[0], "Rahmat, buyurtmangiz qabul qilindi.")
+        self.assertIn("Bobur", messages[1])
+        self.assertIn("24/7", messages[1])
 
     def test_telegram_update_creates_conversation_message_once(self):
         SocialPost.objects.create(branch=self.branch, post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
