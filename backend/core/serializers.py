@@ -1,5 +1,6 @@
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.utils import timezone
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -464,13 +465,24 @@ class ConversationSerializer(serializers.ModelSerializer):
     last_message = serializers.SerializerMethodField()
     source = serializers.SerializerMethodField()
     source_label = serializers.SerializerMethodField()
+    ai_is_active = serializers.SerializerMethodField()
     class Meta:
         model = Conversation
         exclude = ["branch"]
 
+    def to_representation(self, instance):
+        if instance.ai_paused_until and instance.ai_paused_until <= timezone.now():
+            instance.ai_paused_until = None
+            instance.ai_pause_reason = ""
+            instance.save(update_fields=["ai_paused_until", "ai_pause_reason", "updated_at"])
+        return super().to_representation(instance)
+
     def get_last_message(self, obj) -> dict[str, Any] | None:
         message = obj.messages.last()
         return MessageSerializer(message).data if message else None
+
+    def get_ai_is_active(self, obj) -> bool:
+        return obj.status == "ai" and not (obj.ai_paused_until and obj.ai_paused_until > timezone.now())
 
     def get_source(self, obj) -> str:
         external_id = obj.customer.instagram_user_id if obj.customer_id else ""

@@ -1,12 +1,13 @@
 from decimal import Decimal
+from datetime import timedelta
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
-from .serializers import permission_matrix
+from .serializers import ConversationSerializer, permission_matrix
 from .services import create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update
-from .tasks import split_location_reply
+from .tasks import process_delayed_instagram_reply, split_location_reply
 
 
 class BusinessRulesTests(TestCase):
@@ -116,6 +117,26 @@ class BusinessRulesTests(TestCase):
         conversation.refresh_from_db()
         self.assertEqual(mocked.call_count, 1)
         self.assertEqual(conversation.ai_replied_to_message_id, second.id)
+
+    def test_conversation_serializer_exposes_ai_active_and_clears_expired_pause(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-pause")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch, ai_paused_until=timezone.now() - timedelta(minutes=1), ai_pause_reason="operator_message")
+        data = ConversationSerializer(conversation).data
+        conversation.refresh_from_db()
+        self.assertTrue(data["ai_is_active"])
+        self.assertIsNone(data["ai_paused_until"])
+        self.assertEqual(conversation.ai_pause_reason, "")
+
+    def test_delayed_instagram_reply_does_not_show_typing_when_ai_paused(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-paused")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch, ai_paused_until=timezone.now() + timedelta(minutes=15), ai_pause_reason="operator_message")
+        message = conversation.messages.create(sender="customer", text="salom")
+        from unittest.mock import patch
+        with patch("core.tasks.instagram_sender_action") as typing_mock, patch("core.tasks.process_pending_customer_reply") as reply_mock:
+            result = process_delayed_instagram_reply(conversation.id, message.id, "ig-paused")
+        self.assertIsNone(result)
+        typing_mock.assert_not_called()
+        reply_mock.assert_not_called()
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

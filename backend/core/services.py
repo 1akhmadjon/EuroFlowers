@@ -825,6 +825,22 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
     return create_ai_reply_for_conversation(conversation)
 
 
+def should_start_ai_reply(conversation_id, expected_message_id):
+    conversation = Conversation.objects.filter(id=conversation_id).first()
+    if not conversation:
+        return False
+    if conversation.status == "closed":
+        return False
+    if conversation.ai_paused_until and conversation.ai_paused_until > timezone.now():
+        return False
+    latest = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    if not latest or latest.id != expected_message_id:
+        return False
+    if conversation.ai_replied_to_message_id == latest.id:
+        return False
+    return True
+
+
 def process_pending_customer_reply(conversation_id, expected_message_id):
     stale_started_at = timezone.now() - timedelta(seconds=120)
     with transaction.atomic():

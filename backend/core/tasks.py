@@ -1,7 +1,7 @@
 from celery import shared_task
 import threading
 import time
-from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_due_lead_recalls, send_instagram_context_image, send_lead_recall, telegram_send, telegram_sender_action
+from .services import instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_due_lead_recalls, send_instagram_context_image, send_lead_recall, should_start_ai_reply, telegram_send, telegram_sender_action
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
@@ -49,6 +49,8 @@ def process_instagram_webhook(payload):
 
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
 def process_delayed_instagram_reply(conversation_id, expected_message_id, recipient_id):
+    if not should_start_ai_reply(conversation_id, expected_message_id):
+        return None
     stop_typing = threading.Event()
     typing_thread = threading.Thread(target=keep_typing, args=(lambda: instagram_sender_action(recipient_id, "typing_on"), stop_typing, f"INSTAGRAM_TYPING_ON_FAILED recipient={recipient_id}"), daemon=True)
     typing_thread.start()
@@ -82,6 +84,8 @@ def process_telegram_webhook(payload):
 
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
 def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id):
+    if not should_start_ai_reply(conversation_id, expected_message_id):
+        return None
     stop_typing = threading.Event()
     typing_thread = threading.Thread(target=keep_typing, args=(lambda: telegram_sender_action(chat_id, "typing"), stop_typing, f"TELEGRAM_TYPING_FAILED chat={chat_id}"), daemon=True)
     typing_thread.start()
