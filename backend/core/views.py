@@ -25,7 +25,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock
+from .services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, instagram_send, mark_catalog_sold, normalize_phone, process_customer_message, resolve_instagram_event, restore_lead_stock, telegram_send
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -516,7 +516,14 @@ class ConversationViewSet(ScopedViewSet):
         if not text:
             return Response({"detail": "Xabar bo‘sh"}, status=status.HTTP_400_BAD_REQUEST)
         message = conversation.messages.create(sender="operator", text=text)
-        instagram_send(conversation.customer.instagram_user_id, text)
+        external_id = conversation.customer.instagram_user_id
+        if external_id.startswith("telegram:"):
+            telegram_message = conversation.messages.filter(instagram_message_id__startswith="telegram:").order_by("-created_at", "-id").first()
+            parts = telegram_message.instagram_message_id.split(":") if telegram_message else []
+            chat_id = parts[1] if len(parts) >= 3 else external_id.removeprefix("telegram:")
+            telegram_send(chat_id, text)
+        else:
+            instagram_send(external_id, text)
         conversation.last_message_at = timezone.now()
         conversation.ai_paused_until = timezone.now() + timedelta(minutes=15)
         conversation.ai_pause_reason = "operator_message"

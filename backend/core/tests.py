@@ -338,6 +338,17 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["source"], "telegram")
         self.assertEqual(response.json()["source_label"], "Telegram")
 
+    def test_operator_send_uses_telegram_for_telegram_conversation(self):
+        customer = Customer.objects.create(branch=self.branch, name="Telegram", phone="+998901234568", instagram_user_id="telegram:123")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="Salom", instagram_message_id="telegram:555:77")
+        from unittest.mock import patch
+        with patch("core.views.telegram_send", return_value={"ok": True}) as telegram_mock, patch("core.views.instagram_send", return_value={"ok": True}) as instagram_mock:
+            response = self.client.post(f"/api/conversations/{conversation.id}/send/", {"text": "Javob"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        telegram_mock.assert_called_once_with("555", "Javob")
+        instagram_mock.assert_not_called()
+
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
