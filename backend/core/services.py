@@ -736,6 +736,10 @@ def ai_response_schema():
     }
 
 
+def normalize_ai_reply_text(text):
+    return re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
+
+
 def ai_reply(conversation):
     customer = conversation.customer
     visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:24])
@@ -768,7 +772,7 @@ def ai_reply(conversation):
         " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa get_baskets chaqir."
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
-        " Katalog ro‘yxati bosqichida ism, telefon, manzil yoki yetkazish vaqtini so‘rama. Faqat qaysi buket/savat yoqqanini so‘ra."
+        " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
@@ -819,6 +823,7 @@ def ai_reply(conversation):
         result = json.loads(response.output_text)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
+    result["reply"] = normalize_ai_reply_text(result.get("reply", ""))
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
     return result
