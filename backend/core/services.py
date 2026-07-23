@@ -613,12 +613,14 @@ def ai_reply(conversation):
         session_messages.append(message)
     history_messages = list(reversed(session_messages))
     history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in history_messages]
-    has_ai_reply_in_session = any(message.sender == "ai" for message in history_messages)
+    ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
+    has_ai_reply_in_session = ai_replies_count > 0
+    last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
         "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
-        "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session},
+        "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session, "ai_replies_count": ai_replies_count, "last_customer_message": last_customer_message},
         "recent_orders": recent_customer_orders(customer),
         "stock": [{
             "batch_id": row.id,
@@ -685,6 +687,8 @@ def ai_reply(conversation):
         " Mijoz 'yasab berasizmi', 'yasabam beraslami', 'yasab beraslami', 'yasatmoqchiman', 'yasatmoxchiman', 'o‘zim yasatmoqchiman', 'ozim yasatmoxchiman', 'yig‘diraman', 'yigdirmoqchiman' desa bu custom buket/savat yig‘dirish niyati. Buni gulning o‘zini dona/pochka holida sotib olish deb tushunma. Bunday holatda katalogdagi tayyor buketlarni taklif qilma; 'Ha, albatta, xohishingizga qarab buket yoki savat qilib yasab beramiz' mazmunida javob berib, qaysi guldan, qanday rangda va buketmi yoki savatmi ekanini bitta savol bilan aniqlashtir."
         " Mijoz 'tayyor buket kerakmas', 'tayyor kerak emas', 'o‘zim yasatmoqchiman', 'ozim yasatmoxchiman' desa katalog ro‘yxatini qayta yuborma. Faqat custom yig‘ish oqimida davom et."
         " Mijoz 'skladda qanaqa gul bor', 'qanaqa gulla bor sklada', 'gul turlari bormi' desa bu custom yig‘ish uchun mavjud gul turlarini so‘rayapti. Katalogdagi tayyor buketlarni emas, stock kontekstdagi gul turlarini qisqa ro‘yxat qilib ber va qaysi guldan buket yoki savat kerakligini so‘ra."
+        " Mijoz 'tayyor buketlayam sotaslami yoki savatga yasalgan tayyor gulla', 'tayyor buket bormi', 'tayyor savat bormi', 'tayyor gulla bormi' desa bu ha/yo‘q savol emas, katalog so‘rovi. Javob: 'Ha, tayyor buket va savatdagi kompozitsiyalarimiz bor' mazmunida boshlansin va catalog kontekstdagi mavjud variantlarni nomi, turi, narxi bilan ro‘yxat qil. Bunday savolga 'Sizga buketmi yoki savatmi kerak?' deb qayta savol berma."
+        " Mijoz 'ha' deb javob bersa, oldingi AI savolini historydan tushun. Agar oldingi savol katalog variantlari haqida bo‘lsa, variantlarni ko‘rsat yoki tanlashni so‘ra; hech qachon aynan bir xil savolni takrorlama."
         " Agar mijoz story/post/reelni sent qilib yoki reply qilib 'shu', 'shundan kerak', 'narxi qancha' desa, 'Sizga qanday gul yoki buket kerak edi?' demagin. 'Bugungi tayyor variantlardan' deb boshlama. Story bo‘lsa 'Siz yozgan storydagi gul:', post bo‘lsa 'Siz yuborgan postdagi gul:', reel bo‘lsa 'Siz yuborgan reeldagi gul:' deb yoz."
         " Agar mijoz yuborgan story/post/reel linki tizim izohida bazadan topilmadi deb kelsa yoki conversation.post bo‘sh bo‘lsa, oldingi post/reel/story yoki boshqa katalog gulini ishlatma. Javob ber: 'Bu yuborgan media bo‘yicha tizimda aniq ma'lumot topilmadi. Iltimos, qaysi gul ekanini yozib yuboring yoki ism-raqamingizni qoldiring, operatorimiz aniqlashtirib bog‘lanadi.'"
         " Agar conversation contextida post mavjud bo‘lsa va mijoz 'bo‘yi nechchi', 'narxi qancha', 'bormi', 'qoldimi', 'shu gul', 'shu buket' kabi noaniq savol bersa, albatta o‘sha post/story/reeldagi katalog gulini nazarda tutyapti deb qabul qil. Bunday holatda 'Qaysi gulni nazarda tutyapsiz?' deb so‘rama."
@@ -692,6 +696,7 @@ def ai_reply(conversation):
         " Javobda arrangement_type enum qiymatlarini inglizcha yozma: 'bouquet' emas 'buket', 'basket' emas 'savat', 'stems' emas 'gulning o‘zi' deb yoz. Lekin mijozga 'gulning o‘zi sotiladi' degan ma'noda yozma, chunki gulning o‘zi dona/pochka holida odatda sotilmaydi."
         " 'Qabul qilamizmi?', 'davom ettiraymi?' kabi g‘alati yoki noaniq savollar yozma. Tayyor buket/savatni taklif qilganda oxirida tabiiy savol ber: 'Shu buketdan buyurtma qilmoqchimisiz?' yoki 'Shu savatdan nechta kerak bo‘ladi?'"
         " 'Operator bilan muqobil yechim qilamizmi?', 'muqobil yechim qilamizmi?', 'operator bilan hal qilamizmi?' kabi g‘alati iboralarni yozma. Operator kerak bo‘lsa tabiiy yoz: 'Ismingiz va telefon raqamingizni qoldirsangiz, operatorimiz aniq ma'lumot berib aloqaga chiqadi.'"
+        " 'Sizga buketmi yoki savatdagi tayyor kompozitsiyami kerak?', 'Ajoyib! Sizga buketmi yoki savatdagi tayyor kompozitsiya kerakligini aniqlasak?', 'Ajoyib, buketga qaror qilganingiz uchun rahmat', 'Aniq narxni operator tasdiqlaydi' iboralarini yozma."
         " Story/post/reel/katalogdagi tayyor gul haqida javob berganda katalog item ichidagi nechta dona gul ketganini yoki post flower_countni mijoz so‘ramasa yozma. Faqat nomi, buket/savat turi, narxi va katalogda nechta borligini ayt."
         " Agar mijoz tayyor katalog buketiga nechta gul ketganini so‘rasa, catalog composition ma'lumotidan javob ber. Composition mavjud bo‘lsa 'katalogda ko‘rsatilmagan' demagin."
         " Mijoz arzonlashtirish, skidka, chegirma, savdolashish yoki narxni tushirishni so‘rasa, chegirma va'da qilma va foiz aytma. Javob mazmuni shunday bo‘lsin: 'Hurmatli mijoz, bizning narxlarimiz shahardagi ko‘p gul do‘konlarga nisbatan ancha qulay. Chegirma yoki yakuniy narx masalasini operatorimiz bilan gaplashib ko‘rsangiz bo‘ladi 😊' Keyin ism va telefon raqamini so‘rab, lead_ready uchun kerakli ma'lumotlarni yig‘."
@@ -705,13 +710,14 @@ def ai_reply(conversation):
         " CRM lead yaratishda arrangement_type aniq bo‘lsin: buket bo‘lsa bouquet, savat bo‘lsa basket, gulning o‘zi/donalab bo‘lsa stems, tayyor katalog guli bo‘lsa catalog. Tur aniq bo‘lmasa lead yaratma."
         " Mijoz buket yoki savat tanlasa, javobda florist xizmatini alohida ayt: 'Florist xizmati 50 000 so‘mdan boshlanadi, gul hajmi va bezagiga qarab o‘zgaradi.'"
         " Story, reel, post yoki katalogdagi tayyor buket/kompozitsiya haqida so‘ralsa florist xizmatini alohida aytma va narxga qo‘shma, chunki ular tayyor yasalgan sotuvdagi gullar."
+        " Tayyor katalog/post/story/reel narxida 'operator narxni tasdiqlaydi', 'aniq narxni operator tasdiqlaydi' dema. Bu narxlar aniq ko‘rsatiladi. Operator faqat buyurtma tafsilotlari, vaqt, yetkazish va mavjudlikni yakuniy kelishadi."
         " Lead yaratish uchun JSON estimated_price qiymatida florist xizmatini alohida qo‘shib yuborma; tizim operator sotildi qilganda florist_fee maydonida yuritadi."
     )
     final_rules = (
-        " ENG MUHIM SO‘NGGI QOIDALAR: Agar input history ichida assistant/ai xabari bor bo‘lsa, javobni salomlashuv bilan boshlash mutlaqo taqiqlanadi. "
+        " ENG MUHIM SO‘NGGI QOIDALAR: Agar conversation.ai_replies_count > 0 bo‘lsa yoki input history ichida assistant/ai xabari bor bo‘lsa, javobni salomlashuv bilan boshlash mutlaqo taqiqlanadi. "
         "Bunday holatda birinchi so‘z 'Ha', 'Albatta', 'Tushunarli', 'Mayli' yoki bevosita javob bo‘lishi mumkin, lekin 'Assalomu', 'Salom', 'Va alaykum' bo‘lmasin. "
         "Mijoz yasab berish/yasatish haqida so‘rasa, bu custom buket yoki savat xizmati; tayyor katalog taklif qilma va gulning o‘zi sotilmaydi qoidasi bilan adashtirma. "
-        "Mijoz tayyor buket kerakmas desa katalogni takrorlama."
+        "Mijoz tayyor buket kerakmas desa katalogni takrorlama. Tayyor katalog narxida operator narxni tasdiqlaydi demagin."
     )
     instructions = ai_settings.system_prompt + sales_rules + final_rules + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean, catalog_items array, stock_items array."
     api_key = openai_api_key()
