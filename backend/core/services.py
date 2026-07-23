@@ -795,16 +795,31 @@ def remove_premature_catalog_contact_request(text):
     return cleaned
 
 
-def shorten_ai_reply_text(text, max_sentences=4):
+def shorten_ai_reply_text(text, max_sentences=4, max_chars=420):
     if not text:
         return ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) > 6:
         lines = lines[:6]
     shortened = "\n".join(lines)
+    has_list = any(line.startswith(("1)", "1.", "•")) for line in lines)
     sentences = re.split(r"(?<=[.?!])\s+", shortened)
-    if len(sentences) > max_sentences and not any(line.startswith(("1)", "1.", "•")) for line in lines):
+    if len(sentences) > max_sentences and not has_list:
         shortened = " ".join(sentences[:max_sentences]).strip()
+    if not has_list and len(shortened) > max_chars:
+        kept = []
+        total = 0
+        for sentence in sentences:
+            next_total = total + len(sentence) + (1 if kept else 0)
+            if next_total > max_chars:
+                break
+            kept.append(sentence)
+            total = next_total
+        if kept:
+            shortened = " ".join(kept).strip()
+        else:
+            cut = shortened[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:-")
+            shortened = cut + "."
     return shortened
 
 
@@ -842,6 +857,9 @@ def ai_reply(conversation):
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
+        " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
+        " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."
+        " Mijoz aniq gul, miqdor, telefon va manzilni yuborgan bo‘lsa, keyingi savol faqat ism bo‘lsin. Mijoz ismini yozsa lead_ready=true qaytar."
         " 'Flarisla', 'floristla', 'floristlar', 'florisla' kabi yozuvlar florist xizmatini bildiradi, gul nomi emas. Bunday savolga 'Ha, floristlarimiz chiroyli qilib yig‘ib beradi' deb qisqa javob ber."
         " Ichki cheklovlarni mijozga yozma: 'so‘ramaymiz', 'taqiqlanadi', 'hozir so‘ramaymiz' kabi iboralarni ishlatma."
         " Mijoz manzil va telefonni yozgan, lekin ismi yo‘q bo‘lsa, faqat ismini so‘ra. Telefonni qayta so‘rama."
