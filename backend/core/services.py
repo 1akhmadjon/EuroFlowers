@@ -617,7 +617,7 @@ def ai_reply(conversation):
     customer = conversation.customer
     branch = conversation.branch
     stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")[:120]
-    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")[:24]
+    catalog = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")[:24]
     baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0).order_by("sale_price")[:20]
     visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:24])
     session_messages = []
