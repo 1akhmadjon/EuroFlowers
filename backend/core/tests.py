@@ -187,6 +187,18 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("Tarkibi", rich["html"])
         self.assertNotIn("101 dona", rich["html"])
 
+    def test_telegram_catalog_rich_message_drops_inline_composition(self):
+        text = "Hozirgi katalogdagi tayyor variantlarimiz:\n1) Pion buketi - 800 000 so‘m Pion Sarah Bernhardt, 50 ta\n2) Pushti atirgul buketi - 500 000 so‘m Atirgul Hermosa Pushti, 101 ta\n3) Qizil atirgul buketi - 400 000 so‘m Atirgul Red Naomi Qizil, 60 ta\nQaysi birini xohlaysiz?"
+        rich = telegram_catalog_rich_message(text)
+        self.assertIsNotNone(rich)
+        self.assertIn("<td>Pion buketi</td>", rich["html"])
+        self.assertIn("<td>Pushti atirgul buketi</td>", rich["html"])
+        self.assertIn("<td>Qizil atirgul buketi</td>", rich["html"])
+        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
+        self.assertNotIn("Pion Sarah", rich["html"])
+        self.assertNotIn("Atirgul Hermosa", rich["html"])
+        self.assertNotIn("50 ta", rich["html"])
+
     def test_ai_reply_handles_accidental_message_without_openai(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-accidental")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)

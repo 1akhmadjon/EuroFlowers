@@ -545,16 +545,31 @@ def telegram_sender_action(chat_id, action="typing"):
     return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
-def telegram_catalog_rows_from_text(text):
-    rows = []
+def clean_catalog_item_name(value):
+    return re.sub(r"\s+\bid\s*\d+\b", "", (value or "").strip(), flags=re.IGNORECASE).strip()
+
+
+def clean_catalog_listing_text(text):
     cleaned = re.sub(r"(?im)^[^\S\n]*[-]?[^\S\n]*Tarkibi\s*:.*?(?=(?:\d+[).]\s*)|\n|$)", "", text or "")
     cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
+    lines = []
     for line in cleaned.splitlines():
-        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\([^)]*\))?\s*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^(?P<prefix>\s*(?:\d+[).])\s*)(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))(?:\b|$).*$", line, flags=re.IGNORECASE)
+        if match:
+            line = f"{match.group('prefix')}{clean_catalog_item_name(match.group('name'))} - {match.group('price').strip()}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def telegram_catalog_rows_from_text(text):
+    rows = []
+    cleaned = clean_catalog_listing_text(text)
+    for line in cleaned.splitlines():
+        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*$", line, flags=re.IGNORECASE)
         if not match:
             continue
         rows.append({
-            "name": re.sub(r"\s+\bid\s*\d+\b", "", match.group("name").strip(), flags=re.IGNORECASE).strip(),
+            "name": clean_catalog_item_name(match.group("name")),
             "price": normalize_ai_reply_text(match.group("price").strip()),
         })
     return rows
@@ -564,8 +579,7 @@ def telegram_catalog_rich_message(text):
     rows = telegram_catalog_rows_from_text(text)
     if len(rows) < 2:
         return None
-    cleaned = re.sub(r"(?im)^[^\S\n]*[-]?[^\S\n]*Tarkibi\s*:.*?(?=(?:\d+[).]\s*)|\n|$)", "", text or "")
-    cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
+    cleaned = clean_catalog_listing_text(text)
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:\d+[).])\s*", line)), 0)
     intro = " ".join(lines[:first_row_index]).strip()
@@ -988,7 +1002,7 @@ def ai_reply(conversation):
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxatida hech qachon qoldiq soni, nechta borligi yoki 'mavjud: 3 dona' kabi matn yozma. Faqat nomi va narxini yoz."
-        " Katalog gulining tarkibi, qaysi guldan qancha ketgani yoki composition ma'lumotini faqat mijoz aniq so‘rasa ayt."
+        " Katalog ro‘yxatida tarkib, gul navi, rang, qaysi guldan qancha ketgani yoki '50 ta' kabi sonlarni yozma. Bularni faqat mijoz aniq 'tarkibi nima' yoki 'qaysi guldan qancha ketgan' deb so‘rasa ayt."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
@@ -1058,7 +1072,7 @@ def ai_reply(conversation):
         result = json.loads(response.output_text)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
-    result["reply"] = normalize_ai_reply_text(result.get("reply", ""))
+    result["reply"] = clean_catalog_listing_text(normalize_ai_reply_text(result.get("reply", "")))
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
     if result.get("catalog_items"):
