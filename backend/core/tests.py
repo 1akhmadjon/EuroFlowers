@@ -166,18 +166,28 @@ class BusinessRulesTests(TestCase):
         text_mock.assert_called_once_with("555", "Mana rasmi")
 
     def test_telegram_catalog_rich_message_builds_table(self):
-        text = "Ha, tayyor buketlar bor.\n\n1) Pion buketi — 800 000 so‘m (10 dona mavjud)\n2) Pushti atirgul buketi — 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
+        text = "Ha, tayyor buketlar bor.\n\n1. Pion buketi - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
         rich = telegram_catalog_rich_message(text)
         self.assertIsNotNone(rich)
         self.assertIn("<table bordered striped>", rich["html"])
         self.assertIn("<td>Pion buketi</td>", rich["html"])
         self.assertIn("<td>800 000 so‘m</td>", rich["html"])
 
+    def test_ai_reply_handles_accidental_message_without_openai(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-accidental")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="uzur adashib yozvoribman")
+        from unittest.mock import patch
+        with patch("core.services.OpenAI") as openai_mock:
+            reply = create_ai_reply_for_conversation(conversation)
+        openai_mock.assert_not_called()
+        self.assertEqual(reply.text, "Hechqisi yo‘q. Sizga qanday yordam bera olaman?")
+
     def test_delayed_telegram_reply_prefers_rich_catalog_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:rich", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         customer_message = conversation.messages.create(sender="customer", text="tayyor buketlar")
-        reply_text = "Ha, tayyor buketlar bor.\n1) Pion buketi — 800 000 so‘m (10 dona mavjud)\n2) Pushti atirgul buketi — 500 000 so‘m (3 dona mavjud)\nQaysi biri yoqdi?"
+        reply_text = "Ha, tayyor buketlar bor.\n1. Pion buketi - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\nQaysi biri yoqdi?"
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text=reply_text, metadata={"catalog_items": []})
         from unittest.mock import patch
         with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value={"ok": True}) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.send_telegram_context_image", return_value=None):

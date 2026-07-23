@@ -548,7 +548,7 @@ def telegram_sender_action(chat_id, action="typing"):
 def telegram_catalog_rows_from_text(text):
     rows = []
     for line in (text or "").splitlines():
-        match = re.match(r"^\s*(?:\d+[).]|•)\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\((?P<qty>[^)]*)\))?\s*$", line, flags=re.IGNORECASE)
+        match = re.match(r"^\s*(?:\d+[).])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>[\d\s]+(?:so[‘'ʻ`]m|som|сум))\s*(?:\((?P<qty>[^)]*)\))?\s*$", line, flags=re.IGNORECASE)
         if not match:
             continue
         quantity = match.group("qty") or ""
@@ -565,7 +565,7 @@ def telegram_catalog_rich_message(text):
     if len(rows) < 2:
         return None
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:\d+[).]|•)\s*", line)), 0)
+    first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:\d+[).])\s*", line)), 0)
     last_row_index = first_row_index + len(rows) - 1
     intro = " ".join(lines[:first_row_index]).strip()
     outro = " ".join(lines[last_row_index + 1:]).strip()
@@ -786,6 +786,9 @@ def ai_response_schema():
 
 def normalize_ai_reply_text(text):
     normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
+    normalized = normalized.replace("—", "-").replace("–", "-")
+    normalized = re.sub(r"(?m)^\s*•\s*", "", normalized)
+    normalized = re.sub(r"\(([^()]{1,80})\)", r"\1", normalized)
     normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s*\(?\bcatalog[_ ]?id\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\bUZS\b", "so‘m", normalized, flags=re.IGNORECASE)
@@ -803,6 +806,12 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
+
+
+def is_accidental_message(text):
+    lowered = (text or "").lower()
+    patterns = ["uzur adash", "uzr adash", "adashib yoz", "xato yoz", "notogri yoz", "noto‘g‘ri yoz", "e'tibor bermang", "etibor bermang"]
+    return any(pattern in lowered for pattern in patterns)
 
 
 def remove_image_offer_after_selection(text):
@@ -893,6 +902,21 @@ def ai_reply(conversation):
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
+    if is_accidental_message(last_customer_message):
+        reply_text = "Hechqisi yo‘q. Davom etamizmi?" if has_ai_reply_in_session else "Hechqisi yo‘q. Sizga qanday yordam bera olaman?"
+        return {
+            "reply": reply_text,
+            "detected_language": customer.language or "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+        }
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
@@ -926,6 +950,8 @@ def ai_reply(conversation):
         " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
         " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operator/jamoa bog‘lanishini ayt."
         " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma."
+        " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
+        " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
         " Agar final catalog_items ichida item yuborsang, backend rasmni o‘zi yuboradi. Bunday javobda 'rasmni yuboraymi', 'rasmini ko‘rsataymi' yoki shunga o‘xshash savol yozma."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
