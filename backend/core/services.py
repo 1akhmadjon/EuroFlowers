@@ -738,7 +738,20 @@ def ai_response_schema():
 
 def normalize_ai_reply_text(text):
     normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
+    normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s*\(?\bcatalog[_ ]?id\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
+
+
+def remove_image_offer_after_selection(text):
+    if not text:
+        return ""
+    image_words = ["rasmni yuboraymi", "rasmini yuboraymi", "rasm yuboraymi", "rasmini ko‘rsataymi", "rasmini ko'rsataymi", "rasmni ko‘rsataymi", "rasmni ko'rsataymi"]
+    cleaned = text
+    for word in image_words:
+        cleaned = re.sub(rf"(^|[.?!]\s+|\n)[^.?!\n]*{re.escape(word)}[^.?!\n]*[.?!]?", lambda match: match.group(1).strip() if match.group(1).strip() else "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned or text
 
 
 def remove_premature_catalog_contact_request(text):
@@ -804,6 +817,8 @@ def ai_reply(conversation):
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
+        " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma."
+        " Agar final catalog_items ichida item yuborsang, backend rasmni o‘zi yuboradi. Bunday javobda 'rasmni yuboraymi', 'rasmini ko‘rsataymi' yoki shunga o‘xshash savol yozma."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
@@ -857,6 +872,8 @@ def ai_reply(conversation):
     result["reply"] = normalize_ai_reply_text(result.get("reply", ""))
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []
+    if result.get("catalog_items"):
+        result["reply"] = remove_image_offer_after_selection(result["reply"])
     if not result.get("catalog_items"):
         result["reply"] = remove_premature_catalog_contact_request(result["reply"])
     return result
