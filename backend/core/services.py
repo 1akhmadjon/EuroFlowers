@@ -808,9 +808,9 @@ def mini_app_custom_quote_ai(request_text, arrangement_type):
 def ai_tool_definitions():
     empty_parameters = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     return [
-        {"type": "function", "name": "get_catalog", "description": "Bugungi tayyor katalogdagi barcha available buket/savat/kompozitsiyalarni olish. Faqat mijoz katalog/tayyor variantlar so‘raganda yoki aniq katalog gulini tanlaganda chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Ixtiyoriy qidiruv matni, masalan pion yoki qizil atirgul"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
-        {"type": "function", "name": "search_stock", "description": "Skladdagi gullarni qidirish. Faqat mijoz custom buket/savat yasatmoqchi bo‘lsa yoki qaysi gul borligini so‘rasa chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Gul/rang/tur qidiruvi, bo‘sh string barcha asosiy gullar uchun"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
-        {"type": "function", "name": "get_baskets", "description": "Savatga custom kompozitsiya yasatishda mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
+        {"type": "function", "name": "get_catalog", "description": "Bugungi tayyor katalogdagi available buket/savat/kompozitsiyalarni olish. Umumiy 'qanaqa gullar bor', 'tayyor gullar bormi', 'katalog' so‘rovlarida doim shu tool chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Ixtiyoriy qidiruv matni, masalan pion yoki qizil atirgul"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
+        {"type": "function", "name": "search_stock", "description": "Skladdagi gullarni qidirish. Faqat mijoz custom buket/savat yasatmoqchi/yig‘dirmoqchi ekanini aniq aytsa yoki 'yasatishga qanaqa gullar bor' deb so‘rasa chaqiriladi. Umumiy 'qanaqa gullar bor' so‘rovida chaqirilmaydi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Gul/rang/tur qidiruvi, bo‘sh string custom yasatish uchun asosiy gullar"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
+        {"type": "function", "name": "get_baskets", "description": "Faqat mijoz custom savat yasatmoqchi/yig‘dirmoqchi bo‘lsa mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_recent_orders", "description": "Mijoz oldingi buyurtmalarini so‘raganda olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_post_context", "description": "Conversation story/post/reel bilan bog‘langan bo‘lsa, o‘sha media ma’lumotini olish.", "parameters": empty_parameters, "strict": True},
     ]
@@ -1004,8 +1004,11 @@ def ai_reply(conversation):
     }
     sales_rules = (
         " Function calling qoidasi: javobni o‘zing yozasan, lekin real ma'lumot kerak bo‘lsa avval function tool chaqir. Salom, rahmat, umumiy savol yoki oddiy aniqlashtirish uchun tool chaqirma."
+        " Umumiy 'qanaqa gullar bor', 'qanday gullar bor', 'gullar bormi', 'nimalar bor', 'tayyor gullar bormi' kabi so‘rovlar tayyor katalog so‘rovi hisoblanadi: get_catalog chaqir, search_stock chaqirma."
         " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha item quantity=1 bo‘lsin."
-        " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa faqat mijoz savat desa get_baskets chaqir; mijoz buket desa savat variantlarini sanama."
+        " Custom yasatish/yig‘dirish konteksti faqat mijoz 'yasatmoqchiman', 'yig‘dirmoqchiman', 'yasab berasizlarmi', 'buket yasatishga', 'savat yasatishga', 'savatga yig‘ib' kabi aniq aytsa boshlanadi. Shundagina search_stock chaqir."
+        " Custom yasatishga qanaqa gullar bor deb so‘ralsa search_stock chaqir, lekin stock narxlarini yozma. Faqat gul nomi, rangi va bo‘yini qisqa sanab, qaysi guldan yig‘ib beraylik deb so‘ra."
+        " Savat custom kerak bo‘lsa get_baskets chaqir; mijoz savat desa mos savat variantini tanlashni so‘ra yoki gul miqdoriga qarab bitta mos savatni taxminan tavsiya qil. Mijoz buket desa savat variantlarini sanama."
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxatida hech qachon qoldiq soni, nechta borligi yoki 'mavjud: 3 dona' kabi matn yozma. Faqat nomi va narxini yoz."
@@ -1013,6 +1016,9 @@ def ai_reply(conversation):
         " Katalog ro‘yxatida har bir qatorda narx yonida albatta 'so‘m' yoz: '1. Pion buketi - 800 000 so‘m'. 'Narxlar so‘mda' deb tepada umumiy yozib, qatorda so‘mni tashlab ketma."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.' 'Yoki boshqa variant/miqdor kerakmi' deb so‘rama."
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
+        " Custom buket/savat uchun narx aytilsa faqat taxminiy deb ayt. Florist haqi 50 000 so‘mdan boshlanishini va obyomga qarab o‘zgarishini ayt. Aniq narxni operator hisoblab berishini yoz."
+        " Custom savat hisobida gullar narxi, mos savat va florist haqini taxminiy qo‘shib ayt; keyin 'Aniq narxni operatorimiz hisoblab beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?' deb so‘ra."
+        " Mijoz 'nimaga ism raqam kerak' yoki shunga o‘xshash so‘rasa javob aynan shu mazmunda bo‘lsin: 'Ism va raqamingiz operatorimiz sizga aloqaga chiqib, aniq ma'lumotlarni berishi uchun kerak.'"
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
         " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
         " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."

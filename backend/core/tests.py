@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import catalog_image_for_conversation, create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_tool_definitions, catalog_image_for_conversation, create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -218,6 +218,12 @@ class BusinessRulesTests(TestCase):
             reply = create_ai_reply_for_conversation(conversation)
         openai_mock.assert_not_called()
         self.assertEqual(reply.text, "Hechqisi yo‘q. Sizga qanday yordam bera olaman?")
+
+    def test_ai_tool_contract_routes_general_flowers_to_catalog(self):
+        tools = {tool["name"]: tool["description"] for tool in ai_tool_definitions()}
+        self.assertIn("qanaqa gullar bor", tools["get_catalog"])
+        self.assertIn("Umumiy 'qanaqa gullar bor' so‘rovida chaqirilmaydi", tools["search_stock"])
+        self.assertIn("custom savat yasatmoqchi", tools["get_baskets"])
 
     def test_delayed_telegram_reply_prefers_rich_catalog_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:rich", name="Ahmad", phone="+998901234567")
