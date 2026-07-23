@@ -760,8 +760,11 @@ def remove_premature_catalog_contact_request(text):
     if not text:
         return ""
     lowered = text.lower()
-    if "katalog" not in lowered and "tayyor" not in lowered:
-        return text
+    catalog_markers = ["katalog", "tayyor buket", "tayyor savat", "tayyor gullar", "tayyor variant", "mavjud variant"]
+    if not any(marker in lowered for marker in catalog_markers):
+        cleaned = re.sub(r"\n*\s*Qaysi biri yoqdi, rasmini ko‘rsataman\??", "", text, flags=re.IGNORECASE).rstrip()
+        cleaned = re.sub(r"(Tasdiqlaganingizdan keyin|Tasdiqlasangiz keyin)\s*$", "", cleaned, flags=re.IGNORECASE).rstrip()
+        return cleaned
     markers = ["telefon", "raqam", "manzil", "yetkaz"]
     cleaned = text
     for separator in [" Yoki ", "\nYoki ", " yoki ", "\nyoki "]:
@@ -784,6 +787,19 @@ def remove_premature_catalog_contact_request(text):
     if cleaned != text and (not cleaned_lines or "?" not in cleaned_lines[-1]):
         cleaned = cleaned.rstrip() + "\n\nQaysi biri yoqdi, rasmini ko‘rsataman?"
     return cleaned
+
+
+def shorten_ai_reply_text(text, max_sentences=4):
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 6:
+        lines = lines[:6]
+    shortened = "\n".join(lines)
+    sentences = re.split(r"(?<=[.?!])\s+", shortened)
+    if len(sentences) > max_sentences and not any(line.startswith(("1)", "1.", "•")) for line in lines):
+        shortened = " ".join(sentences[:max_sentences]).strip()
+    return shortened
 
 
 def ai_reply(conversation):
@@ -815,10 +831,13 @@ def ai_reply(conversation):
     sales_rules = (
         " Function calling qoidasi: javobni o‘zing yozasan, lekin real ma'lumot kerak bo‘lsa avval function tool chaqir. Salom, rahmat, umumiy savol yoki oddiy aniqlashtirish uchun tool chaqirma."
         " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha item quantity=1 bo‘lsin."
-        " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa get_baskets chaqir."
+        " Custom yasatish, sklad gullari yoki gul turlari so‘ralsa search_stock chaqir. Savat custom kerak bo‘lsa faqat mijoz savat desa get_baskets chaqir; mijoz buket desa savat variantlarini sanama."
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri yoqdi, rasmini ko‘rsataman?'"
+        " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
+        " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
+        " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operator/jamoa bog‘lanishini ayt."
         " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma."
         " Agar final catalog_items ichida item yuborsang, backend rasmni o‘zi yuboradi. Bunday javobda 'rasmni yuboraymi', 'rasmini ko‘rsataymi' yoki shunga o‘xshash savol yozma."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
@@ -878,6 +897,7 @@ def ai_reply(conversation):
         result["reply"] = remove_image_offer_after_selection(result["reply"])
     if not result.get("catalog_items"):
         result["reply"] = remove_premature_catalog_contact_request(result["reply"])
+    result["reply"] = shorten_ai_reply_text(result["reply"])
     return result
 
 
