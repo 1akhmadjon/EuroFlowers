@@ -573,7 +573,7 @@ def catalog_composition_summary(item):
 
 def recent_customer_orders(customer):
     orders = []
-    for lead in customer.leads.select_related("social_post").prefetch_related("catalog_usage__catalog_item", "stock_usage__stock_batch__variant__flower", "packaging_usage__packaging").order_by("-created_at")[:5]:
+    for lead in customer.leads.select_related("social_post").prefetch_related("catalog_usage__catalog_item", "stock_usage__stock_batch__variant__flower", "packaging_usage__packaging").order_by("-created_at")[:3]:
         catalog_items = [{"name_uz": row.catalog_item.name_uz, "quantity": row.quantity, "type": row.catalog_item.arrangement_type, "price": str(row.catalog_item.price)} for row in lead.catalog_usage.all()]
         stock_items = [{
             "flower_uz": row.stock_batch.variant.flower.name_uz,
@@ -600,10 +600,10 @@ def recent_customer_orders(customer):
 def ai_reply(conversation):
     customer = conversation.customer
     branch = conversation.branch
-    stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower")
-    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower")[:30]
-    baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0)
-    visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:60])
+    stock = StockBatch.objects.filter(branch=branch, is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")[:120]
+    catalog = CatalogItem.objects.filter(branch=branch, status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")[:24]
+    baskets = Packaging.objects.filter(branch=branch, packaging_type="basket", is_active=True, quantity__gt=0).order_by("sale_price")[:20]
+    visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:24])
     session_messages = []
     fresh_session = False
     for index, message in enumerate(visible_messages):
@@ -704,13 +704,15 @@ def ai_reply(conversation):
     instructions = ai_settings.system_prompt + sales_rules + " Javobni JSON qaytaring: reply matni, detected_language uz yoki ru, customer_name, phone, lead_ready boolean, lead_request, arrangement_type bouquet/basket/stems/catalog yoki bo‘sh, estimated_price raqam yoki null, handoff boolean, catalog_items array, stock_items array."
     api_key = openai_api_key()
     if not api_key:
-        return {"reply": "Hozir operatorimiz sizga yordam beradi. Ismingiz va telefon raqamingizni qoldiring, iltimos.", "detected_language": customer.language, "lead_ready": False, "handoff": True}
+        raise RuntimeError("OPENAI_API_KEY is not configured")
     client = OpenAI(api_key=api_key)
-    response = client.responses.create(
-        model=ai_settings.openai_model or settings.OPENAI_MODEL,
-        instructions=instructions + "\nKONTEKST:\n" + json.dumps(context, ensure_ascii=False),
-        input=history,
-        text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": {
+    response_kwargs = {
+        "model": ai_settings.openai_model or settings.OPENAI_MODEL,
+        "instructions": instructions + "\nKONTEKST:\n" + json.dumps(context, ensure_ascii=False),
+        "input": history,
+        "max_output_tokens": 2000,
+        "reasoning": {"effort": "minimal"},
+        "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": {
             "type": "object",
             "properties": {
                 "reply": {"type": "string"},
@@ -728,8 +730,15 @@ def ai_reply(conversation):
             "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items", "stock_items"],
             "additionalProperties": False
         }}},
-    )
-    result = json.loads(response.output_text)
+    }
+    response = client.responses.create(**response_kwargs)
+    try:
+        result = json.loads(response.output_text)
+    except json.JSONDecodeError:
+        print(f"OPENAI_JSON_DECODE_FAILED conversation={conversation.id} output={response.output_text!r}", flush=True)
+        response_kwargs["max_output_tokens"] = 4000
+        response = client.responses.create(**response_kwargs)
+        result = json.loads(response.output_text)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
     return result
@@ -844,7 +853,7 @@ def should_start_ai_reply(conversation_id, expected_message_id):
 def process_pending_customer_reply(conversation_id, expected_message_id):
     stale_started_at = timezone.now() - timedelta(seconds=120)
     with transaction.atomic():
-        conversation = Conversation.objects.select_for_update().select_related("customer", "branch", "social_post").filter(id=conversation_id).first()
+        conversation = Conversation.objects.select_for_update().filter(id=conversation_id).first()
         if not conversation:
             return None
         latest = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()

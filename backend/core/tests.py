@@ -118,6 +118,17 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(mocked.call_count, 1)
         self.assertEqual(conversation.ai_replied_to_message_id, second.id)
 
+    def test_pending_customer_reply_handles_empty_social_post(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-no-post", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch, social_post=None)
+        message = conversation.messages.create(sender="customer", text="salom")
+        from unittest.mock import patch
+        with patch("core.services.create_ai_reply_for_conversation", side_effect=lambda conv: Message.objects.create(conversation=conv, sender="ai", text="Javob")):
+            reply = process_pending_customer_reply(conversation.id, message.id)
+        self.assertIsNotNone(reply)
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.ai_replied_to_message_id, message.id)
+
     def test_conversation_serializer_exposes_ai_active_and_clears_expired_pause(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-pause")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch, ai_paused_until=timezone.now() - timedelta(minutes=1), ai_pause_reason="operator_message")
