@@ -797,84 +797,6 @@ def catalog_type_label(value):
     return {"basket": "savat", "bouquet": "buket", "box": "quti"}.get(value or "", "gul")
 
 
-def latest_customer_text(conversation):
-    message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    return message.text if message else ""
-
-
-def catalog_request_kind(text):
-    compact = compact_match_text(text)
-    if not compact:
-        return ""
-    has_catalog_words = any(word in compact for word in ["katalog", "vitrina", "tayyor", "gullar", "gulla", "nmala bor", "nimalar bor", "qanaqa"])
-    if not has_catalog_words:
-        return ""
-    if any(phrase in compact for phrase in ["savatdan bosha", "savatdan boshqa", "savat dan bosha", "savat dan boshqa"]):
-        return "not_basket"
-    if any(word in compact.split() for word in ["buket", "buketlar", "buketla"]):
-        return "bouquet"
-    if any(word in compact.split() for word in ["savat", "savatlar", "savatla"]):
-        return "basket"
-    if any(word in compact.split() for word in ["box", "quti", "korobka"]):
-        return "box"
-    return "all"
-
-
-def render_catalog_list(rows, kind):
-    if kind == "basket":
-        title = "Katalogdagi tayyor savatlarimiz"
-    elif kind == "bouquet":
-        title = "Katalogdagi tayyor buketlarimiz"
-    elif kind == "box":
-        title = "Katalogdagi tayyor qutidagi gullarimiz"
-    elif kind == "not_basket":
-        title = "Savatdan tashqari katalogdagi tayyor gullarimiz"
-    else:
-        title = "Katalogdagi tayyor gullarimiz"
-    lines = [title, ""]
-    for index, row in enumerate(rows, start=1):
-        lines.append(f"{index}. {row['name_uz']} {catalog_type_label(row.get('type'))} {money_uz(row.get('price'))} so'm")
-    lines.append("")
-    lines.append("Qaysini tanlasangiz rasmini ko'rsataman")
-    return "\n".join(lines)
-
-
-def enforce_catalog_listing_flow(result, conversation):
-    kind = catalog_request_kind(latest_customer_text(conversation))
-    if not kind:
-        return result
-    arrangement_type = "" if kind in ["all", "not_basket"] else kind
-    rows = ai_catalog_rows("", limit=80, arrangement_type=arrangement_type)
-    if kind == "not_basket":
-        rows = [row for row in rows if row.get("type") != "basket"]
-    if not rows:
-        result["catalog_items"] = []
-        result["arrangement_type"] = None
-        result["estimated_price"] = None
-        result["_catalog_listing_locked"] = True
-        result["reply"] = "Bu turdagi tayyor katalog mahsuloti hozir ko'rinmayapti\nSkladimizdagi gullardan buket yoki savat yasab beramiz\nQaysi guldan yasatmoqchisiz?"
-        return result
-    result["tool_results"] = [{"name": "get_catalog", "arguments": {"query": "", "arrangement_type": arrangement_type or None}, "output": {"catalog": rows}}]
-    if len(rows) == 1:
-        item = _catalog_item_for_ai(rows[0].get("name_uz"), rows[0].get("name_ru"))
-        if item and not catalog_image_already_sent(conversation, item):
-            image_result = execute_ai_tool("send_catalog_image", {"query": item.name_uz}, conversation)
-            result["tool_results"].append({"name": "send_catalog_image", "arguments": {"query": item.name_uz}, "output": image_result})
-        row = rows[0]
-        result["catalog_items"] = [{"catalog_name": row["name_uz"], "quantity": 1}]
-        result["arrangement_type"] = row.get("type")
-        result["estimated_price"] = row.get("price")
-        result["_catalog_listing_locked"] = True
-        result["reply"] = f"Katalogimizda hozir faqat {row['name_uz']} {catalog_type_label(row.get('type'))} bor ekan\nNarxi {money_uz(row.get('price'))} so'm\nSizga qachonga kerak edi?"
-        return result
-    result["catalog_items"] = []
-    result["arrangement_type"] = None
-    result["estimated_price"] = None
-    result["_catalog_listing_locked"] = True
-    result["reply"] = render_catalog_list(rows, kind)
-    return result
-
-
 def ai_reply_asks_for_catalog_image(text):
     compact = compact_match_text(text)
     phrases = [
@@ -921,8 +843,6 @@ def single_catalog_item_from_ai_result(result, conversation):
 
 
 def enforce_single_catalog_image_flow(result, conversation):
-    if result.get("_catalog_listing_locked"):
-        return result
     item, source = single_catalog_item_from_ai_result(result, conversation)
     if not item or not ai_reply_asks_for_catalog_image(result.get("reply", "")):
         return result
@@ -978,9 +898,7 @@ def create_ai_reply_for_conversation(conversation):
         result["lead_ready"] = False
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
-    result = enforce_catalog_listing_flow(result, conversation)
     result = enforce_single_catalog_image_flow(result, conversation)
-    result.pop("_catalog_listing_locked", None)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
         Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
