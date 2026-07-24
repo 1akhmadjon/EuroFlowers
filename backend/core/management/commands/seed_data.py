@@ -76,22 +76,22 @@ class Command(BaseCommand):
             flower_map[slug] = flower
 
         variants = [
-            ("atirgul", "Mondial", "Mondial", "Oq", "Белый", 20, 11),
-            ("atirgul", "Explorer", "Explorer", "Qizil", "Красный", 20, 11),
-            ("atirgul", "Hermosa", "Hermosa", "Pushti", "Розовый", 20, 11),
-            ("buta-atirgul", "Bombastic", "Bombastic", "Pushti", "Розовый", 10, 5),
-            ("buta-atirgul", "White O’Hara", "White O’Hara", "Krem", "Кремовый", 10, 5),
-            ("gortenziya", "Premium Blue", "Premium Blue", "Moviy", "Голубой", 5, 3),
-            ("gortenziya", "Verena", "Verena", "Pushti", "Розовый", 5, 3),
-            ("pion", "Sarah Bernhardt", "Sarah Bernhardt", "Och pushti", "Нежно-розовый", 5, 5),
-            ("xrizantema", "Baltica", "Baltica", "Oq", "Белый", 5, 5),
-            ("alstromeriya", "Virginia", "Virginia", "Oq", "Белый", 10, 5),
-            ("matthiola", "Katz", "Katz", "Lavanda", "Лавандовый", 10, 5),
-            ("gvozdika", "Nobio", "Nobio", "Krem", "Кремовый", 20, 10),
+            ("atirgul", "Mondial", "Mondial", "Oq", "Белый", 20, 11, "Oq rangli premium atirgul, klassik va nafis buketlar uchun yaxshi. Bosh qismi tekisroq ochiladi.", "Белая премиальная роза для классических нежных букетов."),
+            ("atirgul", "Explorer", "Explorer", "Qizil", "Красный", 20, 11, "Qizil rangi to‘q, boshi yirikroq va ko‘rinishi hashamatli. Premium buketlarda kuchli effekt beradi.", "Насыщенно-красная роза с крупным бутоном для премиальных букетов."),
+            ("atirgul", "Hermosa", "Hermosa", "Pushti", "Розовый", 20, 11, "Pushti rangli yumshoq ko‘rinishdagi atirgul. Romantik va nozik buketlar uchun mos.", "Розовая роза с мягким оттенком для романтичных букетов."),
+            ("buta-atirgul", "Bombastic", "Bombastic", "Pushti", "Розовый", 10, 5, "Mayda ko‘p boshli buta atirgul, buketga hajm va noziklik beradi.", "Кустовая роза с несколькими бутонами, добавляет объем и нежность."),
+            ("buta-atirgul", "White O’Hara", "White O’Hara", "Krem", "Кремовый", 10, 5, "Aromati kuchliroq, ochilganda juda nafis ko‘rinadi. Premium kompozitsiyalar uchun tanlanadi.", "Ароматная кустовая роза кремового оттенка для премиальных композиций."),
+            ("gortenziya", "Premium Blue", "Premium Blue", "Moviy", "Голубой", 5, 3, "Import premium gortenziya, boshi yirikroq, rangi to‘qroq va buketda boy ko‘rinadi. Shu sabab oddiy gortenziyadan qimmatroq.", "Импортная премиальная гортензия с крупной шапкой и насыщенным цветом."),
+            ("gortenziya", "Verena", "Verena", "Pushti", "Розовый", 5, 3, "Pushti gortenziya yumshoq rang beradi, romantik savat va buketlarda chiroyli chiqadi.", "Розовая гортензия для нежных романтичных букетов и корзин."),
+            ("pion", "Sarah Bernhardt", "Sarah Bernhardt", "Och pushti", "Нежно-розовый", 5, 5, "Mavsumiy premium pion, ochilganda katta va havodor ko‘rinadi. Sovg‘a buketlarida juda nafis.", "Сезонный премиальный пион с крупным воздушным раскрытием."),
+            ("xrizantema", "Baltica", "Baltica", "Oq", "Белый", 5, 5, "Uzoq saqlanadigan oq xrizantema, buketga hajm va tozalik ko‘rinishini beradi.", "Белая хризантема, долго стоит и добавляет объем букету."),
+            ("alstromeriya", "Virginia", "Virginia", "Oq", "Белый", 10, 5, "Nozik va uzoq turadigan gul, buketda yengil tekstura beradi.", "Нежный стойкий цветок, добавляет легкую текстуру букету."),
+            ("matthiola", "Katz", "Katz", "Lavanda", "Лавандовый", 10, 5, "Xushbo‘y va mavsumiy ko‘rinish beradi, pastel buketlarda yaxshi turadi.", "Ароматный цветок для пастельных сезонных букетов."),
+            ("gvozdika", "Nobio", "Nobio", "Krem", "Кремовый", 20, 10, "Krem rangli chinnigul, chidamli va buketda hajmni yaxshi ushlab turadi.", "Кремовая гвоздика, стойкая и хорошо держит объем."),
         ]
         variant_map = {}
-        for slug, uz, ru, color_uz, color_ru, bunch, minimum in variants:
-            variant, _ = FlowerVariant.objects.update_or_create(flower=flower_map[slug], name_uz=uz, color_uz=color_uz, defaults={"name_ru": ru, "color_ru": color_ru, "default_stems_per_bunch": bunch, "minimum_sale_stems": minimum, "image_url": flower_map[slug].image_url})
+        for slug, uz, ru, color_uz, color_ru, bunch, minimum, description_uz, description_ru in variants:
+            variant, _ = FlowerVariant.objects.update_or_create(flower=flower_map[slug], name_uz=uz, color_uz=color_uz, defaults={"name_ru": ru, "color_ru": color_ru, "description_uz": description_uz, "description_ru": description_ru, "default_stems_per_bunch": bunch, "minimum_sale_stems": minimum, "image_url": flower_map[slug].image_url})
             variant_map[(slug, uz)] = variant
 
         batch_rows = [

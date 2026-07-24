@@ -730,7 +730,7 @@ def ai_catalog_rows(query="", limit=24):
 def ai_stock_rows(query="", limit=24):
     queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")
     if query:
-        queryset = queryset.filter(Q(variant__flower__name_uz__icontains=query) | Q(variant__flower__name_ru__icontains=query) | Q(variant__name_uz__icontains=query) | Q(variant__name_ru__icontains=query) | Q(variant__color_uz__icontains=query) | Q(variant__color_ru__icontains=query))
+        queryset = queryset.filter(Q(variant__flower__name_uz__icontains=query) | Q(variant__flower__name_ru__icontains=query) | Q(variant__name_uz__icontains=query) | Q(variant__name_ru__icontains=query) | Q(variant__color_uz__icontains=query) | Q(variant__color_ru__icontains=query) | Q(variant__description_uz__icontains=query) | Q(variant__description_ru__icontains=query))
     rows = []
     for row in queryset[:limit]:
         rows.append({
@@ -741,6 +741,8 @@ def ai_stock_rows(query="", limit=24):
             "variant_ru": row.variant.name_ru,
             "color_uz": row.variant.color_uz,
             "color_ru": row.variant.color_ru,
+            "description_uz": row.variant.description_uz,
+            "description_ru": row.variant.description_ru,
             "height_cm": row.height_cm,
             "availability": "bor" if row.remaining_stems > row.minimum_sale_stems else "oz qoldi",
             "stems_per_bunch": row.stems_per_bunch,
@@ -1111,6 +1113,7 @@ def ai_reply(conversation):
         " Tayyor katalog buyurtmasida narx aniq bo‘ladi, florist haqi, o‘lcham, paket yoki tarkibni mijoz so‘ramasa aytma."
         " Custom yasatish/yig‘dirish konteksti faqat mijoz 'yasatmoqchiman', 'yig‘dirmoqchiman', 'yasab berasizlarmi', 'buket yasatishga', 'savat yasatishga', 'savatga yig‘ib' kabi aniq aytsa boshlanadi. Shundagina search_stock chaqir."
         " Custom yasatishga qanaqa gullar bor deb so‘ralsa search_stock chaqir, lekin stock narxlarini yozma. Faqat gul nomi, rangi va bo‘yini qisqa sanab, qaysi guldan yig‘ib beraylik deb so‘ra."
+        " Mijoz gul navi farqi, nima uchun qimmatligi, qayerniki, sifati, saqlanishi yoki gul haqida ma'lumot so‘rasa search_stock chaqir va tooldagi description_uz/description_ru asosida qisqa, chiroyli javob ber. Description bo‘lmasa farqni o‘ylab topma, operatorlarimiz aniqroq tushuntirib berishini ayt."
         " Savat custom kerak bo‘lsa get_baskets chaqir; mijoz savat desa mos savat variantini tanlashni so‘ra yoki gul miqdoriga qarab bitta mos savatni taxminan tavsiya qil. Mijoz buket desa savat variantlarini sanama."
         " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
         " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."

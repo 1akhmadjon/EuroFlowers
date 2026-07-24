@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_stock_rows, ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -824,6 +824,15 @@ class ApiTests(TestCase):
         variant = FlowerVariant.objects.get(id=variant_id)
         self.assertFalse(variant.is_active)
         self.assertTrue(AuditLog.objects.filter(action="flowervariant_archived", entity_id=str(variant_id)).exists())
+
+    def test_ai_stock_rows_include_variant_description(self):
+        variant = self.batch.variant
+        variant.description_uz = "Premium import gortenziya, boshi yirikroq va rangi to‘qroq."
+        variant.description_ru = "Премиальная импортная гортензия."
+        variant.save(update_fields=["description_uz", "description_ru", "updated_at"])
+        rows = ai_stock_rows("premium import")
+        self.assertEqual(rows[0]["description_uz"], "Premium import gortenziya, boshi yirikroq va rangi to‘qroq.")
+        self.assertEqual(rows[0]["description_ru"], "Премиальная импортная гортензия.")
 
     def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
         packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", name_ru="Lead basket", quantity=2, sale_price=50000)

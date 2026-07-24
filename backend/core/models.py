@@ -88,6 +88,8 @@ class FlowerVariant(TimeStampedModel):
     name_ru = models.CharField(max_length=120)
     color_uz = models.CharField(max_length=80)
     color_ru = models.CharField(max_length=80)
+    description_uz = models.TextField(blank=True)
+    description_ru = models.TextField(blank=True)
     default_stems_per_bunch = models.PositiveIntegerField(default=10)
     minimum_sale_stems = models.PositiveIntegerField(default=1)
     image_url = models.URLField(blank=True)
