@@ -976,6 +976,29 @@ def clean_catalog_order_reply_text(text):
     return cleaned or text
 
 
+def is_flower_availability_question(text):
+    lowered = compact_match_text(text)
+    availability_words = ["bormi", "bor mi", "борми", "есть", "est", "bormi"]
+    custom_words = ["yasat", "yegdir", "yigdir", "yig ib", "savat", "buket qilib", "qildirmoq"]
+    catalog_words = ["tayyor", "katalog", "vitrina", "story", "post", "reel"]
+    return any(word in lowered for word in availability_words) and not any(word in lowered for word in custom_words + catalog_words)
+
+
+def normalize_flower_availability_reply(result, conversation):
+    last_text = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or ""
+    if not is_flower_availability_question(last_text):
+        return result
+    reply = result.get("reply", "")
+    lowered = compact_match_text(reply)
+    if any(word in lowered for word in ["yo q", "yuq", "нет", "topilmadi", "topolmadim"]):
+        result["reply"] = "Bu gul bo‘yicha ikki xil ko‘rib bera olaman.\n\nVitrinadagi tayyor buketlarni qaraymi yoki sizga shu guldan alohida buket/savat yig‘dirib beraylikmi?"
+        result["catalog_items"] = []
+        result["stock_items"] = []
+        result["lead_ready"] = False
+        result["handoff"] = False
+    return result
+
+
 def catalog_flow_guardrail(result, conversation, recent_catalog):
     if not recent_catalog:
         return result
@@ -1106,6 +1129,7 @@ def ai_reply(conversation):
     sales_rules = (
         " Function calling qoidasi: javobni o‘zing yozasan, lekin real ma'lumot kerak bo‘lsa avval function tool chaqir. Salom, rahmat, umumiy savol yoki oddiy aniqlashtirish uchun tool chaqirma."
         " Umumiy 'qanaqa gullar bor', 'qanday gullar bor', 'gullar bormi', 'nimalar bor', 'tayyor gullar bormi' kabi so‘rovlar tayyor katalog so‘rovi hisoblanadi: get_catalog chaqir, search_stock chaqirma."
+        " Mijoz faqat aniq gul turi bormi deb so‘rasa, masalan 'gortenziya bormi', darrov yo‘q yoki bor deb yopma. Avval bitta aniqlashtiruvchi savol ber: 'Vitrinadagi tayyor buketlarni qaraymi yoki sizga shu guldan alohida buket/savat yig‘dirib beraylikmi?' Bunday bosqichda search_stock ham, get_catalog ham majburiy emas."
         " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha katalog nomi quantity=1 bo‘lsin."
         " recent_catalog_selection bo‘lsa va mijoz manzil, sana, vaqt, 'olaman', 'kerak', 'tayyor yasalganni olaman' kabi yozsa, bu tayyor katalog buyurtmasi davomidir. Uni custom yasatish deb talqin qilma."
         " Tayyor katalog item tanlanganidan keyin o‘lcham, paket, custom buketmi, savatmi, qaysi guldan yasaymiz kabi savollarni hech qachon so‘rama. Tayyor katalog mahsuloti allaqachon yasalgan bo‘ladi."
@@ -1205,6 +1229,7 @@ def ai_reply(conversation):
     result["reply"] = clean_catalog_listing_text(normalize_ai_reply_text(result.get("reply", "")))
     if image_tool_results:
         result["reply"] = clean_image_reply_text(result["reply"])
+    result = normalize_flower_availability_reply(result, conversation)
     result = catalog_flow_guardrail(result, conversation, recent_catalog)
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
         result["catalog_items"] = []

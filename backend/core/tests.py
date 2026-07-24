@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_stock_rows, ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_stock_rows, ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_flower_availability_reply, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -77,6 +77,15 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("operator/jamoa", normalized.lower())
         self.assertIn("operatorlarimiz siz bilan bog‘lanadi", normalized.lower())
         self.assertIn("\n\nDo‘kon manzili:", normalized)
+
+    def test_flower_availability_question_asks_catalog_or_custom(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-hydrangea")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="гортензиела борми")
+        result = normalize_flower_availability_reply({"reply": "Hozir katalogimizda gortenziya yo‘q.", "catalog_items": [], "stock_items": [], "lead_ready": False, "handoff": False}, conversation)
+        self.assertNotIn("yo‘q", result["reply"])
+        self.assertIn("Vitrinadagi tayyor buketlarni", result["reply"])
+        self.assertIn("alohida buket/savat", result["reply"])
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
