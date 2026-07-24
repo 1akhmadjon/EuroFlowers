@@ -97,8 +97,9 @@ def social_post_media_query(media_id):
 def social_post_url_query(url):
     normalized = normalize_instagram_permalink(url)
     asset_id = media_id_from_url(url)
+    is_instagram_permalink = "instagram.com/" in normalized
     query = Q()
-    if normalized:
+    if normalized and is_instagram_permalink:
         query |= Q(permalink__startswith=normalized) | Q(webhook_story_url__startswith=normalized) | Q(catalog_items__instagram_story_url__startswith=normalized)
     if asset_id:
         query |= Q(media_id=asset_id) | Q(story_share_id=asset_id) | Q(webhook_story_id__contains=asset_id) | Q(webhook_story_url__contains=asset_id) | Q(permalink__contains=asset_id) | Q(catalog_items__instagram_story_url__contains=asset_id)
@@ -122,8 +123,9 @@ def social_post_by_media_or_url(media_id="", url="", branch=None):
 def catalog_item_url_query(url):
     normalized = normalize_instagram_permalink(url)
     asset_id = media_id_from_url(url)
+    is_instagram_permalink = "instagram.com/" in normalized
     query = Q()
-    if normalized:
+    if normalized and is_instagram_permalink:
         query |= Q(instagram_story_url__startswith=normalized) | Q(social_post__permalink__startswith=normalized) | Q(social_post__webhook_story_url__startswith=normalized)
     if asset_id:
         query |= Q(instagram_story_url__contains=asset_id) | Q(social_post__media_id=asset_id) | Q(social_post__story_share_id=asset_id) | Q(social_post__webhook_story_id__contains=asset_id) | Q(social_post__webhook_story_url__contains=asset_id)
