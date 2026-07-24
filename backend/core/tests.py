@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_stock_rows, ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_flower_availability_reply, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_stock_rows, ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, clean_overlong_custom_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_flower_availability_reply, normalize_phone, process_pending_customer_reply, required_catalog_image_item, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -86,6 +86,21 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("yo‘q", result["reply"])
         self.assertIn("Vitrinadagi tayyor buketlarni", result["reply"])
         self.assertIn("alohida buket/savat", result["reply"])
+
+    def test_catalog_image_request_resolves_selected_item(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Pion buketi", name_ru="Букет пионов", arrangement_type="bouquet", price=800000, status="available", image_url="https://example.com/pion.jpg")
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-pion")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="ai", text="Hozirgi katalogdagi tayyor buketlarimiz:\n1. Pion buketi - 800 000 so‘m", metadata={"catalog_items": []})
+        conversation.messages.create(sender="customer", text="пиони ташаберинчи")
+        self.assertEqual(required_catalog_image_item(conversation), item)
+
+    def test_overlong_custom_reply_removes_basket_and_decoration_lists(self):
+        text = "Ajoyib, 10 ta atirgul tayyorlab beramiz. Bizning savat variantlarimiz: Mini velvet basket kichik, Premium oq savat o‘rtacha, Katta toqima savat katta. Bezak variantlari: Klassik floristika, Premium, Rustic, Minimal stems. Tasdiqlaysizmi?"
+        cleaned = clean_overlong_custom_reply_text(text)
+        self.assertNotIn("Mini velvet basket", cleaned)
+        self.assertNotIn("Rustic", cleaned)
+        self.assertIn("Shunday qilib tayyorlab beraylikmi?", cleaned)
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")

@@ -845,7 +845,7 @@ def ai_tool_definitions():
         {"type": "function", "name": "get_baskets", "description": "Faqat mijoz custom savat yasatmoqchi/yig‘dirmoqchi bo‘lsa mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_recent_orders", "description": "Mijoz oldingi buyurtmalarini so‘raganda olish.", "parameters": empty_parameters, "strict": True},
         {"type": "function", "name": "get_post_context", "description": "Conversation story/post/reel bilan bog‘langan bo‘lsa, o‘sha media ma’lumotini olish.", "parameters": empty_parameters, "strict": True},
-        {"type": "function", "name": "send_catalog_image", "description": "Mijoz aniq katalogdagi buket/savat rasmini so‘raganda shu katalog item rasmini Instagram/Telegram chatga yuborish. Rasm so‘ralganda final javobdan oldin doim shu tool chaqiriladi. Catalog id ishlatilmaydi, katalog nomi yoki mijoz yozgan nom bilan chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Rasmi yuboriladigan katalog nomi, masalan Pushti atirgul buketi"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
+        {"type": "function", "name": "send_catalog_image", "description": "Mijoz aniq katalogdagi buket/savat rasmini so‘raganda shu katalog item rasmini Instagram/Telegram chatga yuborish. 'rasm', 'ko‘rsat', 'tashabering', 'tashavoring', 'пиони таша', 'кани ташен' kabi so‘rovlar rasm so‘rovi hisoblanadi va final javobdan oldin doim shu tool chaqiriladi. Catalog id ishlatilmaydi, katalog nomi yoki mijoz yozgan nom bilan chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Rasmi yuboriladigan katalog nomi, masalan Pushti atirgul buketi"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
     ]
 
 
@@ -964,6 +964,19 @@ def clean_image_reply_text(text):
     return cleaned or text
 
 
+def clean_overlong_custom_reply_text(text):
+    if not text:
+        return ""
+    cleaned = text
+    if not re.search(r"(?i)\b(katalog|tayyor buket|tayyor variant)", cleaned):
+        cleaned = re.sub(r"(?is)[^.?!\n]*(Mini velvet basket|Premium oq savat|Katta toqima savat)[^.?!]*(?:[.?!]|$)", "Savat kerak bo‘lsa, gul miqdoriga qarab mosini tavsiya qilamiz.", cleaned).strip()
+        cleaned = re.sub(r"(?is)[^.?!\n]*(Klassik floristika|Premium|Rustic|Minimal stems)[^.?!]*(?:[.?!]|$)", "Bezakni floristlarimiz chiroyli qilib moslab beradi.", cleaned).strip()
+    cleaned = re.sub(r"\bTasdiqlaysizmi\??", "Shunday qilib tayyorlab beraylikmi?", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n*\s*Qaysi biri yoqdi, rasmini ko[‘'ʻ`]?rsataman\??", "", cleaned, flags=re.IGNORECASE).rstrip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned or text
+
+
 def format_money(value):
     return f"{int(Decimal(str(value))):,}".replace(",", " ")
 
@@ -1061,18 +1074,18 @@ def remove_premature_catalog_contact_request(text):
     return cleaned
 
 
-def shorten_ai_reply_text(text, max_sentences=4, max_chars=420):
+def shorten_ai_reply_text(text, max_sentences=3, max_chars=320):
     if not text:
         return ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) > 6:
         lines = lines[:6]
     shortened = "\n".join(lines)
-    has_list = any(line.startswith(("1)", "1.", "•")) for line in lines)
+    has_catalog_list = bool(re.search(r"(?i)\b(katalog|tayyor buket|tayyor variant)", shortened)) and any(line.startswith(("1)", "1.")) for line in lines)
     sentences = re.split(r"(?<=[.?!])\s+", shortened)
-    if len(sentences) > max_sentences and not has_list:
+    if len(sentences) > max_sentences and not has_catalog_list:
         shortened = " ".join(sentences[:max_sentences]).strip()
-    if not has_list and len(shortened) > max_chars:
+    if not has_catalog_list and len(shortened) > max_chars:
         kept = []
         total = 0
         for sentence in sentences:
@@ -1150,6 +1163,7 @@ def ai_reply(conversation):
         " Katalog ro‘yxatida har bir qatorda narx yonida albatta 'so‘m' yoz: '1. Pion buketi - 800 000 so‘m'. 'Narxlar so‘mda' deb tepada umumiy yozib, qatorda so‘mni tashlab ketma."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.' 'Yoki boshqa variant/miqdor kerakmi' deb so‘rama."
         " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
+        " Custom buket/savat suhbatida mijoz aniq so‘ramasa savat ro‘yxatini, bezak ro‘yxatini, parvarish bo‘yicha uzun maslahatni yoki bir nechta paket/uslub variantini sanama."
         " Custom buket/savat uchun narx aytilsa faqat taxminiy deb ayt. Florist haqi 50 000 so‘mdan boshlanishini va obyomga qarab o‘zgarishini ayt. Aniq narxni operator hisoblab berishini yoz."
         " Custom savat hisobida gullar narxi, mos savat va florist haqini taxminiy qo‘shib ayt; keyin 'Aniq narxni operatorimiz hisoblab beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?' deb so‘ra."
         " Mijoz 'nimaga ism raqam kerak' yoki shunga o‘xshash so‘rasa javob aynan shu mazmunda bo‘lsin: 'Ism va raqamingiz operatorimiz sizga aloqaga chiqib, aniq ma'lumotlarni berishi uchun kerak.'"
@@ -1173,7 +1187,7 @@ def ai_reply(conversation):
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
         " Rasm yuborish faqat send_catalog_image tool orqali qilinadi. Final catalog_items rasm yuborish uchun emas, tanlangan katalogni metadata/lead uchun belgilashga ishlatiladi."
-        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq item nomini top, keyin send_catalog_image(query=katalog nomi) toolini chaqir. Final javobda 'mana rasmi', 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rmoqchimisiz', 'rasmini ko‘rsataymi' dema. Rasm tool orqali yuborilgan bo‘lsa matnda faqat buket nomi va narxini yoz."
+        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq item nomini top, keyin send_catalog_image(query=katalog nomi) toolini chaqir. 'tashabering', 'tashavoring', 'пиони таша', 'кани ташен' ham rasm so‘rovi. Final javobda 'mana rasmi', 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rmoqchimisiz', 'rasmini ko‘rsataymi' dema. Rasm tool orqali yuborilgan bo‘lsa matnda faqat buket nomi va narxini yoz."
         " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
         " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
         " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
@@ -1225,6 +1239,7 @@ def ai_reply(conversation):
         response_kwargs["max_output_tokens"] = 4000
         response = client.responses.create(**response_kwargs)
         result = json.loads(response.output_text)
+    response, result, image_tool_results = force_catalog_image_tool_if_needed(client, ai_settings, response, conversation, result, image_tool_results)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
     if image_tool_results:
@@ -1232,6 +1247,7 @@ def ai_reply(conversation):
     result["reply"] = clean_catalog_listing_text(normalize_ai_reply_text(result.get("reply", "")))
     if image_tool_results:
         result["reply"] = clean_image_reply_text(result["reply"])
+    result["reply"] = clean_overlong_custom_reply_text(result["reply"])
     result = normalize_flower_availability_reply(result, conversation)
     result = catalog_flow_guardrail(result, conversation, recent_catalog)
     if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
@@ -1275,17 +1291,105 @@ def compact_match_text(value):
     return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower()).strip()
 
 
+def catalog_search_aliases(text):
+    aliases = {text}
+    replacements = {
+        "пиони": "pion",
+        "пион": "pion",
+        "пионл": "pion",
+        "атиргул": "atirgul",
+        "атиргулл": "atirgul",
+        "роза": "atirgul",
+        "розы": "atirgul",
+        "пушти": "pushti",
+        "кизил": "qizil",
+        "қизил": "qizil",
+        "гортензия": "gortenziya",
+        "гортензи": "gortenziya",
+    }
+    expanded = text
+    for source, target in replacements.items():
+        expanded = expanded.replace(source, target)
+    aliases.add(expanded)
+    return aliases
+
+
 def catalog_item_from_text(conversation, *values):
-    texts = [compact_match_text(value) for value in values if value]
+    texts = []
+    for value in values:
+        if value:
+            texts.extend(catalog_search_aliases(compact_match_text(value)))
+    available_items = list(CatalogItem.objects.filter(status="available"))
     for text in texts:
-        for item in CatalogItem.objects.filter(status="available"):
+        for item in available_items:
             name = compact_match_text(item.name_uz)
             if name and name in text:
                 return item
             tokens = [token for token in name.split() if token not in {"buketi", "buket", "guldasta", "kompozitsiya"}]
             if len(tokens) >= 2 and all(token in text for token in tokens[:2]):
                 return item
+            if len(tokens) == 1 and len(tokens[0]) >= 4 and tokens[0] in text:
+                matches = [row for row in available_items if tokens[0] in compact_match_text(row.name_uz).split()]
+                if len(matches) == 1:
+                    return item
     return None
+
+
+def is_catalog_image_request_text(text):
+    lowered = compact_match_text(text)
+    return any(pattern in lowered for pattern in ["rasm", "korsat", "ko rsat", "tasha", "tashab", "tashavor", "tashen", "таш", "расм", "корсат", "кани"])
+
+
+def required_catalog_image_item(conversation, result=None):
+    latest = recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else ""
+    if not is_catalog_image_request_text(latest):
+        return None
+    result = result or {}
+    item = catalog_item_from_text(conversation, latest, result.get("reply"), result.get("lead_request"))
+    if item:
+        return item
+    return recent_catalog_item_for_conversation(conversation)
+
+
+def force_catalog_image_tool_if_needed(client, ai_settings, response, conversation, result, image_tool_results):
+    if image_tool_results:
+        return response, result, image_tool_results
+    item = required_catalog_image_item(conversation, result)
+    if not item:
+        return response, result, image_tool_results
+    response = client.responses.create(
+        model=ai_settings.openai_model or settings.OPENAI_MODEL,
+        previous_response_id=response.id,
+        input=[{"role": "user", "content": f"Mijoz katalogdagi '{item.name_uz}' rasmini so‘radi. Final JSON javobdan oldin send_catalog_image toolini query='{item.name_uz}' bilan chaqir. Tool ishlagandan keyin reply faqat katalog nomi va narxi bo‘lsin, rasm yuboraman yoki yuboraymi deb yozma."}],
+        max_output_tokens=1200,
+        max_tool_calls=2,
+        tools=ai_tool_definitions(),
+        reasoning={"effort": "minimal"},
+        text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
+    )
+    for _ in range(2):
+        function_calls = [output for output in response.output if getattr(output, "type", "") == "function_call"]
+        if not function_calls:
+            break
+        tool_outputs = []
+        for call in function_calls:
+            arguments = json.loads(call.arguments or "{}")
+            output = execute_ai_tool(call.name, arguments, conversation)
+            if call.name == "send_catalog_image":
+                image_tool_results.append(output)
+            tool_outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(output, ensure_ascii=False)})
+        response = client.responses.create(
+            model=ai_settings.openai_model or settings.OPENAI_MODEL,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            max_output_tokens=1200,
+            max_tool_calls=2,
+            tools=ai_tool_definitions(),
+            reasoning={"effort": "minimal"},
+            text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
+        )
+    parsed = json.loads(response.output_text)
+    return response, parsed, image_tool_results
 
 
 def recent_customer_texts(conversation, limit=6):
