@@ -452,7 +452,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_stock",
-            "description": "Skladdagi hozir bor gullar va narxlarini olish.",
+            "description": "Skladdagi bor, oz qolgan va qolmagan gul variantlari hamda narxlarini olish.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},

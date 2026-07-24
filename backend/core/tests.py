@@ -252,14 +252,16 @@ class BusinessRulesTests(TestCase):
         rows = ai_stock_rows("Mondial oq atirgul narxi va mavjudlik 10 dona", limit=10)
         self.assertTrue(any(row["batch_id"] == self.batch.id for row in rows))
 
-    def test_ai_stock_rows_includes_active_variant_without_stock_as_unavailable(self):
+    def test_ai_stock_rows_includes_active_variants_without_stock_as_unavailable(self):
         flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya")
         FlowerVariant.objects.create(flower=flower, name_uz="Snowball", name_ru="Snowball", color_uz="Oq", color_ru="Белый")
-        rows = ai_stock_rows("gortenziya snow ball", limit=10)
-        snowball = next(row for row in rows if row["variant_uz"] == "Snowball")
-        self.assertIsNone(snowball["batch_id"])
-        self.assertEqual(snowball["availability"], "qolmagan")
-        self.assertEqual(snowball["remaining_stems"], 0)
+        FlowerVariant.objects.create(flower=flower, name_uz="Limelight", name_ru="Limelight", color_uz="Yashil", color_ru="Зеленый")
+        rows = ai_stock_rows("gortenziya", limit=10)
+        unavailable = {row["variant_uz"]: row for row in rows if row["availability"] == "qolmagan"}
+        self.assertIn("Snowball", unavailable)
+        self.assertIn("Limelight", unavailable)
+        self.assertIsNone(unavailable["Snowball"]["batch_id"])
+        self.assertEqual(unavailable["Snowball"]["remaining_stems"], 0)
 
     def test_pending_customer_reply_debounces_to_latest_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
