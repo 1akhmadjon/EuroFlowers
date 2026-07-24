@@ -785,6 +785,76 @@ def append_lead_request_text(current, addition):
     return f"{current}\n{addition}".strip() if current else addition
 
 
+def money_uz(value):
+    try:
+        amount = int(Decimal(str(value)))
+    except Exception:
+        return str(value or "")
+    return f"{amount:,}".replace(",", " ")
+
+
+def ai_reply_asks_for_catalog_image(text):
+    compact = compact_match_text(text)
+    phrases = [
+        "rasmni yuboraymi",
+        "rasmini yuboraymi",
+        "rasmni korsataman",
+        "rasmini korsataman",
+        "rasmni ko rsataman",
+        "rasmini ko rsataman",
+        "qaysini tanlaysiz",
+    ]
+    return any(phrase in compact for phrase in phrases)
+
+
+def catalog_image_already_sent(conversation, item):
+    if not item:
+        return False
+    for message in conversation.messages.exclude(metadata={}).order_by("-created_at", "-id")[:20]:
+        image_result = (message.metadata or {}).get("image_tool_result") or {}
+        if str(image_result.get("catalog_id") or "") == str(item.id) and image_result.get("sent") is not None:
+            return True
+    return False
+
+
+def single_catalog_item_from_ai_result(result, conversation):
+    catalog_rows = result.get("catalog_items") or []
+    if len(catalog_rows) == 1:
+        item = _catalog_item_for_ai(catalog_rows[0].get("catalog_name"))
+        if item:
+            return item
+    for tool_result in result.get("tool_results") or []:
+        if tool_result.get("name") != "get_catalog":
+            continue
+        catalog = tool_result.get("output", {}).get("catalog") or []
+        if len(catalog) == 1:
+            item = _catalog_item_for_ai(catalog[0].get("name_uz"), catalog[0].get("name_ru"))
+            if item:
+                return item
+    if conversation.social_post_id:
+        post_items = list(CatalogItem.objects.filter(social_post=conversation.social_post, status="available")[:2])
+        if len(post_items) == 1:
+            return post_items[0]
+    return None
+
+
+def enforce_single_catalog_image_flow(result, conversation):
+    item = single_catalog_item_from_ai_result(result, conversation)
+    if not item or not ai_reply_asks_for_catalog_image(result.get("reply", "")):
+        return result
+    tool_result = {"ok": False, "detail": "image_already_sent", "catalog_name": item.name_uz}
+    if not catalog_image_already_sent(conversation, item):
+        tool_result = execute_ai_tool("send_catalog_image", {"query": item.name_uz}, conversation)
+    result.setdefault("tool_results", [])
+    result["tool_results"].append({"name": "send_catalog_image", "arguments": {"query": item.name_uz}, "output": tool_result})
+    result["catalog_items"] = [{"catalog_name": item.name_uz, "quantity": 1}]
+    result["arrangement_type"] = item.arrangement_type
+    result["estimated_price"] = str(item.price)
+    type_label = "savat" if item.arrangement_type == "basket" else "buket"
+    result["reply"] = f"Katalogimizda hozir faqat {item.name_uz} {type_label} bor ekan\nNarxi {money_uz(item.price)} so'm\nSizga qachonga kerak edi?"
+    return result
+
+
 def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
@@ -821,6 +891,7 @@ def create_ai_reply_for_conversation(conversation):
         result["lead_ready"] = False
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
+    result = enforce_single_catalog_image_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
         Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)

@@ -91,6 +91,36 @@ class BusinessRulesTests(TestCase):
         self.assertIn("ismingiz", reply.text.lower())
         self.assertFalse(Lead.objects.filter(customer=customer).exists())
 
+    def test_ai_single_catalog_image_question_is_auto_sent_and_rewritten(self):
+        self.item.status = "available"
+        self.item.arrangement_type = "basket"
+        self.item.image_url = "https://example.com/oq-buket.jpg"
+        self.item.save(update_fields=["status", "arrangement_type", "image_url", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-single-catalog")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="savatdagi gullar bormi")
+        payload = {
+            "reply": "Savatga yasalgan vitrinadagi gullarimiz\n\n1. Oq buket\n2.\nQaysini tanlaysiz, rasmni ko'rsataman?",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": "basket",
+            "estimated_price": "500000",
+            "handoff": False,
+            "catalog_items": [{"catalog_name": "Oq buket", "quantity": 1}],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload), patch("core.services.instagram_send_image", return_value={"ok": True}) as image_mock:
+            reply = create_ai_reply_for_conversation(conversation)
+        image_mock.assert_called_once_with("ig-single-catalog", "https://example.com/oq-buket.jpg")
+        self.assertIn("Katalogimizda hozir faqat Oq buket savat bor ekan", reply.text)
+        self.assertIn("Narxi 500 000 so'm", reply.text)
+        self.assertNotIn("Qaysini tanlaysiz", reply.text)
+        self.assertNotIn("rasmni", reply.text.lower())
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-tools", name="Ahmad")
