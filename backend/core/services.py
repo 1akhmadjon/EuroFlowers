@@ -455,36 +455,6 @@ def instagram_send_image(recipient_id, image_url):
     return response.json()
 
 
-def catalog_image_for_conversation(conversation, reply=None):
-    catalog_ids = []
-    if reply and reply.metadata:
-        catalog_ids = [row.get("catalog_id") for row in reply.metadata.get("catalog_items", []) if row.get("catalog_id") and int(row.get("quantity") or 0) > 0]
-    if catalog_ids:
-        catalog = CatalogItem.objects.filter(id__in=catalog_ids, status="available").exclude(image_url="").order_by("id").first()
-        if catalog and catalog.image_url.startswith("https://"):
-            return {"source": f"catalog:{catalog.id}", "image_url": catalog.image_url}
-    if not conversation.social_post_id:
-        return None
-    catalog = CatalogItem.objects.filter(social_post=conversation.social_post, status="available").exclude(image_url="").order_by("-created_at").first()
-    image_url = catalog.image_url if catalog else conversation.social_post.image_url
-    if not image_url or not image_url.startswith("https://"):
-        return None
-    source = f"catalog:{catalog.id}" if catalog else f"social_post:{conversation.social_post_id}"
-    return {"source": source, "image_url": image_url}
-
-
-def send_instagram_context_image(recipient_id, conversation, reply=None):
-    image = catalog_image_for_conversation(conversation, reply)
-    if not image:
-        return None
-    marker = f"instagram_image_sent:reply:{getattr(reply, 'id', 0)}:{image['source']}:{image['image_url']}"
-    if Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).exists():
-        return None
-    result = instagram_send_image(recipient_id, image["image_url"])
-    Message.objects.create(conversation=conversation, sender="system", text="Instagram image sent", metadata={"media_image_key": marker, "image_url": image["image_url"], "result": result})
-    return result
-
-
 def instagram_sender_action(recipient_id, action):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
@@ -533,41 +503,6 @@ def telegram_send_rich(chat_id, rich_message):
 
 def telegram_send_image(chat_id, image_url):
     return telegram_api("sendPhoto", {"chat_id": chat_id, "photo": image_url})
-
-
-def send_telegram_context_image(chat_id, conversation, reply=None):
-    image = catalog_image_for_conversation(conversation, reply)
-    if not image:
-        return None
-    marker = f"telegram_image_sent:reply:{getattr(reply, 'id', 0)}:{image['source']}:{image['image_url']}"
-    if Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).exists():
-        return None
-    result = telegram_send_image(chat_id, image["image_url"])
-    Message.objects.create(conversation=conversation, sender="system", text="Telegram image sent", metadata={"media_image_key": marker, "image_url": image["image_url"], "result": result})
-    return result
-
-
-def send_catalog_image_for_conversation(conversation, query):
-    item = catalog_item_from_text(conversation, query)
-    if not item or not item.image_url.startswith("https://"):
-        return {"ok": False, "image_sent": False, "catalog_name": str(query or ""), "detail": "Rasm topilmadi"}
-    latest_customer_id = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("id", flat=True).first() or 0
-    marker = f"ai_tool_image_sent:customer:{latest_customer_id}:catalog:{item.id}:{item.image_url}"
-    existing = Message.objects.filter(conversation=conversation, sender="system", metadata__media_image_key=marker).first()
-    if existing:
-        return {"ok": True, "image_sent": True, "already_sent": True, "catalog_name": item.name_uz}
-    recipient = conversation.customer.instagram_user_id or ""
-    if recipient.startswith("telegram:"):
-        result = telegram_send_image(recipient.split(":", 1)[1], item.image_url)
-        text = "Telegram image sent"
-    elif recipient:
-        result = instagram_send_image(recipient, item.image_url)
-        text = "Instagram image sent"
-    else:
-        result = {"mocked": True}
-        text = "Catalog image sent"
-    Message.objects.create(conversation=conversation, sender="system", text=text, metadata={"media_image_key": marker, "image_url": item.image_url, "catalog_id": item.id, "catalog_name": item.name_uz, "result": result})
-    return {"ok": True, "image_sent": True, "already_sent": False, "catalog_name": item.name_uz}
 
 
 def telegram_sender_action(chat_id, action="typing"):
@@ -837,35 +772,6 @@ def mini_app_custom_quote_ai(request_text, arrangement_type):
     }
 
 
-def ai_tool_definitions():
-    empty_parameters = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
-    return [
-        {"type": "function", "name": "get_catalog", "description": "Bugungi tayyor katalogdagi available buket/savat/kompozitsiyalarni olish. Umumiy 'qanaqa gullar bor', 'tayyor gullar bormi', 'katalog' so‘rovlarida doim shu tool chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Ixtiyoriy qidiruv matni, masalan pion yoki qizil atirgul"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
-        {"type": "function", "name": "search_stock", "description": "Skladdagi gullarni qidirish. Faqat mijoz custom buket/savat yasatmoqchi/yig‘dirmoqchi ekanini aniq aytsa yoki 'yasatishga qanaqa gullar bor' deb so‘rasa chaqiriladi. Umumiy 'qanaqa gullar bor' so‘rovida chaqirilmaydi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Gul/rang/tur qidiruvi, bo‘sh string custom yasatish uchun asosiy gullar"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
-        {"type": "function", "name": "get_baskets", "description": "Faqat mijoz custom savat yasatmoqchi/yig‘dirmoqchi bo‘lsa mos savat variantlarini olish.", "parameters": empty_parameters, "strict": True},
-        {"type": "function", "name": "get_recent_orders", "description": "Mijoz oldingi buyurtmalarini so‘raganda olish.", "parameters": empty_parameters, "strict": True},
-        {"type": "function", "name": "get_post_context", "description": "Conversation story/post/reel bilan bog‘langan bo‘lsa, o‘sha media ma’lumotini olish.", "parameters": empty_parameters, "strict": True},
-        {"type": "function", "name": "send_catalog_image", "description": "Mijoz aniq katalogdagi buket/savat rasmini so‘raganda shu katalog item rasmini Instagram/Telegram chatga yuborish. 'rasm', 'ko‘rsat', 'tashabering', 'tashavoring', 'пиони таша', 'кани ташен' kabi so‘rovlar rasm so‘rovi hisoblanadi va final javobdan oldin doim shu tool chaqiriladi. Catalog id ishlatilmaydi, katalog nomi yoki mijoz yozgan nom bilan chaqiriladi.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Rasmi yuboriladigan katalog nomi, masalan Pushti atirgul buketi"}}, "required": ["query"], "additionalProperties": False}, "strict": True},
-    ]
-
-
-def execute_ai_tool(name, arguments, conversation):
-    if name == "get_catalog":
-        rows = ai_catalog_rows(arguments.get("query", ""))
-        return {"items": rows, "count": len(rows)}
-    if name == "search_stock":
-        return {"items": ai_stock_rows(arguments.get("query", ""))}
-    if name == "get_baskets":
-        return {"items": ai_basket_rows()}
-    if name == "get_recent_orders":
-        return {"items": recent_customer_orders(conversation.customer)}
-    if name == "get_post_context":
-        return {"post": ai_post_context(conversation)}
-    if name == "send_catalog_image":
-        return send_catalog_image_for_conversation(conversation, arguments.get("query"))
-    return {"error": f"Unknown tool: {name}"}
-
-
 def ai_response_schema():
     return {
         "type": "object",
@@ -930,205 +836,8 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s+(Do[‘'ʻ`]?kon manzili:|Manzil:)", r"\n\n\1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\.\s+(Operatorlarimiz siz bilan bog[‘'ʻ`]?lanadi)", r".\n\n\1", normalized, flags=re.IGNORECASE)
-    normalized = normalize_contact_request_phrase(normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
-
-
-def is_accidental_message(text):
-    lowered = (text or "").lower()
-    patterns = ["uzur adash", "uzr adash", "adashib yoz", "xato yoz", "notogri yoz", "noto‘g‘ri yoz", "e'tibor bermang", "etibor bermang"]
-    return any(pattern in lowered for pattern in patterns)
-
-
-def remove_image_offer_after_selection(text):
-    if not text:
-        return ""
-    image_words = ["rasmni yuboraymi", "rasmini yuboraymi", "rasm yuboraymi", "rasmni yuboraman", "rasmini yuboraman", "rasm yuboraman", "rasmini ko‘rsataymi", "rasmini ko'rsataymi", "rasmni ko‘rsataymi", "rasmni ko'rsataymi", "rasmini ko‘rmoqchimisiz", "rasmini ko'rmoqchimisiz", "rasmini kormoqchimisiz", "rasmni ko‘rmoqchimisiz", "rasmni ko'rmoqchimisiz", "rasmni kormoqchimisiz", "rasmni ko‘rsatish", "rasmni ko'rsatish", "rasm ko‘rsatish", "rasm ko'rsatish"]
-    cleaned = text
-    for word in image_words:
-        cleaned = re.sub(rf"(^|[.?!]\s+|\n)[^.?!\n]*{re.escape(word)}[^.?!\n]*[.?!]?", lambda match: match.group(1).strip() if match.group(1).strip() else "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r"[^.?!\n]*\brasm\w*[^.?!\n]*(telefon|raqam|manzil|yetkaz)[^.?!\n]*[.?!]?", "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned or text
-
-
-def clean_image_reply_text(text):
-    if not text:
-        return ""
-    cleaned = re.sub(r"(?i)\bMana,?\s*", "", text).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmni yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasm yuboraman[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmni yuboraymi[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini yuboraymi[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmini ko[‘'ʻ`]?rmoqchimisiz[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*rasmni ko[‘'ʻ`]?rmoqchimisiz[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)\s*rasmi yuborildi[.!\s]*", ". ", cleaned).strip()
-    cleaned = re.sub(r"(?i)\s*rasmini yuborildi[.!\s]*", ". ", cleaned).strip()
-    cleaned = re.sub(r"(?i)\s*rasmini jo[‘'ʻ`]?natdim[.!\s]*", ". ", cleaned).strip()
-    cleaned = re.sub(r"(?i)\s*rasmni jo[‘'ʻ`]?natdim[.!\s]*", ". ", cleaned).strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned or text
-
-
-def clean_overlong_custom_reply_text(text):
-    if not text:
-        return ""
-    cleaned = text
-    if not re.search(r"(?i)\b(katalog|tayyor buket|tayyor variant)", cleaned):
-        cleaned = re.sub(r"(?is)[^.?!\n]*(Mini velvet basket|Premium oq savat|Katta toqima savat)[^.?!]*(?:[.?!]|$)", "Savat kerak bo‘lsa, gul miqdoriga qarab mosini tavsiya qilamiz.", cleaned).strip()
-        cleaned = re.sub(r"(?is)[^.?!\n]*(Klassik floristika|Premium|Rustic|Minimal stems)[^.?!]*(?:[.?!]|$)", "Bezakni floristlarimiz chiroyli qilib moslab beradi.", cleaned).strip()
-    cleaned = re.sub(r"\bTasdiqlaysizmi\??", "Shunday qilib tayyorlab beraylikmi?", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\n*\s*Qaysi biri yoqdi, rasmini ko[‘'ʻ`]?rsataman\??", "", cleaned, flags=re.IGNORECASE).rstrip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned or text
-
-
-def normalize_contact_request_phrase(text):
-    if not text:
-        return ""
-    cleaned = re.sub(r"ism(?:ingiz)?\s+va\s+(?:telefon\s+)?raqam(?:ingiz)?ni\s+(?:yozib\s+)?(?:yuborasizmi|yuboring|qoldiring)", "ism va raqamingizni yozib yuboraolasizmi?", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"telefon\s+raqam(?:ingiz)?ni\s+(?:to[‘'ʻ`]?liq\s+)?(?:yozib\s+)?(?:yuborasizmi|yuboring|qoldiring)", "raqamingizni yozib yuboraolasizmi?", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+\?\s*\.", "?", cleaned)
-    return cleaned
-
-
-def format_money(value):
-    return f"{int(Decimal(str(value))):,}".replace(",", " ")
-
-
-def clean_catalog_order_reply_text(text):
-    if not text:
-        return ""
-    cleaned = text
-    cleaned = re.sub(r"(?i)[^.?!\n]*(o[‘'ʻ`]?lcham|olcham|paket)[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*(custom buketmi|maxsus buketmi|buketmi yoki savatmi|savatmi yoki buketmi)[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)[^.?!\n]*(custom buket|maxsus buket)[^.?!\n]*(qilib|yasab|yig[‘'ʻ`]?ib)[^.?!\n]*[.?!]?", "", cleaned).strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned or text
-
-
-def is_flower_availability_question(text):
-    lowered = compact_match_text(text)
-    availability_words = ["bormi", "bor mi", "борми", "есть", "est", "bormi"]
-    custom_words = ["yasat", "yegdir", "yigdir", "yig ib", "savat", "buket qilib", "qildirmoq"]
-    catalog_words = ["tayyor", "katalog", "vitrina", "story", "post", "reel"]
-    return any(word in lowered for word in availability_words) and not any(word in lowered for word in custom_words + catalog_words)
-
-
-def normalize_flower_availability_reply(result, conversation):
-    last_text = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or ""
-    if not is_flower_availability_question(last_text):
-        return result
-    reply = result.get("reply", "")
-    lowered = compact_match_text(reply)
-    if any(word in lowered for word in ["yo q", "yuq", "нет", "topilmadi", "topolmadim"]):
-        result["reply"] = "Bu gul bo‘yicha ikki xil ko‘rib bera olaman.\n\nVitrinadagi tayyor buketlarni qaraymi yoki sizga shu guldan alohida buket/savat yig‘dirib beraylikmi?"
-        result["catalog_items"] = []
-        result["stock_items"] = []
-        result["lead_ready"] = False
-        result["handoff"] = False
-    return result
-
-
-def catalog_flow_guardrail(result, conversation, recent_catalog):
-    if not recent_catalog:
-        return result
-    latest_text = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or ""
-    if is_price_objection_text(latest_text):
-        result["catalog_items"] = []
-        result["stock_items"] = []
-        result["lead_ready"] = False
-        result["handoff"] = False
-        result["reply"] = "Xohlasangiz operatorlarimiz sizga arzonroq variantlar bilan tanishtiradilar.\n\nIsm va raqamingizni yozib yuboraolasizmi?"
-        return result
-    if is_custom_build_text(latest_text):
-        result["catalog_items"] = []
-        result["arrangement_type"] = "basket" if "savat" in compact_match_text(latest_text) else "bouquet"
-        return result
-    reply = result.get("reply", "")
-    lowered = reply.lower()
-    has_bad_custom_question = any(pattern in lowered for pattern in ["o‘lcham", "olcham", "paket", "custom buket", "maxsus buket", "buketmi yoki savatmi", "savatmi yoki buketmi"])
-    if not has_bad_custom_question:
-        return result
-    customer = conversation.customer
-    last_text = latest_text
-    result["catalog_items"] = [{"catalog_name": recent_catalog.name_uz, "quantity": 1}]
-    result["arrangement_type"] = "catalog"
-    result["estimated_price"] = float(recent_catalog.price)
-    result["lead_ready"] = False
-    result["handoff"] = False
-    if not customer.name:
-        result["reply"] = f"Tushunarli, {recent_catalog.name_uz} uchun yozib oldim.\n\nBuyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
-    elif not customer.phone:
-        result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
-    elif "yetkaz" in compact_match_text(last_text) or re.search(r"\b(ga|ko[‘'ʻ`]?cha|mahalla|dom|uy|xadra|chilonzor|yunusobod|mirzo|bobur)\b", last_text, flags=re.IGNORECASE):
-        result["reply"] = f"Tushunarli, {recent_catalog.name_uz} uchun yetkazib berish ma'lumotini yozib oldim.\n\nQaysi sana va vaqtga kerak?"
-    else:
-        result["reply"] = f"{recent_catalog.name_uz} - {format_money(recent_catalog.price)} so‘m.\n\nYetkazib beraylikmi yoki kelib olib ketasizmi?"
-    return result
-
-
-def remove_premature_catalog_contact_request(text):
-    if not text:
-        return ""
-    lowered = text.lower()
-    catalog_markers = ["katalog", "tayyor buket", "tayyor savat", "tayyor gullar", "tayyor variant", "mavjud variant"]
-    if not any(marker in lowered for marker in catalog_markers):
-        cleaned = re.sub(r"\n*\s*Qaysi biri yoqdi, rasmini ko‘rsataman\??", "", text, flags=re.IGNORECASE).rstrip()
-        cleaned = re.sub(r"(Tasdiqlaganingizdan keyin|Tasdiqlasangiz keyin)\s*$", "", cleaned, flags=re.IGNORECASE).rstrip()
-        return cleaned
-    markers = ["telefon", "raqam", "manzil", "yetkaz"]
-    cleaned = text
-    for separator in [" Yoki ", "\nYoki ", " yoki ", "\nyoki "]:
-        head, sep, tail = cleaned.rpartition(separator)
-        if sep and any(marker in tail.lower() for marker in markers):
-            cleaned = head.rstrip()
-            break
-    lines = cleaned.splitlines()
-    if lines:
-        last = lines[-1]
-        lowered_last = last.lower()
-        marker_positions = [lowered_last.find(marker) for marker in markers if marker in lowered_last]
-        if marker_positions:
-            cut_at = min(marker_positions)
-            lines[-1] = last[:cut_at].rstrip(" .")
-    while lines and any(marker in lines[-1].lower() for marker in markers):
-        lines.pop()
-    cleaned = "\n".join(lines).rstrip()
-    cleaned_lines = cleaned.splitlines()
-    if cleaned != text and (not cleaned_lines or "?" not in cleaned_lines[-1]):
-        cleaned = cleaned.rstrip() + "\n\nQaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman."
-    return cleaned
-
-
-def shorten_ai_reply_text(text, max_sentences=3, max_chars=320):
-    if not text:
-        return ""
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) > 6:
-        lines = lines[:6]
-    shortened = "\n".join(lines)
-    has_catalog_list = bool(re.search(r"(?i)\b(katalog|tayyor buket|tayyor variant)", shortened)) and any(line.startswith(("1)", "1.")) for line in lines)
-    sentences = re.split(r"(?<=[.?!])\s+", shortened)
-    if len(sentences) > max_sentences and not has_catalog_list:
-        shortened = " ".join(sentences[:max_sentences]).strip()
-    if not has_catalog_list and len(shortened) > max_chars:
-        kept = []
-        total = 0
-        for sentence in sentences:
-            next_total = total + len(sentence) + (1 if kept else 0)
-            if next_total > max_chars:
-                break
-            kept.append(sentence)
-            total = next_total
-        if kept:
-            shortened = " ".join(kept).strip()
-        else:
-            cut = shortened[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:-")
-            shortened = cut + "."
-    return shortened
 
 
 def ai_reply(conversation):
@@ -1140,21 +849,6 @@ def ai_reply(conversation):
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
-    if is_accidental_message(last_customer_message):
-        reply_text = "Hechqisi yo‘q. Davom etamizmi?" if has_ai_reply_in_session else "Hechqisi yo‘q. Sizga qanday yordam bera olaman?"
-        return {
-            "reply": reply_text,
-            "detected_language": customer.language or "uz",
-            "customer_name": None,
-            "phone": None,
-            "lead_ready": False,
-            "lead_request": None,
-            "arrangement_type": None,
-            "estimated_price": None,
-            "handoff": False,
-            "catalog_items": [],
-            "stock_items": [],
-        }
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     recent_catalog = recent_catalog_item_for_conversation(conversation)
@@ -1163,6 +857,11 @@ def ai_reply(conversation):
         "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session, "ai_replies_count": ai_replies_count, "last_customer_message": last_customer_message},
         "has_post_context": bool(conversation.social_post_id),
         "recent_catalog_selection": {"name_uz": recent_catalog.name_uz, "type": recent_catalog.arrangement_type, "price": str(recent_catalog.price)} if recent_catalog else None,
+        "catalog": ai_catalog_rows("", limit=60),
+        "stock": ai_stock_rows("", limit=80),
+        "baskets": ai_basket_rows(limit=30),
+        "post_context": ai_post_context(conversation),
+        "recent_orders": recent_customer_orders(customer),
         "rules": {
             "florist_fee": str(business_settings.default_florist_fee),
             "working_hours": SHOP_WORKING_HOURS,
@@ -1171,99 +870,20 @@ def ai_reply(conversation):
             "shop_orientir": SHOP_ORIENTIR,
         },
     }
-    sales_rules = (
-        " Function calling qoidasi: javobni o‘zing yozasan, lekin real ma'lumot kerak bo‘lsa avval function tool chaqir. Salom, rahmat, umumiy savol yoki oddiy aniqlashtirish uchun tool chaqirma."
-        " Umumiy 'qanaqa gullar bor', 'qanday gullar bor', 'gullar bormi', 'nimalar bor', 'tayyor gullar bormi' kabi so‘rovlar tayyor katalog so‘rovi hisoblanadi: get_catalog chaqir, search_stock chaqirma."
-        " Mijoz faqat aniq gul turi bormi deb so‘rasa, masalan 'gortenziya bormi', darrov yo‘q yoki bor deb yopma. Avval bitta aniqlashtiruvchi savol ber: 'Vitrinadagi tayyor buketlarni qaraymi yoki sizga shu guldan alohida buket/savat yig‘dirib beraylikmi?' Bunday bosqichda search_stock ham, get_catalog ham majburiy emas."
-        " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha katalog nomi quantity=1 bo‘lsin."
-        " recent_catalog_selection bo‘lsa va mijoz manzil, sana, vaqt, 'olaman', 'kerak', 'tayyor yasalganni olaman' kabi yozsa, bu tayyor katalog buyurtmasi davomidir. Uni custom yasatish deb talqin qilma."
-        " Tayyor katalog item tanlanganidan keyin o‘lcham, paket, custom buketmi, savatmi, qaysi guldan yasaymiz kabi savollarni hech qachon so‘rama. Tayyor katalog mahsuloti allaqachon yasalgan bo‘ladi."
-        " Tayyor katalog buyurtmasi flowi: avval yetkazib berishmi yoki kelib olib ketishmi aniqlanadi; yetkazish bo‘lsa manzil, sana va vaqt olinadi; keyin ism va telefon olinadi. Mijoz manzil/sana/vaqtni aytgan bo‘lsa qayta so‘rama, faqat qolgan ism yoki telefonni so‘ra."
-        " Tayyor katalog buyurtmasida narx aniq bo‘ladi, florist haqi, o‘lcham, paket yoki tarkibni mijoz so‘ramasa aytma."
-        " Custom yasatish/yig‘dirish konteksti faqat mijoz 'yasatmoqchiman', 'yig‘dirmoqchiman', 'yasab berasizlarmi', 'buket yasatishga', 'savat yasatishga', 'savatga yig‘ib' kabi aniq aytsa boshlanadi. Shundagina search_stock chaqir."
-        " Custom yasatishga qanaqa gullar bor deb so‘ralsa search_stock chaqir, lekin stock narxlarini yozma. Faqat gul nomi, rangi va bo‘yini qisqa sanab, qaysi guldan yig‘ib beraylik deb so‘ra."
-        " Mijoz gul navi farqi, nima uchun qimmatligi, qayerniki, sifati, saqlanishi yoki gul haqida ma'lumot so‘rasa search_stock chaqir va tooldagi description_uz/description_ru asosida qisqa, chiroyli javob ber. Description bo‘lmasa farqni o‘ylab topma, operatorlarimiz aniqroq tushuntirib berishini ayt."
-        " Savat custom kerak bo‘lsa get_baskets chaqir; mijoz savat desa mos savat variantini tanlashni so‘ra yoki gul miqdoriga qarab bitta mos savatni taxminan tavsiya qil. Mijoz buket desa savat variantlarini sanama."
-        " Post/story/reel context kerak bo‘lsa faqat has_post_context=true bo‘lganda get_post_context chaqir."
-        " Katalog ro‘yxati so‘ralganda final catalog_items bo‘sh bo‘lsin, rasm yuborilmaydi. Mijoz aniq tanlaganda yoki rasm so‘raganda catalog_items quantity=1 bo‘lsin."
-        " Katalog ro‘yxatida hech qachon qoldiq soni, nechta borligi yoki 'mavjud: 3 dona' kabi matn yozma. Faqat nomi va narxini yoz."
-        " Katalog ro‘yxatida tarkib, gul navi, rang, qaysi guldan qancha ketgani yoki '50 ta' kabi sonlarni yozma. Bularni faqat mijoz aniq 'tarkibi nima' yoki 'qaysi guldan qancha ketgan' deb so‘rasa ayt."
-        " Katalog ro‘yxatini faqat raqamlangan formatda yoz: '1. Pion buketi - 800 000 so‘m'. Defisli bullet bilan '- Pion buketi' deb boshlama."
-        " Katalog ro‘yxatida har bir qatorda narx yonida albatta 'so‘m' yoz: '1. Pion buketi - 800 000 so‘m'. 'Narxlar so‘mda' deb tepada umumiy yozib, qatorda so‘mni tashlab ketma."
-        " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.' 'Yoki boshqa variant/miqdor kerakmi' deb so‘rama."
-        " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin. 'Ajoyib - custom buyurtma qilasiz', 'Avvalo:' kabi botga o‘xshash kirishlarni yozma."
-        " Custom buket/savat suhbatida mijoz aniq so‘ramasa savat ro‘yxatini, bezak ro‘yxatini, parvarish bo‘yicha uzun maslahatni yoki bir nechta paket/uslub variantini sanama."
-        " Custom yasatishda mijoz aniq gul va miqdorni aytsa qisqa aniqlashtir: 'Buket qilib yig‘dirasizmi yoki savatga joylaymizmi?' Rang noaniq bo‘lsa faqat rangini so‘ra."
-        " Custom buket/savat uchun narx aytilsa faqat taxminiy deb ayt. Florist haqi 50 000 so‘mdan boshlanishini va obyomga qarab o‘zgarishini ayt. Aniq narxni operator hisoblab berishini yoz."
-        " Custom savat hisobida gullar narxi, mos savat va florist haqini taxminiy qo‘shib ayt; keyin 'Aniq narxni operatorimiz hisoblab beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?' deb so‘ra."
-        " Mijoz 'nimaga ism raqam kerak' yoki shunga o‘xshash so‘rasa javob aynan shu mazmunda bo‘lsin: 'Ism va raqamingiz operatorlarimiz sizga aloqaga chiqib, aniq ma'lumotlarni berishi uchun kerak.'"
-        " Mijoz narx qimmatligini, boshqa joyda arzonroq ko‘rganini, skidka yoki arzonroq variant so‘rasa bahslashma, uzun izoh yozma, rasm taklif qilma. Javob aynan shu mazmunda bo‘lsin: 'Xohlasangiz operatorlarimiz sizga arzonroq variantlar bilan tanishtiradilar. Ism va raqamingizni yozib yuboraolasizmi?'"
-        " Mijoz do‘kon manzili, lokatsiya, qayerdaligi, ish vaqti yoki kelib olib ketish haqida so‘rasa mijoz manzilini so‘rama. Do‘kon manzilini yoz: Bobur ko‘chasi 10, lokatsiya linki https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
-        " Mijoz kelib olib ketmoqchi bo‘lsa, ism va telefon olingandan keyingi yakuniy javobda buyurtma qabul qilinganini ayt va do‘kon manzilini alohida blokda yoz: Bobur ko‘chasi 10, https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
-        " Mijoz yetkazib berish narxi, dostavka usuli yoki qanday yetkazishingizni so‘rasa qisqa javob ber: Toshkent bo‘yicha gullarni Yandex Dostavka orqali chiqarib yuboramiz. Yetkazib berish narxini operator manzilga qarab aniqlashtirib beradi."
-        " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
-        " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
-        " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."
-        " Coral Charm, pion, atirgul kabi stock gul nomlarini mijoz custom yasatish kontekstida aytsa, katalogga o‘tkazma. Katalog faqat mijoz tayyor buket/katalog/story/post/reel so‘raganda ishlatiladi."
-        " Tool natijasida gul topilmasa yoki noaniq bo‘lsa, uzun variantlar sanama. 'omborda' dema, 'skladimizda' de. Agar shu gulning boshqa ranglari bor bo‘lsa qisqa yoz: 'Skladimizda oq gortenziya yo‘q edi, o‘rniga pushti va krem gortenziya bor ekan.' Agar umuman topilmasa: 'Bu gul bo‘yicha aniq ma'lumotni operatorlarimiz tekshirib beradi. Ism va raqamingizni yozib yuboraolasizmi?'"
-        " Mijoz aniq gul, miqdor, telefon va manzilni yuborgan bo‘lsa, keyingi savol faqat ism bo‘lsin. Mijoz ismini yozsa lead_ready=true qaytar."
-        " 'Flarisla', 'floristla', 'floristlar', 'florisla' kabi yozuvlar florist xizmatini bildiradi, gul nomi emas. Bunday savolga 'Ha, floristlarimiz chiroyli qilib yig‘ib beradi' deb qisqa javob ber."
-        " Ichki cheklovlarni mijozga yozma: 'so‘ramaymiz', 'taqiqlanadi', 'hozir so‘ramaymiz' kabi iboralarni ishlatma."
-        " Mijoz manzil va telefonni yozgan, lekin ismi yo‘q bo‘lsa, faqat ismini so‘ra. Telefonni qayta so‘rama."
-        " Yetkazish, sana, vaqt va manzilni mijoz buyurtmani aniq tasdiqlamaguncha so‘rama. Custom jarayonda avval gul/rang/miqdor/buket-savatni aniqlashtir."
-        " 'olmaysizmi?' kabi g‘alati savol yozma. 'Yozib yuborasizmi?' yoki 'Tasdiqlaysizmi?' deb yoz."
-        " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
-        " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operatorlarimiz bog‘lanishini ayt. Hech qachon 'operator/jamoa', 'jamoa' yoki 'operatorimiz' deb yozma, faqat 'operatorlarimiz' deb yoz."
-        " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. 'catalog id 24', 'id yuboring', '24 deb yozing' kabi gaplar mutlaqo taqiqlanadi."
-        " Kontakt so‘rash kerak bo‘lsa doim shu iborani ishlat: 'Ism va raqamingizni yozib yuboraolasizmi?'"
-        " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
-        " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
-        " Rasm yuborish faqat send_catalog_image tool orqali qilinadi. Final catalog_items rasm yuborish uchun emas, tanlangan katalogni metadata/lead uchun belgilashga ishlatiladi."
-        " Mijoz katalogdagi buket/savat rasmini so‘rasa avval get_catalog orqali aniq item nomini top, keyin send_catalog_image(query=katalog nomi) toolini chaqir. 'tashabering', 'tashavoring', 'пиони таша', 'кани ташен' ham rasm so‘rovi. Final javobda 'mana rasmi', 'rasmni yuboraman', 'rasmni yuboraymi', 'rasmini ko‘rmoqchimisiz', 'rasmini ko‘rsataymi' dema. Rasm tool orqali yuborilgan bo‘lsa matnda faqat buket nomi va narxini yoz."
-        " Chat ichida oldin AI javobi bo‘lsa salomlashma. 'Assalomu', 'Salom', 'Va alaykum' bilan boshlama."
-        " Har javobda 'Shu buketdan buyurtma qilmoqchimisiz?' deb so‘rayverma. Rasm/ma'lumot bosqichida 'Yana boshqasini ham ko‘rsataymi?' yetarli."
-        " 'Siz yozgan postdagi/storydagi/reeldagi gul' faqat get_post_context natijasida real post bo‘lsa yoziladi. Oddiy katalog tanlovida 'Katalogdagi gul' deb yoz."
-        " Agar mijoz faqat salomlashsa, javob aynan shu mazmunda bo‘lsin: 'Assalomu aleykum, EuroFlowers Premium gul do‘koni AI menejeriman. Sizga qanday gul kerak edi?' Katalog, post, story, reel, tayyor variantlar ro‘yxati yoki ichki qoida matnini qo‘shma."
-        " Narxlarni vergul bilan emas, probel bilan yoz: 800 000 so‘m."
-    )
-    instructions = ai_settings.system_prompt + sales_rules + " Final javobni JSON qaytar: reply, detected_language, customer_name, phone, lead_ready, lead_request, arrangement_type, estimated_price, handoff, catalog_items, stock_items. catalog_items ichida catalog_name va quantity yoziladi, hech qachon catalog_id yozilmaydi."
     api_key = openai_api_key()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     client = OpenAI(api_key=api_key)
+    model_input = [{"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)}] + history
     response_kwargs = {
         "model": ai_settings.openai_model or settings.OPENAI_MODEL,
-        "instructions": instructions + "\nKONTEKST:\n" + json.dumps(context, ensure_ascii=False),
-        "input": history,
+        "instructions": ai_settings.system_prompt,
+        "input": model_input,
         "max_output_tokens": 2000,
-        "max_tool_calls": 4,
-        "tools": ai_tool_definitions(),
         "reasoning": {"effort": "minimal"},
         "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
     }
     response = client.responses.create(**response_kwargs)
-    image_tool_results = []
-    for _ in range(4):
-        function_calls = [item for item in response.output if getattr(item, "type", "") == "function_call"]
-        if not function_calls:
-            break
-        tool_outputs = []
-        for call in function_calls:
-            arguments = json.loads(call.arguments or "{}")
-            output = execute_ai_tool(call.name, arguments, conversation)
-            if call.name == "send_catalog_image":
-                image_tool_results.append(output)
-            tool_outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(output, ensure_ascii=False)})
-        response = client.responses.create(
-            model=ai_settings.openai_model or settings.OPENAI_MODEL,
-            previous_response_id=response.id,
-            input=tool_outputs,
-            max_output_tokens=2000,
-            max_tool_calls=4,
-            tools=ai_tool_definitions(),
-            reasoning={"effort": "minimal"},
-            text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
-        )
     try:
         result = json.loads(response.output_text)
     except json.JSONDecodeError:
@@ -1271,24 +891,8 @@ def ai_reply(conversation):
         response_kwargs["max_output_tokens"] = 4000
         response = client.responses.create(**response_kwargs)
         result = json.loads(response.output_text)
-    response, result, image_tool_results = force_catalog_image_tool_if_needed(client, ai_settings, response, conversation, result, image_tool_results)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
-    if image_tool_results:
-        result["image_tool_results"] = image_tool_results
-    result["reply"] = clean_catalog_listing_text(normalize_ai_reply_text(result.get("reply", "")))
-    if image_tool_results:
-        result["reply"] = clean_image_reply_text(result["reply"])
-    result["reply"] = clean_overlong_custom_reply_text(result["reply"])
-    result = normalize_flower_availability_reply(result, conversation)
-    result = catalog_flow_guardrail(result, conversation, recent_catalog)
-    if not result.get("lead_ready") and len(result.get("catalog_items") or []) != 1:
-        result["catalog_items"] = []
-    if result.get("catalog_items"):
-        result["reply"] = clean_catalog_order_reply_text(remove_image_offer_after_selection(result["reply"]))
-    if not result.get("catalog_items"):
-        result["reply"] = remove_premature_catalog_contact_request(result["reply"])
-    result["reply"] = shorten_ai_reply_text(result["reply"])
     return result
 
 
@@ -1367,162 +971,7 @@ def catalog_item_from_text(conversation, *values):
     return None
 
 
-def is_catalog_image_request_text(text):
-    lowered = compact_match_text(text)
-    return any(pattern in lowered for pattern in ["rasm", "korsat", "ko rsat", "tasha", "tashab", "tashavor", "tashen", "таш", "расм", "корсат", "кани"])
-
-
-def is_price_objection_text(text):
-    lowered = compact_match_text(text)
-    return any(pattern in lowered for pattern in ["qimmat", "киммат", "дорого", "arzon", "арзон", "boshqa joy", "бошка жой", "400 minga", "400 минг"])
-
-
-def is_custom_build_text(text):
-    lowered = compact_match_text(text)
-    return any(pattern in lowered for pattern in ["yegdir", "yegdiraman", "yigdir", "yasat", "yasab ber", "buket qilib", "savatga", "йегдир", "йегдираман", "йигдир", "ясат", "ясаб бер", "букет килиб", "сават"])
-
-
-def required_catalog_image_item(conversation, result=None):
-    latest = recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else ""
-    if not is_catalog_image_request_text(latest):
-        return None
-    result = result or {}
-    item = catalog_item_from_text(conversation, latest, result.get("reply"), result.get("lead_request"))
-    if item:
-        return item
-    return recent_catalog_item_for_conversation(conversation)
-
-
-def force_catalog_image_tool_if_needed(client, ai_settings, response, conversation, result, image_tool_results):
-    if image_tool_results:
-        return response, result, image_tool_results
-    item = required_catalog_image_item(conversation, result)
-    if not item:
-        return response, result, image_tool_results
-    response = client.responses.create(
-        model=ai_settings.openai_model or settings.OPENAI_MODEL,
-        previous_response_id=response.id,
-        input=[{"role": "user", "content": f"Mijoz katalogdagi '{item.name_uz}' rasmini so‘radi. Final JSON javobdan oldin send_catalog_image toolini query='{item.name_uz}' bilan chaqir. Tool ishlagandan keyin reply faqat katalog nomi va narxi bo‘lsin, rasm yuboraman yoki yuboraymi deb yozma."}],
-        max_output_tokens=1200,
-        max_tool_calls=2,
-        tools=ai_tool_definitions(),
-        reasoning={"effort": "minimal"},
-        text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
-    )
-    for _ in range(2):
-        function_calls = [output for output in response.output if getattr(output, "type", "") == "function_call"]
-        if not function_calls:
-            break
-        tool_outputs = []
-        for call in function_calls:
-            arguments = json.loads(call.arguments or "{}")
-            output = execute_ai_tool(call.name, arguments, conversation)
-            if call.name == "send_catalog_image":
-                image_tool_results.append(output)
-            tool_outputs.append({"type": "function_call_output", "call_id": call.call_id, "output": json.dumps(output, ensure_ascii=False)})
-        response = client.responses.create(
-            model=ai_settings.openai_model or settings.OPENAI_MODEL,
-            previous_response_id=response.id,
-            input=tool_outputs,
-            max_output_tokens=1200,
-            max_tool_calls=2,
-            tools=ai_tool_definitions(),
-            reasoning={"effort": "minimal"},
-            text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
-        )
-    parsed = json.loads(response.output_text)
-    return response, parsed, image_tool_results
-
-
-def recent_customer_texts(conversation, limit=6):
-    return list(conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True)[:limit])
-
-
-def is_contact_or_name_text(text, customer=None):
-    value = (text or "").strip()
-    if not value:
-        return True
-    if normalize_phone(value):
-        return True
-    lowered = compact_match_text(value)
-    if any(pattern in lowered for pattern in ["borib", "kelib", "olaman", "opket", "yetkaz", "dastafka", "dostavka", "manzil", "kerak", "ertaga", "bugun", "soat"]):
-        return False
-    if customer and customer.name and compact_match_text(value) == compact_match_text(customer.name):
-        return True
-    return bool(re.fullmatch(r"[A-Za-zА-Яа-яЁёʻ‘'` -]{2,40}", value) and len(value.split()) <= 2)
-
-
-def lead_customer_context_texts(conversation):
-    customer = conversation.customer
-    rows = []
-    for text in reversed(recent_customer_texts(conversation, limit=20)):
-        value = (text or "").strip()
-        lowered = compact_match_text(value)
-        if is_contact_or_name_text(value, customer):
-            continue
-        if any(pattern in lowered for pattern in ["salom", "assalomu", "rasm", "korsat", "ko rsat", "nechpul", "qancha", "dastafka nechpul"]):
-            continue
-        rows.append(value)
-    return rows
-
-
-def extract_lead_fulfillment_note(conversation):
-    texts = lead_customer_context_texts(conversation)
-    joined = compact_match_text(" ".join(texts))
-    if any(pattern in joined for pattern in ["borib ol", "kelib ol", "borb opket", "opket", "olib ket", "do kondan olib", "dokondan olib"]):
-        return "kelib olib ketish"
-    delivery_text = ""
-    for text in reversed(texts):
-        lowered = compact_match_text(text)
-        if any(pattern in lowered for pattern in ["yetkaz", "dostavka", "dastafka", "manzil", "ko cha", "mahalla", "dom", "uy"]) or re.search(r"\b\w+\s+\d+\s+ga\b", lowered):
-            delivery_text = text
-            break
-    if not delivery_text:
-        return ""
-    cleaned = re.sub(r"\b(kerak|bo[‘'ʻ`]?ladi|qiling|qib ber|qilib ber|yetkazib berish|dastafka|dostavka)\b", " ", delivery_text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,-")
-    match = re.match(r"(.+?)\s+ga\s+(.+)$", cleaned, flags=re.IGNORECASE)
-    if match:
-        address = match.group(1).strip(" .,-")
-        time_note = match.group(2).strip(" .,-")
-        if time_note:
-            return f"{address} manzilga yetkazib berish kerak {time_note}"
-        return f"{address} manzilga yetkazib berish kerak"
-    return f"{cleaned} manzilga yetkazib berish kerak" if cleaned else "yetkazib berish kerak"
-
-
-def enrich_lead_request_text(request_text, conversation):
-    base = (request_text or "").strip(" .")
-    note = extract_lead_fulfillment_note(conversation)
-    if not note:
-        return base
-    if note.lower() in base.lower():
-        return base
-    return f"{base}, {note}" if base else note
-
-
-def has_recent_order_intent(conversation):
-    text = compact_match_text(" ".join(recent_customer_texts(conversation)))
-    patterns = ["olaman", "zakaz", "buyurtma", "qvor", "qilvor", "qilib bering", "qiliber", "rasmiylashtir", "shu kerak", "shuni kerak"]
-    return any(pattern in text for pattern in patterns)
-
-
-def is_catalog_browsing_intent(conversation):
-    latest = compact_match_text(recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else "")
-    patterns = ["korsat", "ko rsat", "koʻrsat", "ko rsating", "rasm", "qanaqa", "qanday", "katalog", "bor", "narxi", "qancha"]
-    return any(pattern in latest for pattern in patterns)
-
-
 def normalize_lead_catalog_items(result, conversation):
-    latest_text = recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else ""
-    if is_custom_build_text(latest_text):
-        result["catalog_items"] = []
-        return []
-    inferred = catalog_item_from_text(conversation, result.get("reply"), latest_text, result.get("lead_request"))
-    if inferred:
-        result["catalog_items"] = [{"catalog_id": inferred.id, "quantity": 1}]
-        result["estimated_price"] = float(inferred.price)
-        return result["catalog_items"]
     rows = []
     for row in result.get("catalog_items") or []:
         catalog_id = row.get("catalog_id")
@@ -1531,35 +980,8 @@ def normalize_lead_catalog_items(result, conversation):
             item = catalog_item_from_text(conversation, row.get("catalog_name"))
         if item:
             rows.append({"catalog_id": item.id, "quantity": max(1, int(row.get("quantity") or 1))})
-    if rows:
-        result["catalog_items"] = rows
-        return rows
-    fallback = recent_catalog_item_for_conversation(conversation)
-    if fallback:
-        rows = [{"catalog_id": fallback.id, "quantity": 1}]
-        result["catalog_items"] = rows
-        if not result.get("estimated_price"):
-            result["estimated_price"] = float(fallback.price)
+    result["catalog_items"] = rows
     return rows
-
-
-def fallback_lead_request(result, conversation):
-    catalog_rows = []
-    for row in result.get("catalog_items") or []:
-        item = CatalogItem.objects.filter(id=row.get("catalog_id")).first()
-        if item:
-            catalog_rows.append(f"{item.name_uz} - {int(row.get('quantity') or 1)} dona")
-    if catalog_rows:
-        return "; ".join(catalog_rows)
-    stock_rows = []
-    for row in result.get("stock_items") or []:
-        batch = StockBatch.objects.select_related("variant__flower").filter(id=row.get("batch_id"), branch=conversation.branch).first()
-        quantity = int(row.get("quantity_stems") or 0)
-        if batch and quantity > 0:
-            stock_rows.append(f"{batch.variant.flower.name_uz} {batch.variant.name_uz} - {quantity} dona")
-    if stock_rows:
-        return "; ".join(stock_rows)
-    return conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or result.get("reply") or "Instagram buyurtma"
 
 
 def create_ai_reply_for_conversation(conversation):
@@ -1589,17 +1011,8 @@ def create_ai_reply_for_conversation(conversation):
         changed.append("language")
     if changed:
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
-    request_text_value = (result.get("lead_request") or "").lower()
-    direct_stems_request = result.get("arrangement_type") == "stems" and any(word in request_text_value for word in ["dona", "pochka", "gulni dona", "gulni pochka", "gulni o‘zi", "gulni o'zi"])
-    if direct_stems_request:
-        result["estimated_price"] = None
-        result["stock_items"] = []
     if result.get("catalog_items"):
         normalize_lead_catalog_items(result, conversation)
-    if result.get("lead_ready") and is_catalog_browsing_intent(conversation) and not has_recent_order_intent(conversation):
-        result["lead_ready"] = False
-        result["handoff"] = False
-        result["lead_request"] = None
     if result.get("lead_ready") and not customer.name:
         result["lead_ready"] = False
         result["reply"] = "Buyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
@@ -1609,13 +1022,6 @@ def create_ai_reply_for_conversation(conversation):
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
     if result.get("lead_ready"):
         normalize_lead_catalog_items(result, conversation)
-        request_catalog = catalog_item_from_text(conversation, result.get("lead_request"))
-        selected_catalog_id = (result.get("catalog_items") or [{}])[0].get("catalog_id")
-        if selected_catalog_id and (not request_catalog or request_catalog.id != selected_catalog_id):
-            result["lead_request"] = None
-        if not result.get("lead_request"):
-            result["lead_request"] = fallback_lead_request(result, conversation)
-        result["lead_request"] = enrich_lead_request_text(result["lead_request"], conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("lead_ready") and result.get("lead_request"):
         request_text = result["lead_request"]
