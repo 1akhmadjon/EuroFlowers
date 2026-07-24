@@ -5,7 +5,7 @@ from django.conf import settings
 from django.db.models import Q
 
 from .models import Branch, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
-from .platform_services import find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
+from .platform_services import find_active_story_by_media_url, find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
 from .services import ingest_customer_message
 
 
@@ -92,6 +92,31 @@ def first_string_from_keys(data, keys):
 
 def social_post_media_query(media_id):
     return Q(media_id=media_id) | Q(story_share_id=media_id) | Q(webhook_story_id=media_id) | Q(webhook_story_id__contains=media_id)
+
+
+def social_post_url_query(url):
+    normalized = normalize_instagram_permalink(url)
+    asset_id = media_id_from_url(url)
+    query = Q()
+    if normalized:
+        query |= Q(permalink__startswith=normalized) | Q(webhook_story_url__startswith=normalized) | Q(catalog_items__instagram_story_url__startswith=normalized)
+    if asset_id:
+        query |= Q(media_id=asset_id) | Q(story_share_id=asset_id) | Q(webhook_story_id__contains=asset_id) | Q(webhook_story_url__contains=asset_id) | Q(permalink__contains=asset_id) | Q(catalog_items__instagram_story_url__contains=asset_id)
+    return query
+
+
+def social_post_by_media_or_url(media_id="", url="", branch=None):
+    query = Q()
+    if media_id:
+        query |= social_post_media_query(str(media_id))
+    if url:
+        query |= social_post_url_query(url)
+    if not query:
+        return None
+    queryset = SocialPost.objects.filter(query, is_active=True).distinct()
+    if branch:
+        queryset = queryset.filter(branch=branch)
+    return queryset.order_by("-updated_at", "-created_at").first()
 
 
 def append_story_webhook_id(post, story_id):
@@ -193,9 +218,9 @@ def link_story_post_from_event(webhook_event, branch=None):
     if not webhook_event or webhook_event.event_type not in ["story_reply", "story_send"]:
         return None
     story_id = webhook_event.story_id or webhook_event.media_id
-    if not story_id:
-        return None
-    exact = SocialPost.objects.filter(social_post_media_query(story_id), is_active=True).first()
+    if not story_id and webhook_event.story_url:
+        story_id = media_id_from_url(webhook_event.story_url)
+    exact = social_post_by_media_or_url(story_id, webhook_event.story_url, branch)
     if exact:
         updates = []
         if append_story_webhook_id(exact, story_id):
@@ -206,6 +231,33 @@ def link_story_post_from_event(webhook_event, branch=None):
         if updates:
             exact.save(update_fields=updates + ["updated_at"])
         return exact
+    story = None
+    if webhook_event.story_url:
+        try:
+            story = find_active_story_by_media_url(webhook_event.story_url)
+        except Exception as exc:
+            print(f"INSTAGRAM_ACTIVE_STORY_LOOKUP_FAILED webhook_event_id={webhook_event.id} error={exc}", flush=True)
+    if story:
+        story_permalink = story.get("permalink", "")
+        story_api_id = str(story.get("id", ""))
+        post = social_post_by_media_or_url(story_api_id, story_permalink, branch)
+        if post:
+            updates = []
+            for value in [story_id, story_api_id]:
+                if append_story_webhook_id(post, value):
+                    updates.append("webhook_story_id")
+            if webhook_event.story_url and post.webhook_story_url != webhook_event.story_url:
+                post.webhook_story_url = webhook_event.story_url
+                updates.append("webhook_story_url")
+            if story_permalink and not post.permalink:
+                post.permalink = story_permalink
+                updates.append("permalink")
+            if updates:
+                post.save(update_fields=sorted(set(updates + ["updated_at"])))
+            print(f"INSTAGRAM_STORY_LINKED social_post_id={post.id} story_id={story_id} active_story_id={story_api_id} webhook_event_id={webhook_event.id}", flush=True)
+            return post
+    if not story_id:
+        return None
     queryset = SocialPost.objects.filter(post_type="story", is_active=True, webhook_story_id="")
     if branch:
         queryset = queryset.filter(branch=branch)
@@ -225,20 +277,19 @@ def link_media_post_from_event(webhook_event):
         return None
     media_id = webhook_event.media_id
     if media_id:
-        exact = SocialPost.objects.filter(media_id=media_id, is_active=True).first()
+        exact = social_post_by_media_or_url(media_id, "", None)
         if exact:
             return exact
         media = find_media_by_id(media_id)
         if media:
-            exact = SocialPost.objects.filter(permalink=media.get("permalink", ""), is_active=True).first()
+            exact = social_post_by_media_or_url(media_id, media.get("permalink", ""), None)
             if exact:
                 if exact.media_id != media_id:
                     exact.media_id = media_id
                     exact.save(update_fields=["media_id", "updated_at"])
                 return exact
     if webhook_event.story_url:
-        normalized = normalize_instagram_permalink(webhook_event.story_url)
-        exact = SocialPost.objects.filter(permalink__startswith=normalized, is_active=True).first()
+        exact = social_post_by_media_or_url(media_id, webhook_event.story_url, None)
         if exact and media_id and exact.media_id != media_id and not SocialPost.objects.filter(media_id=media_id).exclude(pk=exact.pk).exists():
             exact.media_id = media_id
             exact.save(update_fields=["media_id", "updated_at"])
@@ -270,7 +321,7 @@ def resolve_instagram_event(payload):
                 continue
             referral = event.get("referral") or message.get("referral") or {}
             media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
-            post = SocialPost.objects.filter(social_post_media_query(media_id), is_active=True).first() if media_id else None
+            post = social_post_by_media_or_url(media_id, "", branch)
             if not post:
                 post = link_story_post_from_event(webhook_event, branch)
             if not post:

@@ -162,6 +162,27 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(lead.source, "telegram")
         self.assertTrue(LeadCatalogUsage.objects.filter(lead=lead, catalog_item=self.item, quantity=1).exists())
 
+    def test_client_lead_edit_infers_pickup_when_request_text_missing(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:12", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        lead = Lead.objects.create(customer=customer, branch=self.branch, conversation=conversation, request_uz="Pion buketi 1 dona katalogdan. kelib olish yoki yetkazib berish tanlanmagan.")
+        conversation.messages.create(sender="customer", text="borib olaman")
+        result = execute_ai_tool("client_lead_edit", {
+            "lead_id": lead.id,
+            "customer_name": "Ahmad",
+            "phone": "901234567",
+            "request_text": None,
+            "status": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "catalog_items": None,
+            "stock_items": None,
+            "note": None,
+        }, conversation)
+        self.assertTrue(result["ok"])
+        lead.refresh_from_db()
+        self.assertIn("Mijoz kelib olib ketadi.", lead.request_uz)
+
     def test_ai_stock_rows_matches_long_price_query(self):
         rows = ai_stock_rows("Mondial oq atirgul narxi va mavjudlik 10 dona", limit=10)
         self.assertTrue(any(row["batch_id"] == self.batch.id for row in rows))
@@ -297,6 +318,61 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Story link: https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg", message.text)
         self.assertEqual(message.metadata["attachments"][0]["kind"], "story")
         self.assertEqual(message.metadata["attachments"][0]["url"], "https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg")
+
+    def test_instagram_story_reply_links_catalog_by_active_story_asset_url(self):
+        post = SocialPost.objects.create(
+            branch=self.branch,
+            post_type="story",
+            media_id="story-share-3946136376066774555",
+            permalink="https://www.instagram.com/stories/extra_teest/3946136376066774555/",
+            story_share_id="3946136376066774555",
+            webhook_story_id="17900000000000000",
+            title_uz="Pion buketi",
+            title_ru="Pion bouquet",
+            price=800000,
+            is_active=True,
+        )
+        CatalogItem.objects.create(
+            branch=self.branch,
+            social_post=post,
+            name_uz="Pion buketi",
+            name_ru="Pion bouquet",
+            arrangement_type="bouquet",
+            price=800000,
+            status="available",
+        )
+        payload = {
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig-user-story-asset"},
+                    "recipient": {"id": "ig-business"},
+                    "message": {
+                        "mid": "mid-story-asset-1",
+                        "text": "shu nechpul",
+                        "reply_to": {
+                            "story": {
+                                "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18151925590500461&signature=test",
+                            }
+                        },
+                    },
+                }],
+            }],
+        }
+        from unittest.mock import patch
+
+        with patch("core.webhook_services.find_active_story_by_media_url", return_value={
+            "id": "18151925590500461",
+            "media_url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18151925590500461&signature=live",
+            "permalink": "https://www.instagram.com/stories/extra_teest/3946136376066774555/",
+        }):
+            jobs = resolve_instagram_event(payload)
+        self.assertEqual(len(jobs), 1)
+        conversation = Conversation.objects.get(customer__instagram_user_id="ig-user-story-asset")
+        message = Message.objects.get(instagram_message_id="mid-story-asset-1")
+        post.refresh_from_db()
+        self.assertEqual(conversation.social_post_id, post.id)
+        self.assertIn("18151925590500461", post.webhook_story_id)
+        self.assertNotIn("bazadagi story/post/reel katalogiga bog‘lanmagan", message.text)
 
     def test_unknown_instagram_media_clears_previous_post_context(self):
         old_post = SocialPost.objects.create(branch=self.branch, post_type="reel", media_id="old-pion", title_uz="Pion buket", title_ru="Pion", is_active=True)
@@ -621,6 +697,12 @@ class ApiTests(TestCase):
         }
         response = self.client.post("/api/catalog/", payload, format="json")
         self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("Katalogni saqlash uchun sklad qoldig'i yetarli emas.", data["detail"][0])
+        self.assertIn("Gul: Atirgul API Freedom Qizil", data["detail"][0])
+        self.assertIn("Kerak: 120 dona", data["detail"][0])
+        self.assertIn("Bor: 100 dona", data["detail"][0])
+        self.assertIn("Yetmayapti: 20 dona", data["detail"][0])
 
     def test_flower_delete_archives_when_variants_exist(self):
         flower = Flower.objects.create(name_uz="Liliya", name_ru="Лилия", slug="lily-delete")

@@ -256,6 +256,21 @@ class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["quantity_sold", "quantity_stock_deducted"]
 
 
+def catalog_stock_error(batch, needed):
+    remaining = batch.remaining_stems
+    missing = max(needed - remaining, 0)
+    variant = batch.variant
+    flower_name = " ".join(part for part in [variant.flower.name_uz, variant.name_uz, variant.color_uz] if part).strip()
+    return (
+        "Katalogni saqlash uchun sklad qoldig'i yetarli emas.\n"
+        f"Gul: {flower_name}\n"
+        f"Partiya: {batch.batch_number}\n"
+        f"Kerak: {needed} dona\n"
+        f"Bor: {remaining} dona\n"
+        f"Yetmayapti: {missing} dona"
+    )
+
+
 class SocialPostSerializer(serializers.ModelSerializer):
     reply_count = serializers.IntegerField(read_only=True)
     lead_count = serializers.IntegerField(read_only=True)
@@ -358,7 +373,8 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({"catalog_items": f"{batch.batch_number} boshqa filialga tegishli"})
                 needed = row["quantity_stems"] * quantity_total
                 if batch.remaining_stems < needed:
-                    raise serializers.ValidationError({"catalog_items": f"{batch.batch_number} partiyada yetarli qoldiq yo‘q. Kerak: {needed}, bor: {batch.remaining_stems}"})
+                    detail = catalog_stock_error(batch, needed)
+                    raise serializers.ValidationError({"detail": detail, "catalog_items": detail})
 
     def validate(self, attrs):
         attrs.setdefault("branch", default_branch())
@@ -427,7 +443,8 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 batch = row["stock_batch"]
                 needed = row["quantity_stems"] * quantity_total
                 if batch.remaining_stems < needed:
-                    raise serializers.ValidationError({"composition": f"{batch.batch_number} partiyada yetarli qoldiq yo‘q. Kerak: {needed}, bor: {batch.remaining_stems}"})
+                    detail = catalog_stock_error(batch, needed)
+                    raise serializers.ValidationError({"detail": detail, "composition": detail})
         quantity_sold = getattr(self.instance, "quantity_sold", 0)
         if quantity_total < quantity_sold:
             raise serializers.ValidationError({"quantity_total": "Umumiy son sotilgan sondan kam bo‘lishi mumkin emas"})

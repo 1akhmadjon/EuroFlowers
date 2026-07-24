@@ -89,6 +89,20 @@ def find_active_story_by_permalink(permalink):
     return None
 
 
+def find_active_story_by_media_url(media_url):
+    normalized = normalize_instagram_permalink(media_url)
+    asset_id = media_id_from_url(media_url)
+    if not normalized and not asset_id:
+        return None
+    for story in instagram_active_stories():
+        story_media_url = story.get("media_url", "")
+        if asset_id and media_id_from_url(story_media_url) == asset_id:
+            return story
+        if normalized and normalize_instagram_permalink(story_media_url) == normalized:
+            return story
+    return None
+
+
 def find_media_by_permalink(permalink):
     normalized = normalize_instagram_permalink(permalink)
     if not normalized:

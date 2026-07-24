@@ -224,7 +224,7 @@ def ai_post_context(conversation):
     if not conversation.social_post_id:
         return None
     post = conversation.social_post
-    post_catalog = CatalogItem.objects.filter(social_post=post, status="available")
+    post_catalog = CatalogItem.objects.filter(social_post=post, status="available").prefetch_related("composition__stock_batch__variant__flower")
     return {
         "type": post.post_type,
         "title_uz": post.title_uz,
@@ -232,7 +232,19 @@ def ai_post_context(conversation):
         "description_uz": post.description_uz,
         "description_ru": post.description_ru,
         "price": str(post.price or ""),
-        "catalog": [{"name_uz": row.name_uz, "name_ru": row.name_ru, "type": row.arrangement_type, "price": str(row.price), "has_image": bool(row.image_url)} for row in post_catalog],
+        "catalog": [{
+            "name_uz": row.name_uz,
+            "name_ru": row.name_ru,
+            "type": row.arrangement_type,
+            "description_uz": row.description_uz,
+            "description_ru": row.description_ru,
+            "height_cm": row.height_cm,
+            "diameter_cm": row.diameter_cm,
+            "price": str(row.price),
+            "has_image": bool(row.image_url or post.image_url),
+            "image_url": row.image_url or post.image_url,
+            "composition": catalog_composition_summary(row),
+        } for row in post_catalog],
     }
 
 
@@ -476,6 +488,10 @@ def execute_ai_tool(name, arguments, conversation):
         if not lead:
             return {"ok": False, "detail": "lead_not_found"}
         fields = []
+        if not request_text:
+            latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+            if latest_customer_message and pickup_requested(latest_customer_message.text):
+                request_text = append_lead_request_text(lead.request_uz, "Mijoz kelib olib ketadi.")
         if request_text:
             lead.request_uz = request_text
             fields.append("request_uz")
@@ -745,6 +761,28 @@ def _catalog_item_for_ai(*values):
                 if len(matches) == 1:
                     return item
     return None
+
+
+def pickup_requested(text):
+    compact = compact_match_text(text)
+    phrases = [
+        "borib olaman",
+        "kelib olaman",
+        "olib ketaman",
+        "ozim olib ketaman",
+        "o zim olib ketaman",
+    ]
+    return any(phrase in compact for phrase in phrases)
+
+
+def append_lead_request_text(current, addition):
+    current = (current or "").strip()
+    addition = (addition or "").strip()
+    if not addition:
+        return current
+    if addition.lower() in current.lower():
+        return current
+    return f"{current}\n{addition}".strip() if current else addition
 
 
 def create_ai_reply_for_conversation(conversation):
