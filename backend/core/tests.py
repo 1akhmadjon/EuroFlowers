@@ -59,6 +59,14 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(normalize_phone("+99867"), "")
         self.assertEqual(normalize_phone("67"), "")
 
+    def test_ai_catalog_generic_query_returns_available_items(self):
+        from .services import ai_catalog_rows
+        self.item.status = "available"
+        self.item.save(update_fields=["status", "updated_at"])
+        rows = ai_catalog_rows("vitrina")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name_uz"], "Oq buket")
+
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
