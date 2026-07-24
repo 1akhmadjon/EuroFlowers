@@ -193,8 +193,17 @@ class ScopedViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         before = instance_snapshot(instance)
-        write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_deleted", instance, before=before, after={})
-        instance.delete()
+        try:
+            instance.delete()
+            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_deleted", instance, before=before, after={})
+        except ProtectedError:
+            field_names = {field.name for field in instance._meta.fields}
+            if "is_active" not in field_names:
+                raise
+            instance.is_active = False
+            instance.save(update_fields=["is_active", "updated_at"])
+            before_changed, after_changed = changed_snapshot(before, instance_snapshot(instance))
+            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_archived", instance, before=before_changed, after=after_changed)
 
 
 class BranchViewSet(ScopedViewSet):
@@ -282,6 +291,21 @@ class FlowerViewSet(ScopedViewSet):
     serializer_class = FlowerSerializer
     search_fields = ["name_uz", "name_ru"]
 
+    def perform_destroy(self, instance):
+        before = instance_snapshot(instance)
+        try:
+            instance.delete()
+            write_audit(self.request.user, "flower_deleted", instance, before=before, after={})
+        except ProtectedError:
+            instance.is_active = False
+            instance.save(update_fields=["is_active", "updated_at"])
+            archived_variants = list(instance.variants.filter(is_active=True).values_list("id", flat=True))
+            instance.variants.filter(is_active=True).update(is_active=False, updated_at=timezone.now())
+            after = instance_snapshot(instance)
+            after["archived_variants"] = archived_variants
+            before_changed, after_changed = changed_snapshot(before, after)
+            write_audit(self.request.user, "flower_archived", instance, before=before_changed, after=after_changed)
+
 
 class FlowerVariantViewSet(ScopedViewSet):
     permission_page = "inventory"
@@ -290,6 +314,17 @@ class FlowerVariantViewSet(ScopedViewSet):
     serializer_class = FlowerVariantSerializer
     filterset_fields = ["flower", "is_active"]
     search_fields = ["name_uz", "name_ru", "color_uz", "color_ru", "flower__name_uz", "flower__name_ru"]
+
+    def perform_destroy(self, instance):
+        before = instance_snapshot(instance)
+        try:
+            instance.delete()
+            write_audit(self.request.user, "flowervariant_deleted", instance, before=before, after={})
+        except ProtectedError:
+            instance.is_active = False
+            instance.save(update_fields=["is_active", "updated_at"])
+            before_changed, after_changed = changed_snapshot(before, instance_snapshot(instance))
+            write_audit(self.request.user, "flowervariant_archived", instance, before=before_changed, after=after_changed)
 
 
 class StockBatchViewSet(ScopedViewSet):

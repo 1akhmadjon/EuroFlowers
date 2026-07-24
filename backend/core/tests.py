@@ -807,6 +807,24 @@ class ApiTests(TestCase):
         response = self.client.post("/api/catalog/", payload, format="json")
         self.assertEqual(response.status_code, 400)
 
+    def test_flower_delete_archives_when_variants_exist(self):
+        flower = Flower.objects.create(name_uz="Liliya", name_ru="Лилия", slug="lily-delete")
+        FlowerVariant.objects.create(flower=flower, name_uz="Oriental", name_ru="Oriental", color_uz="Oq", color_ru="Белый")
+        response = self.client.delete(f"/api/flowers/{flower.id}/")
+        self.assertEqual(response.status_code, 204)
+        flower.refresh_from_db()
+        self.assertFalse(flower.is_active)
+        self.assertFalse(flower.variants.first().is_active)
+        self.assertTrue(AuditLog.objects.filter(action="flower_archived", entity_id=str(flower.id)).exists())
+
+    def test_flower_variant_delete_archives_when_stock_batches_exist(self):
+        variant_id = self.batch.variant_id
+        response = self.client.delete(f"/api/flower-variants/{variant_id}/")
+        self.assertEqual(response.status_code, 204)
+        variant = FlowerVariant.objects.get(id=variant_id)
+        self.assertFalse(variant.is_active)
+        self.assertTrue(AuditLog.objects.filter(action="flowervariant_archived", entity_id=str(variant_id)).exists())
+
     def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
         packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", name_ru="Lead basket", quantity=2, sale_price=50000)
         payload = {
