@@ -28,6 +28,11 @@ def normalize_phone(value):
     return ""
 
 
+def valid_customer_name(value):
+    text = (value or "").strip()
+    return bool(text) and compact_match_text(text) not in {"", "unknown", "nomalum", "noma lum"}
+
+
 def catalog_composition_summary(item):
     rows = []
     for row in item.composition.select_related("stock_batch__variant__flower"):
@@ -439,14 +444,14 @@ def execute_ai_tool(name, arguments, conversation):
             sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
         elif customer.instagram_user_id:
             sent = instagram_send_image(customer.instagram_user_id, image_url)
-        Message.objects.create(conversation=conversation, sender="ai", text=f"Rasm yuborildi: {image_url}", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
+        Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
         return {"ok": True, "image_sent": True, "catalog_name": item.name_uz, "image_url": image_url}
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}
     name_value = (arguments.get("customer_name") or "").strip()
     phone_value = normalize_phone(arguments.get("phone") or "")
     customer_changed = []
-    if name_value and not customer.name:
+    if valid_customer_name(name_value) and not valid_customer_name(customer.name):
         customer.name = name_value[:160]
         customer_changed.append("name")
     if phone_value:
@@ -502,7 +507,7 @@ def execute_ai_tool(name, arguments, conversation):
         return {"ok": True, "lead_id": lead.id}
     if not request_text:
         return {"ok": False, "detail": "request_text_required"}
-    if not customer.name:
+    if not valid_customer_name(customer.name):
         return {"ok": False, "detail": "customer_name_required"}
     if not customer.phone:
         return {"ok": False, "detail": "phone_required"}
@@ -575,7 +580,7 @@ def ai_reply(conversation):
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
         "customer": {
-            "name": customer.name,
+            "name": customer.name if valid_customer_name(customer.name) else "",
             "phone": customer.masked_phone,
             "has_phone": bool(customer.phone),
             "language": customer.language,
@@ -754,7 +759,7 @@ def create_ai_reply_for_conversation(conversation):
     result = ai_reply(conversation)
     customer = conversation.customer
     changed = []
-    if result.get("customer_name") and not customer.name:
+    if valid_customer_name(result.get("customer_name")) and not valid_customer_name(customer.name):
         customer.name = result["customer_name"][:160]
         changed.append("name")
     phone = normalize_phone(result.get("phone"))
@@ -768,7 +773,7 @@ def create_ai_reply_for_conversation(conversation):
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
     if result.get("lead_created_id"):
         result["lead_ready"] = False
-    if result.get("lead_ready") and not customer.name:
+    if result.get("lead_ready") and not valid_customer_name(customer.name):
         result["lead_ready"] = False
         result["reply"] = "Buyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
     elif result.get("lead_ready") and not customer.phone:

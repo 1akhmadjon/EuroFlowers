@@ -347,13 +347,7 @@ def resolve_telegram_update(payload):
         return []
     external_id = f"telegram:{user_id}"
     defaults = {"branch": branch, "language": "uz"}
-    full_name = " ".join(part for part in [user.get("first_name", ""), user.get("last_name", "")] if part).strip()
-    if full_name:
-        defaults["name"] = full_name[:160]
     customer, created = Customer.objects.get_or_create(instagram_user_id=external_id, defaults=defaults)
-    if not created and full_name and not customer.name:
-        customer.name = full_name[:160]
-        customer.save(update_fields=["name", "updated_at"])
     conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
     if not conversation:
         conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch)

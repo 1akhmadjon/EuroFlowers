@@ -256,7 +256,7 @@ class BusinessRulesTests(TestCase):
         jobs = resolve_telegram_update(payload)
         self.assertEqual(len(jobs), 1)
         customer = Customer.objects.get(instagram_user_id="telegram:999")
-        self.assertEqual(customer.name, "Ali Valiyev")
+        self.assertEqual(customer.name, "")
         self.assertTrue(Conversation.objects.filter(customer=customer).exists())
         self.assertTrue(Message.objects.filter(conversation__customer=customer, text="Assalomu alaykum", instagram_message_id="telegram:555:77").exists())
         self.assertEqual(resolve_telegram_update(payload), [])
