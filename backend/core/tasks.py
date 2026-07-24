@@ -54,7 +54,7 @@ def keep_typing(send_action, stop_event, error_label, interval=4):
 def process_instagram_webhook(payload):
     jobs = resolve_instagram_event(payload)
     for job in jobs:
-        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=5)
+        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=8)
     return jobs
 
 
@@ -85,7 +85,7 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
 def process_telegram_webhook(payload):
     jobs = resolve_telegram_update(payload)
     for job in jobs:
-        process_delayed_telegram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["chat_id"]], countdown=5)
+        process_delayed_telegram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["chat_id"]], countdown=8)
     return jobs
 
 
