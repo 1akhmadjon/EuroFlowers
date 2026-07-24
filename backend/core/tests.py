@@ -123,6 +123,17 @@ class BusinessRulesTests(TestCase):
     def test_ai_tool_definitions_are_whitelisted(self):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image"})
 
+    def test_get_catalog_tool_filters_baskets(self):
+        basket = CatalogItem.objects.create(branch=self.branch, name_uz="Oq savat", name_ru="Белая корзина", arrangement_type="basket", price=700000, status="available")
+        self.item.status = "available"
+        self.item.save(update_fields=["status", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:11")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": "basket"}, conversation)
+        names = {row["name_uz"] for row in result["catalog"]}
+        self.assertIn(basket.name_uz, names)
+        self.assertNotIn(self.item.name_uz, names)
+
     def test_client_lead_create_tool_creates_customer_lead_and_usage(self):
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
@@ -300,7 +311,7 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Qaysi manzilga", messages[1])
 
     def test_new_location_reply_splits_after_confirmation(self):
-        text = "Rahmat, buyurtmangiz qabul qilindi.\n\nManzil: Bobur ko‘chasi 10\nhttps://yandex.uz/maps/-/CTbofDyT\nIsh vaqti: 24/7"
+        text = "Rahmat, buyurtmangiz qabul qilindi.\n\nManzil: Bobur ko‘chasi 10\nhttps://yandex.uz/maps/-/CTfQ6TMD\nIsh vaqti: 24/7"
         messages = split_location_reply(text)
         self.assertEqual(messages[0], "Rahmat, buyurtmangiz qabul qilindi.")
         self.assertIn("Bobur", messages[1])

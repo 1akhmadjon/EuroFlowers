@@ -14,7 +14,7 @@ from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem,
 
 
 SHOP_ADDRESS = "Bobur ko‘chasi 10"
-SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTbofDyT"
+SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTfQ6TMD"
 SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
 SHOP_WORKING_HOURS = "24/7"
 
@@ -677,8 +677,10 @@ def recent_customer_orders(customer):
     return orders
 
 
-def ai_catalog_rows(query="", limit=24):
+def ai_catalog_rows(query="", limit=24, arrangement_type=""):
     queryset = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
+    if arrangement_type in ["bouquet", "basket", "box"]:
+        queryset = queryset.filter(arrangement_type=arrangement_type)
     if query:
         queryset = queryset.filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
     rows = []
@@ -946,8 +948,11 @@ def ai_tool_definitions():
             "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish.",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "box", None]},
+                },
+                "required": ["query", "arrangement_type"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -997,7 +1002,7 @@ def execute_ai_tool(name, arguments, conversation):
         limit = max(1, min(int(arguments.get("limit") or 5), 20))
         return {"leads": recent_customer_orders(customer)[:limit]}
     if name == "get_catalog":
-        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80)}
+        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "")}
     if name == "get_stock":
         return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100), "baskets": ai_basket_rows(limit=30)}
     if name == "get_flower_variant_info":
