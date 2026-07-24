@@ -96,6 +96,8 @@ def find_active_story_by_media_url(media_url):
         return None
     for story in instagram_active_stories():
         story_media_url = story.get("media_url", "")
+        if asset_id and str(story.get("id", "")) == asset_id:
+            return story
         if asset_id and media_id_from_url(story_media_url) == asset_id:
             return story
         if normalized and normalize_instagram_permalink(story_media_url) == normalized:
