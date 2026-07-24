@@ -105,6 +105,8 @@ class StockBatch(TimeStampedModel):
     batch_number = models.CharField(max_length=40)
     received_at = models.DateField(default=timezone.localdate)
     height_cm = models.PositiveIntegerField()
+    height_from_cm = models.PositiveIntegerField(null=True, blank=True)
+    height_to_cm = models.PositiveIntegerField(null=True, blank=True)
     stems_per_bunch = models.PositiveIntegerField(default=10)
     received_stems = models.PositiveIntegerField()
     remaining_stems = models.PositiveIntegerField()
@@ -123,6 +125,13 @@ class StockBatch(TimeStampedModel):
     @property
     def remaining_bunches(self):
         return self.remaining_stems // self.stems_per_bunch
+
+    @property
+    def height_label(self):
+        if self.height_from_cm and self.height_to_cm and self.height_from_cm != self.height_to_cm:
+            return f"{self.height_from_cm}-{self.height_to_cm} sm"
+        height = self.height_from_cm or self.height_to_cm or self.height_cm
+        return f"{height} sm"
 
     @property
     def stock_value(self):

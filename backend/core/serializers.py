@@ -173,17 +173,37 @@ class StockBatchSerializer(serializers.ModelSerializer):
     variant_detail = FlowerVariantSerializer(source="variant", read_only=True)
     remaining_bunches = serializers.IntegerField(read_only=True)
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    height_label = serializers.CharField(read_only=True)
+
     class Meta:
         model = StockBatch
         exclude = ["branch"]
 
     def to_internal_value(self, data):
+        data = data.copy()
         if getattr(self, "partial", False):
-            data = data.copy()
             for key, value in list(data.items()):
                 if value == "":
                     data.pop(key)
+        if not data.get("height_cm") and data.get("height_from_cm"):
+            data["height_cm"] = data["height_from_cm"]
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        height_cm = attrs.get("height_cm") or getattr(self.instance, "height_cm", None)
+        height_from = attrs.get("height_from_cm")
+        height_to = attrs.get("height_to_cm")
+        if height_from and height_to and height_from > height_to:
+            raise serializers.ValidationError({"height_to_cm": "Bo‘y oralig‘i noto‘g‘ri: height_to_cm height_from_cm dan katta yoki teng bo‘lishi kerak."})
+        if height_from and not height_to:
+            attrs["height_to_cm"] = height_from
+        if height_to and not height_from:
+            attrs["height_from_cm"] = height_to
+        if not height_from and not height_to and height_cm:
+            attrs.setdefault("height_from_cm", height_cm)
+            attrs.setdefault("height_to_cm", height_cm)
+        return attrs
 
     def create(self, validated_data):
         validated_data.setdefault("branch", default_branch())

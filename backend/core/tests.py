@@ -834,6 +834,28 @@ class ApiTests(TestCase):
         self.assertFalse(variant.is_active)
         self.assertTrue(AuditLog.objects.filter(action="flowervariant_archived", entity_id=str(variant_id)).exists())
 
+    def test_stock_batch_accepts_height_range_without_height_cm(self):
+        payload = {
+            "variant": self.batch.variant_id,
+            "batch_number": "API-RANGE-1",
+            "height_from_cm": 50,
+            "height_to_cm": 60,
+            "stems_per_bunch": 20,
+            "received_stems": 40,
+            "remaining_stems": 40,
+            "cost_per_stem": "10000.00",
+            "sale_price_per_stem": "20000.00",
+            "sale_price_per_bunch": "400000.00",
+            "minimum_sale_stems": 5,
+        }
+        response = self.client.post("/api/stock-batches/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["height_cm"], 50)
+        self.assertEqual(data["height_from_cm"], 50)
+        self.assertEqual(data["height_to_cm"], 60)
+        self.assertEqual(data["height_label"], "50-60 sm")
+
     def test_ai_stock_rows_include_variant_description(self):
         variant = self.batch.variant
         variant.description_uz = "Premium import gortenziya, boshi yirikroq va rangi to‘qroq."
@@ -842,6 +864,15 @@ class ApiTests(TestCase):
         rows = ai_stock_rows("premium import")
         self.assertEqual(rows[0]["description_uz"], "Premium import gortenziya, boshi yirikroq va rangi to‘qroq.")
         self.assertEqual(rows[0]["description_ru"], "Премиальная импортная гортензия.")
+
+    def test_ai_stock_rows_include_height_range_label(self):
+        self.batch.height_from_cm = 50
+        self.batch.height_to_cm = 60
+        self.batch.save(update_fields=["height_from_cm", "height_to_cm", "updated_at"])
+        rows = ai_stock_rows("Freedom")
+        self.assertEqual(rows[0]["height_label"], "50-60 sm")
+        self.assertEqual(rows[0]["height_from_cm"], 50)
+        self.assertEqual(rows[0]["height_to_cm"], 60)
 
     def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
         packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", name_ru="Lead basket", quantity=2, sale_price=50000)

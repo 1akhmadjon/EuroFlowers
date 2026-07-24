@@ -332,9 +332,9 @@ class StockBatchViewSet(ScopedViewSet):
     write_roles = ["admin", "warehouse"]
     queryset = StockBatch.objects.select_related("branch", "variant__flower").all()
     serializer_class = StockBatchSerializer
-    filterset_fields = ["variant", "height_cm", "is_active"]
+    filterset_fields = ["variant", "height_cm", "height_from_cm", "height_to_cm", "is_active"]
     search_fields = ["batch_number", "variant__flower__name_uz", "variant__flower__name_ru", "variant__name_uz", "variant__color_uz"]
-    ordering_fields = ["received_at", "remaining_stems", "sale_price_per_stem", "height_cm"]
+    ordering_fields = ["received_at", "remaining_stems", "sale_price_per_stem", "height_cm", "height_from_cm", "height_to_cm"]
 
     def perform_create(self, serializer):
         batch = serializer.save()
