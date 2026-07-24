@@ -818,11 +818,6 @@ def catalog_image_already_sent(conversation, item):
 
 
 def single_catalog_item_from_ai_result(result, conversation):
-    catalog_rows = result.get("catalog_items") or []
-    if len(catalog_rows) == 1:
-        item = _catalog_item_for_ai(catalog_rows[0].get("catalog_name"))
-        if item:
-            return item
     for tool_result in result.get("tool_results") or []:
         if tool_result.get("name") != "get_catalog":
             continue
@@ -830,16 +825,21 @@ def single_catalog_item_from_ai_result(result, conversation):
         if len(catalog) == 1:
             item = _catalog_item_for_ai(catalog[0].get("name_uz"), catalog[0].get("name_ru"))
             if item:
-                return item
+                return item, "catalog_filter"
+    catalog_rows = result.get("catalog_items") or []
+    if len(catalog_rows) == 1:
+        item = _catalog_item_for_ai(catalog_rows[0].get("catalog_name"))
+        if item:
+            return item, "selected_item"
     if conversation.social_post_id:
         post_items = list(CatalogItem.objects.filter(social_post=conversation.social_post, status="available")[:2])
         if len(post_items) == 1:
-            return post_items[0]
-    return None
+            return post_items[0], "social_post"
+    return None, ""
 
 
 def enforce_single_catalog_image_flow(result, conversation):
-    item = single_catalog_item_from_ai_result(result, conversation)
+    item, source = single_catalog_item_from_ai_result(result, conversation)
     if not item or not ai_reply_asks_for_catalog_image(result.get("reply", "")):
         return result
     tool_result = {"ok": False, "detail": "image_already_sent", "catalog_name": item.name_uz}
@@ -851,7 +851,10 @@ def enforce_single_catalog_image_flow(result, conversation):
     result["arrangement_type"] = item.arrangement_type
     result["estimated_price"] = str(item.price)
     type_label = "savat" if item.arrangement_type == "basket" else "buket"
-    result["reply"] = f"Katalogimizda hozir faqat {item.name_uz} {type_label} bor ekan\nNarxi {money_uz(item.price)} so'm\nSizga qachonga kerak edi?"
+    if source == "catalog_filter":
+        result["reply"] = f"Katalogimizda hozir faqat {item.name_uz} {type_label} bor ekan\nNarxi {money_uz(item.price)} so'm\nSizga qachonga kerak edi?"
+    else:
+        result["reply"] = f"{item.name_uz} {type_label}\nNarxi {money_uz(item.price)} so'm\nSizga qachonga kerak edi?"
     return result
 
 

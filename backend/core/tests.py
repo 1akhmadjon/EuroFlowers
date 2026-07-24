@@ -116,6 +116,38 @@ class BusinessRulesTests(TestCase):
         with patch("core.services.ai_reply", return_value=payload), patch("core.services.instagram_send_image", return_value={"ok": True}) as image_mock:
             reply = create_ai_reply_for_conversation(conversation)
         image_mock.assert_called_once_with("ig-single-catalog", "https://example.com/oq-buket.jpg")
+        self.assertIn("Oq buket savat", reply.text)
+        self.assertIn("Narxi 500 000 so'm", reply.text)
+        self.assertNotIn("Katalogimizda hozir faqat", reply.text)
+        self.assertNotIn("Qaysini tanlaysiz", reply.text)
+        self.assertNotIn("rasmni", reply.text.lower())
+
+    def test_ai_single_catalog_filter_uses_catalog_only_wording(self):
+        self.item.status = "available"
+        self.item.arrangement_type = "basket"
+        self.item.image_url = "https://example.com/oq-buket.jpg"
+        self.item.save(update_fields=["status", "arrangement_type", "image_url", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-single-catalog-filter")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="savat katalog")
+        payload = {
+            "reply": "Savatga yasalgan vitrinadagi gullarimiz\n\n1. Oq buket\n2.\nQaysini tanlaysiz, rasmni ko'rsataman?",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": "basket",
+            "estimated_price": "500000",
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+            "tool_results": [{"name": "get_catalog", "arguments": {"arrangement_type": "basket"}, "output": {"catalog": [{"name_uz": "Oq buket", "name_ru": "Белый букет", "price": "500000.00"}]}}],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload), patch("core.services.instagram_send_image", return_value={"ok": True}) as image_mock:
+            reply = create_ai_reply_for_conversation(conversation)
+        image_mock.assert_called_once_with("ig-single-catalog-filter", "https://example.com/oq-buket.jpg")
         self.assertIn("Katalogimizda hozir faqat Oq buket savat bor ekan", reply.text)
         self.assertIn("Narxi 500 000 so'm", reply.text)
         self.assertNotIn("Qaysini tanlaysiz", reply.text)
