@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
 from .models import AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
@@ -40,6 +40,75 @@ def catalog_composition_summary(item):
         name = f"{batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz}".strip()
         rows.append({"name_uz": name, "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)})
     return rows
+
+
+def stock_availability(batch):
+    if batch.remaining_stems <= 0:
+        return "qolmagan"
+    if batch.remaining_stems <= batch.minimum_sale_stems:
+        return "oz qoldi"
+    return "bor"
+
+
+def stock_batch_ai_row(batch):
+    return {
+        "batch_id": batch.id,
+        "flower_uz": batch.variant.flower.name_uz,
+        "flower_ru": batch.variant.flower.name_ru,
+        "variant_uz": batch.variant.name_uz,
+        "variant_ru": batch.variant.name_ru,
+        "color_uz": batch.variant.color_uz,
+        "color_ru": batch.variant.color_ru,
+        "description_uz": batch.variant.description_uz,
+        "description_ru": batch.variant.description_ru,
+        "height_cm": batch.height_cm,
+        "height_from_cm": batch.height_from_cm,
+        "height_to_cm": batch.height_to_cm,
+        "height_label": batch.height_label,
+        "availability": stock_availability(batch),
+        "remaining_stems": batch.remaining_stems,
+        "stems_per_bunch": batch.stems_per_bunch,
+        "minimum_sale_stems": batch.minimum_sale_stems,
+        "price_per_stem": str(batch.sale_price_per_stem),
+        "price_per_bunch": str(batch.sale_price_per_bunch),
+    }
+
+
+def variant_without_stock_ai_row(variant):
+    return {
+        "batch_id": None,
+        "flower_uz": variant.flower.name_uz,
+        "flower_ru": variant.flower.name_ru,
+        "variant_uz": variant.name_uz,
+        "variant_ru": variant.name_ru,
+        "color_uz": variant.color_uz,
+        "color_ru": variant.color_ru,
+        "description_uz": variant.description_uz,
+        "description_ru": variant.description_ru,
+        "height_cm": None,
+        "height_from_cm": None,
+        "height_to_cm": None,
+        "height_label": "",
+        "availability": "qolmagan",
+        "remaining_stems": 0,
+        "stems_per_bunch": variant.default_stems_per_bunch,
+        "minimum_sale_stems": variant.minimum_sale_stems,
+        "price_per_stem": "",
+        "price_per_bunch": "",
+    }
+
+
+def flower_variant_search_haystack(variant):
+    return compact_match_text(" ".join([
+        variant.flower.name_uz,
+        variant.flower.name_ru,
+        variant.name_uz,
+        variant.name_ru,
+        variant.color_uz,
+        variant.color_ru,
+        variant.description_uz,
+        variant.description_ru,
+    ]))
 
 
 def ai_search_terms(value):
@@ -128,48 +197,33 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
 
 
 def ai_stock_rows(query="", limit=24):
-    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")
+    stock_batches = StockBatch.objects.filter(is_active=True).select_related("variant__flower").order_by("-remaining_stems", "sale_price_per_stem", "id")
+    queryset = (
+        FlowerVariant.objects
+        .filter(is_active=True)
+        .select_related("flower")
+        .prefetch_related(Prefetch("batches", queryset=stock_batches, to_attr="ai_stock_batches"))
+        .order_by("flower__name_uz", "color_uz", "name_uz")
+    )
     if query:
         terms = ai_search_terms(query)
         ranked = []
-        for batch in queryset:
-            haystack = compact_match_text(" ".join([
-                batch.variant.flower.name_uz,
-                batch.variant.flower.name_ru,
-                batch.variant.name_uz,
-                batch.variant.name_ru,
-                batch.variant.color_uz,
-                batch.variant.color_ru,
-                batch.variant.description_uz,
-                batch.variant.description_ru,
-            ]))
+        for variant in queryset:
+            haystack = flower_variant_search_haystack(variant)
             score = sum(1 for term in terms if term in haystack)
             if score:
-                ranked.append((score, batch))
-        queryset = [batch for _, batch in sorted(ranked, key=lambda row: (-row[0], row[1].sale_price_per_stem))]
+                ranked.append((score, variant))
+        queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz, row[1].name_uz))]
     rows = []
-    for row in queryset[:limit]:
-        rows.append({
-            "batch_id": row.id,
-            "flower_uz": row.variant.flower.name_uz,
-            "flower_ru": row.variant.flower.name_ru,
-            "variant_uz": row.variant.name_uz,
-            "variant_ru": row.variant.name_ru,
-            "color_uz": row.variant.color_uz,
-            "color_ru": row.variant.color_ru,
-            "description_uz": row.variant.description_uz,
-            "description_ru": row.variant.description_ru,
-            "height_cm": row.height_cm,
-            "height_from_cm": row.height_from_cm,
-            "height_to_cm": row.height_to_cm,
-            "height_label": row.height_label,
-            "availability": "bor" if row.remaining_stems > row.minimum_sale_stems else "oz qoldi",
-            "stems_per_bunch": row.stems_per_bunch,
-            "minimum_sale_stems": row.minimum_sale_stems,
-            "price_per_stem": str(row.sale_price_per_stem),
-            "price_per_bunch": str(row.sale_price_per_bunch),
-        })
-    return rows
+    for variant in queryset:
+        batches = getattr(variant, "ai_stock_batches", [])
+        if batches:
+            rows.extend(stock_batch_ai_row(batch) for batch in batches)
+        else:
+            rows.append(variant_without_stock_ai_row(variant))
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
 
 
 def ai_basket_rows(limit=20):
@@ -189,14 +243,14 @@ def ai_flower_variant_rows(query="", limit=24):
         terms = ai_search_terms(query)
         ranked = []
         for variant in queryset:
-            haystack = compact_match_text(" ".join([variant.flower.name_uz, variant.flower.name_ru, variant.name_uz, variant.name_ru, variant.color_uz, variant.color_ru, variant.description_uz, variant.description_ru]))
+            haystack = flower_variant_search_haystack(variant)
             score = sum(1 for term in terms if term in haystack)
             if score:
                 ranked.append((score, variant))
         queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz))]
     rows = []
     for variant in queryset[:limit]:
-        stock_rows = StockBatch.objects.filter(variant=variant, is_active=True, remaining_stems__gt=0).order_by("sale_price_per_stem")[:10]
+        stock_rows = StockBatch.objects.filter(variant=variant, is_active=True).order_by("-remaining_stems", "sale_price_per_stem", "id")[:10]
         rows.append({
             "variant_id": variant.id,
             "flower_uz": variant.flower.name_uz,
@@ -210,7 +264,8 @@ def ai_flower_variant_rows(query="", limit=24):
             "active_stock": [{
                 "batch_id": batch.id,
                 "height_label": batch.height_label,
-                "availability": "bor" if batch.remaining_stems > batch.minimum_sale_stems else "oz qoldi",
+                "availability": stock_availability(batch),
+                "remaining_stems": batch.remaining_stems,
                 "minimum_sale_stems": batch.minimum_sale_stems,
                 "stems_per_bunch": batch.stems_per_bunch,
                 "price_per_stem": str(batch.sale_price_per_stem),
