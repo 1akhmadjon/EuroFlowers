@@ -1,34 +1,20 @@
 import json
 import re
-import requests
-from html import escape
 from datetime import timedelta
 from decimal import Decimal
-from urllib.parse import parse_qs, urlparse
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, FlowerVariant, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
+from .models import AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
+from .platform_services import instagram_send_image, openai_api_key, telegram_send_image
 
 
 SHOP_ADDRESS = "Bobur ko‘chasi 10"
 SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTfQ6TMD"
 SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
 SHOP_WORKING_HOURS = "24/7"
-
-
-def normalize_instagram_permalink(value):
-    return (value or "").split("?")[0].rstrip("/")
-
-
-def media_id_from_url(value):
-    if not value:
-        return ""
-    parsed = urlparse(value)
-    query = parse_qs(parsed.query)
-    return (query.get("asset_id") or [""])[0]
 
 
 def normalize_phone(value):
@@ -40,575 +26,6 @@ def normalize_phone(value):
     if len(digits) == 12 and digits.startswith("998"):
         return "+" + digits
     return ""
-
-
-def instagram_credentials():
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    return integration, integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-
-
-def openai_api_key():
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    return (integration.extra or {}).get("openai_api_key") or settings.OPENAI_API_KEY
-
-
-def instagram_user_id(access_token):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    if integration.instagram_account_id:
-        return integration.instagram_account_id
-    response = requests.get(f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/me", params={"access_token": access_token, "fields": "id,username"}, timeout=20)
-    response.raise_for_status()
-    data = response.json()
-    account_id = data.get("id", "")
-    if account_id:
-        integration.instagram_account_id = account_id
-        integration.save(update_fields=["instagram_account_id", "updated_at"])
-    return account_id
-
-
-def instagram_active_stories():
-    _, access_token = instagram_credentials()
-    if not access_token:
-        return []
-    account_id = instagram_user_id(access_token)
-    if not account_id:
-        return []
-    response = requests.get(
-        f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/stories",
-        params={"access_token": access_token, "fields": "id,media_type,media_url,permalink,timestamp"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    return response.json().get("data", [])
-
-
-def instagram_recent_media():
-    _, access_token = instagram_credentials()
-    if not access_token:
-        return []
-    account_id = instagram_user_id(access_token)
-    if not account_id:
-        return []
-    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/media"
-    params = {"access_token": access_token, "fields": "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url", "limit": 100}
-    rows = []
-    for _ in range(5):
-        response = requests.get(url, params=params, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        rows.extend(data.get("data", []))
-        url = data.get("paging", {}).get("next")
-        params = {}
-        if not url:
-            break
-    return rows
-
-
-def find_active_story_by_permalink(permalink):
-    normalized = normalize_instagram_permalink(permalink)
-    if not normalized:
-        return None
-    for story in instagram_active_stories():
-        if normalize_instagram_permalink(story.get("permalink")) == normalized:
-            return story
-    return None
-
-
-def find_media_by_permalink(permalink):
-    normalized = normalize_instagram_permalink(permalink)
-    if not normalized:
-        return None
-    for media in instagram_recent_media():
-        if normalize_instagram_permalink(media.get("permalink")) == normalized:
-            return media
-    return None
-
-
-def find_media_by_id(media_id):
-    if not media_id:
-        return None
-    for media in instagram_recent_media():
-        if str(media.get("id", "")) == str(media_id):
-            return media
-    return None
-
-
-def ensure_catalog_stock_available(item, quantity=None):
-    qty = quantity if quantity is not None else item.quantity_total
-    rows = list(item.composition.select_related("stock_batch"))
-    shortages = []
-    for row in rows:
-        needed = row.quantity_stems * qty
-        if row.stock_batch.remaining_stems < needed:
-            shortages.append(f"{row.stock_batch.batch_number}: kerak {needed}, bor {row.stock_batch.remaining_stems}")
-    if shortages:
-        raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + "; ".join(shortages))
-
-
-def mark_catalog_sold(item, user, quantity=1):
-    with transaction.atomic():
-        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
-        quantity = int(quantity or 1)
-        if quantity < 1:
-            raise ValueError("Sotilgan son 1 dan kam bo‘lmasligi kerak")
-        if item.quantity_sold + quantity > item.quantity_total:
-            raise ValueError("Sotilgan son katalogdagi umumiy sondan oshib ketdi")
-        item.quantity_sold += quantity
-        if item.quantity_sold >= item.quantity_total:
-            item.status = "sold"
-            item.sold_at = timezone.now()
-        elif item.status == "draft":
-            item.status = "available"
-        item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
-        notification = Notification.objects.create(
-            branch=item.branch,
-            notification_type="stock_pending",
-            title_uz=f"{item.name_uz}: sklad chiqimi kutilmoqda",
-            title_ru=f"{item.name_ru}: ожидается списание со склада",
-            body_uz=f"{quantity} ta kompozitsiya sotildi. Tarkibdagi gullarni sklad hisobidan chiqaring.",
-            body_ru=f"Продано композиций: {quantity}. Спишите цветы из состава со склада.",
-            reference_type="catalog_item",
-            reference_id=item.id,
-        )
-        AuditLog.objects.create(user=user, action="catalog_sold", entity_type="CatalogItem", entity_id=str(item.id), after={"status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "notification": notification.id})
-    return item
-
-
-def deduct_catalog_stock(item, user, quantity=None):
-    with transaction.atomic():
-        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
-        pending = item.quantity_sold - item.quantity_stock_deducted
-        if quantity is None:
-            quantity = pending
-        quantity = int(quantity or 0)
-        if quantity < 1:
-            raise ValueError("Skladdan kamaytirish uchun sotilgan, lekin yechilmagan son yo‘q")
-        if quantity > pending:
-            raise ValueError("Skladdan kamaytirish soni sotilgan, lekin yechilmagan sondan oshib ketdi")
-        rows = list(item.composition.select_related("stock_batch").select_for_update())
-        shortages = [row for row in rows if row.stock_batch.remaining_stems < row.quantity_stems * quantity]
-        if shortages:
-            names = ", ".join(row.stock_batch.batch_number for row in shortages)
-            raise ValueError(f"Yetarli qoldiq yo‘q: {names}")
-        for row in rows:
-            batch = row.stock_batch
-            stems = row.quantity_stems * quantity
-            bunches = row.quantity_bunches * quantity
-            batch.remaining_stems -= stems
-            batch.save(update_fields=["remaining_stems", "updated_at"])
-            StockMovement.objects.create(
-                batch=batch,
-                movement_type="out",
-                quantity_stems=-stems,
-                quantity_bunches=-bunches,
-                reference_type="catalog_item",
-                reference_id=item.id,
-                reason=f"{item.name_uz} sotildi: {quantity} ta",
-                performed_by=user,
-            )
-        item.quantity_stock_deducted += quantity
-        if item.quantity_stock_deducted >= item.quantity_sold:
-            item.stock_deducted_at = timezone.now()
-            Notification.objects.filter(reference_type="catalog_item", reference_id=item.id, notification_type="stock_pending").update(is_read=True)
-        item.save(update_fields=["quantity_stock_deducted", "stock_deducted_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="catalog_stock_deducted", entity_type="CatalogItem", entity_id=str(item.id), after={"rows": len(rows), "quantity": quantity, "quantity_stock_deducted": item.quantity_stock_deducted})
-    return item
-
-
-def deduct_lead_stock(lead, user):
-    with transaction.atomic():
-        lead = Lead.objects.select_for_update().get(pk=lead.pk)
-        if lead.stock_deducted_at:
-            return lead
-        stock_rows = list(lead.stock_usage.select_related("stock_batch").select_for_update())
-        packaging_rows = list(lead.packaging_usage.select_related("packaging").select_for_update())
-        catalog_rows = list(lead.catalog_usage.select_related("catalog_item").select_for_update())
-        catalog_quantities = {}
-        for row in catalog_rows:
-            catalog_quantities[row.catalog_item_id] = catalog_quantities.get(row.catalog_item_id, 0) + row.quantity
-        catalog_composition_rows = []
-        catalog_shortages = []
-        catalog_items = {}
-        for catalog_item_id, quantity in catalog_quantities.items():
-            item = CatalogItem.objects.select_for_update().get(pk=catalog_item_id)
-            catalog_items[catalog_item_id] = item
-            if item.quantity_sold + quantity > item.quantity_total:
-                catalog_shortages.append(f"{item.name_uz}: katalogda {item.quantity_total - item.quantity_sold} ta qoldi")
-                continue
-            for composition in item.composition.select_related("stock_batch").select_for_update():
-                needed = composition.quantity_stems * quantity
-                if composition.stock_batch.remaining_stems < needed:
-                    catalog_shortages.append(f"{item.name_uz} / {composition.stock_batch.batch_number}: kerak {needed}, bor {composition.stock_batch.remaining_stems}")
-                catalog_composition_rows.append((quantity, item, composition, needed, composition.quantity_bunches * quantity))
-        stock_shortages = [row for row in stock_rows if row.stock_batch.remaining_stems < row.quantity_stems]
-        packaging_shortages = [row for row in packaging_rows if row.packaging.quantity < row.quantity]
-        if stock_shortages or packaging_shortages or catalog_shortages:
-            parts = [row.stock_batch.batch_number for row in stock_shortages] + [row.packaging.name_uz for row in packaging_shortages] + catalog_shortages
-            raise ValueError("Lead uchun yetarli sklad qoldig‘i yo‘q: " + ", ".join(parts))
-        for quantity, item, composition, stems, bunches in catalog_composition_rows:
-            batch = composition.stock_batch
-            batch.remaining_stems -= stems
-            batch.save(update_fields=["remaining_stems", "updated_at"])
-            StockMovement.objects.create(
-                batch=batch,
-                movement_type="out",
-                quantity_stems=-stems,
-                quantity_bunches=-bunches,
-                reference_type="lead",
-                reference_id=lead.id,
-                reason=f"Lead #{lead.id}: {lead.customer} / {item.name_uz}: {quantity} ta",
-                performed_by=user,
-            )
-        for catalog_item_id, quantity in catalog_quantities.items():
-            item = catalog_items[catalog_item_id]
-            item.quantity_sold += quantity
-            item.quantity_stock_deducted += quantity
-            if item.quantity_sold >= item.quantity_total:
-                item.status = "sold"
-                item.sold_at = timezone.now()
-            item.stock_deducted_at = timezone.now()
-            item.save(update_fields=["quantity_sold", "quantity_stock_deducted", "status", "sold_at", "stock_deducted_at", "updated_at"])
-        for row in stock_rows:
-            batch = row.stock_batch
-            batch.remaining_stems -= row.quantity_stems
-            batch.save(update_fields=["remaining_stems", "updated_at"])
-            StockMovement.objects.create(
-                batch=batch,
-                movement_type="out",
-                quantity_stems=-row.quantity_stems,
-                quantity_bunches=-row.quantity_bunches,
-                reference_type="lead",
-                reference_id=lead.id,
-                reason=f"Lead #{lead.id}: {lead.customer}",
-                performed_by=user,
-            )
-        for row in packaging_rows:
-            packaging = row.packaging
-            packaging.quantity -= row.quantity
-            packaging.save(update_fields=["quantity", "updated_at"])
-            PackagingMovement.objects.create(
-                packaging=packaging,
-                movement_type="out",
-                quantity=-row.quantity,
-                reference_type="lead",
-                reference_id=lead.id,
-                reason=f"Lead #{lead.id}: {lead.customer}",
-                performed_by=user,
-            )
-        lead.stock_deducted_at = timezone.now()
-        lead.save(update_fields=["stock_deducted_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="lead_stock_deducted", entity_type="Lead", entity_id=str(lead.id), after={"stock_rows": len(stock_rows), "packaging_rows": len(packaging_rows), "catalog_rows": len(catalog_rows)})
-    return lead
-
-
-def restore_lead_stock(lead, user):
-    with transaction.atomic():
-        lead = Lead.objects.select_for_update().get(pk=lead.pk)
-        if not lead.stock_deducted_at:
-            return lead
-        stock_rows = list(lead.stock_usage.select_related("stock_batch").select_for_update())
-        packaging_rows = list(lead.packaging_usage.select_related("packaging").select_for_update())
-        catalog_rows = list(lead.catalog_usage.select_related("catalog_item").select_for_update())
-        catalog_quantities = {}
-        for row in catalog_rows:
-            catalog_quantities[row.catalog_item_id] = catalog_quantities.get(row.catalog_item_id, 0) + row.quantity
-        for catalog_item_id, quantity in catalog_quantities.items():
-            item = CatalogItem.objects.select_for_update().get(pk=catalog_item_id)
-            for composition in item.composition.select_related("stock_batch").select_for_update():
-                batch = composition.stock_batch
-                stems = composition.quantity_stems * quantity
-                bunches = composition.quantity_bunches * quantity
-                batch.remaining_stems += stems
-                batch.save(update_fields=["remaining_stems", "updated_at"])
-                StockMovement.objects.create(
-                    batch=batch,
-                    movement_type="adjustment",
-                    quantity_stems=stems,
-                    quantity_bunches=bunches,
-                    reference_type="lead",
-                    reference_id=lead.id,
-                    reason=f"Lead #{lead.id}: status qaytdi / {item.name_uz}: {quantity} ta",
-                    performed_by=user,
-                )
-            item.quantity_sold = max(item.quantity_sold - quantity, 0)
-            item.quantity_stock_deducted = max(item.quantity_stock_deducted - quantity, 0)
-            if item.quantity_sold < item.quantity_total and item.status == "sold":
-                item.status = "available"
-                item.sold_at = None
-            item.stock_deducted_at = timezone.now() if item.quantity_stock_deducted and item.quantity_stock_deducted >= item.quantity_sold else None
-            item.save(update_fields=["quantity_sold", "quantity_stock_deducted", "status", "sold_at", "stock_deducted_at", "updated_at"])
-        for row in stock_rows:
-            batch = row.stock_batch
-            batch.remaining_stems += row.quantity_stems
-            batch.save(update_fields=["remaining_stems", "updated_at"])
-            StockMovement.objects.create(
-                batch=batch,
-                movement_type="adjustment",
-                quantity_stems=row.quantity_stems,
-                quantity_bunches=row.quantity_bunches,
-                reference_type="lead",
-                reference_id=lead.id,
-                reason=f"Lead #{lead.id}: status qaytdi / {lead.customer}",
-                performed_by=user,
-            )
-        for row in packaging_rows:
-            packaging = row.packaging
-            packaging.quantity += row.quantity
-            packaging.save(update_fields=["quantity", "updated_at"])
-            PackagingMovement.objects.create(
-                packaging=packaging,
-                movement_type="adjustment",
-                quantity=row.quantity,
-                reference_type="lead",
-                reference_id=lead.id,
-                reason=f"Lead #{lead.id}: status qaytdi / {lead.customer}",
-                performed_by=user,
-            )
-        lead.stock_deducted_at = None
-        lead.save(update_fields=["stock_deducted_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="lead_stock_restored", entity_type="Lead", entity_id=str(lead.id), after={"stock_rows": len(stock_rows), "packaging_rows": len(packaging_rows), "catalog_rows": len(catalog_rows)})
-    return lead
-
-
-def apply_stock_movement(batch, movement_type, quantity_stems, reason, user):
-    with transaction.atomic():
-        batch = StockBatch.objects.select_for_update().get(pk=batch.pk)
-        delta = abs(quantity_stems) if movement_type in ["in", "transfer_in"] else -abs(quantity_stems)
-        if batch.remaining_stems + delta < 0:
-            raise ValueError("Skladda yetarli gul yo‘q")
-        before = batch.remaining_stems
-        batch.remaining_stems += delta
-        batch.save(update_fields=["remaining_stems", "updated_at"])
-        movement = StockMovement.objects.create(
-            batch=batch,
-            movement_type=movement_type,
-            quantity_stems=delta,
-            quantity_bunches=Decimal(delta) / Decimal(batch.stems_per_bunch),
-            reason=reason,
-            performed_by=user,
-        )
-        AuditLog.objects.create(user=user, action="stock_movement", entity_type="StockBatch", entity_id=str(batch.id), before={"remaining_stems": before}, after={"remaining_stems": batch.remaining_stems, "movement": movement.id})
-        if batch.remaining_stems <= batch.minimum_sale_stems:
-            Notification.objects.create(
-                branch=batch.branch,
-                notification_type="low_stock",
-                title_uz=f"{batch.variant.flower.name_uz} qoldig‘i kamaydi",
-                title_ru=f"Остаток {batch.variant.flower.name_ru} заканчивается",
-                body_uz=f"{batch.batch_number} partiyada {batch.remaining_stems} dona qoldi.",
-                body_ru=f"В партии {batch.batch_number} осталось {batch.remaining_stems} шт.",
-                reference_type="stock_batch",
-                reference_id=batch.id,
-            )
-    return movement
-
-
-def apply_packaging_movement(packaging, movement_type, quantity, reason, user):
-    with transaction.atomic():
-        packaging = Packaging.objects.select_for_update().get(pk=packaging.pk)
-        delta = quantity if movement_type == "adjustment" else abs(quantity) if movement_type in ["in", "transfer_in"] else -abs(quantity)
-        if packaging.quantity + delta < 0:
-            raise ValueError("Skladda yetarli qadoqlash/savat yo‘q")
-        before = packaging.quantity
-        packaging.quantity += delta
-        packaging.save(update_fields=["quantity", "updated_at"])
-        movement = PackagingMovement.objects.create(
-            packaging=packaging,
-            movement_type=movement_type,
-            quantity=delta,
-            reason=reason,
-            performed_by=user,
-        )
-        AuditLog.objects.create(user=user, action="packaging_movement", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"quantity": packaging.quantity, "movement": movement.id})
-    return movement
-
-
-def instagram_send(recipient_id, text):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
-    if not access_token or not account_id:
-        return {"mocked": True}
-    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
-    response = requests.post(url, params={"access_token": access_token}, json={"recipient": {"id": recipient_id}, "message": {"text": text}}, timeout=20)
-    response.raise_for_status()
-    return response.json()
-
-
-def instagram_send_image(recipient_id, image_url):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
-    if not access_token or not account_id:
-        return {"mocked": True}
-    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "attachment": {
-                "type": "image",
-                "payload": {"url": image_url, "is_reusable": True},
-            }
-        },
-    }
-    response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-def instagram_sender_action(recipient_id, action):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
-    if not access_token or not account_id:
-        return {"mocked": True}
-    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
-    response = requests.post(url, params={"access_token": access_token}, json={"recipient": {"id": recipient_id}, "sender_action": action}, timeout=20)
-    response.raise_for_status()
-    return response.json()
-
-
-def telegram_bot_token():
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    return integration.telegram_bot_token
-
-
-def telegram_file_url(file_id):
-    token = telegram_bot_token()
-    if not token or not file_id:
-        return ""
-    response = requests.post(f"https://api.telegram.org/bot{token}/getFile", json={"file_id": file_id}, timeout=20)
-    response.raise_for_status()
-    file_path = response.json().get("result", {}).get("file_path", "")
-    if not file_path:
-        return ""
-    return f"https://api.telegram.org/file/bot{token}/{file_path}"
-
-
-def telegram_api(method, payload):
-    token = telegram_bot_token()
-    if not token:
-        return {"mocked": True}
-    response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=20)
-    response.raise_for_status()
-    return response.json()
-
-
-def telegram_send(chat_id, text):
-    return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
-
-
-def telegram_send_rich(chat_id, rich_message):
-    return telegram_api("sendRichMessage", {"chat_id": chat_id, "rich_message": rich_message})
-
-
-def telegram_send_image(chat_id, image_url):
-    return telegram_api("sendPhoto", {"chat_id": chat_id, "photo": image_url})
-
-
-def telegram_sender_action(chat_id, action="typing"):
-    return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
-
-
-def clean_catalog_item_name(value):
-    return re.sub(r"\s+\bid\s*\d+\b", "", (value or "").strip(), flags=re.IGNORECASE).strip()
-
-
-def clean_catalog_price(value):
-    price = normalize_ai_reply_text((value or "").strip())
-    if not re.search(r"(so[‘'ʻ`]m|som|сум)", price, flags=re.IGNORECASE):
-        price = f"{price} so‘m"
-    return price
-
-
-def clean_catalog_listing_text(text):
-    cleaned = re.sub(r"(?im)^[^\S\n]*[-]?[^\S\n]*Tarkibi\s*:.*?(?=(?:\d+[).]\s*)|\n|$)", "", text or "")
-    cleaned = re.sub(r"\s+(?=\d+[).]\s*)", "\n", cleaned)
-    lines = []
-    for line in cleaned.splitlines():
-        match = re.match(r"^(?P<prefix>\s*(?:(?:\d+[).])|[-*])\s*)(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*)(?:\s*(?:so[‘'ʻ`]m|som|сум))?(?:\b|$).*$", line, flags=re.IGNORECASE)
-        if match:
-            line = f"{match.group('prefix')}{clean_catalog_item_name(match.group('name'))} - {clean_catalog_price(match.group('price'))}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def telegram_catalog_rows_from_text(text):
-    rows = []
-    cleaned = clean_catalog_listing_text(text)
-    for line in cleaned.splitlines():
-        match = re.match(r"^\s*(?:(?:\d+[).])|[-*])\s*(?P<name>.+?)\s+[-—]\s+(?P<price>\d[\d\s]*(?:\s*(?:so[‘'ʻ`]m|som|сум))?)\s*$", line, flags=re.IGNORECASE)
-        if not match:
-            continue
-        rows.append({
-            "name": clean_catalog_item_name(match.group("name")),
-            "price": clean_catalog_price(match.group("price")),
-        })
-    return rows
-
-
-def telegram_catalog_rich_message(text):
-    rows = telegram_catalog_rows_from_text(text)
-    if len(rows) < 2:
-        return None
-    cleaned = clean_catalog_listing_text(text)
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    first_row_index = next((index for index, line in enumerate(lines) if re.match(r"^(?:(?:\d+[).])|[-*])\s*", line)), 0)
-    intro = " ".join(lines[:first_row_index]).strip()
-    outro = "Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman."
-    html = ""
-    if intro:
-        html += f"<p>{escape(intro)}</p>"
-    html += "<table bordered striped><caption>Tayyor katalog</caption><tr><th>Gul</th><th>Narx</th></tr>"
-    for row in rows[:20]:
-        html += f"<tr><td>{escape(row['name'])}</td><td>{escape(row['price'])}</td></tr>"
-    html += "</table>"
-    html += f"<p>{escape(outro)}</p>"
-    return {"html": html, "skip_entity_detection": True}
-
-
-def telegram_send_catalog_rich_if_possible(chat_id, text):
-    rich_message = telegram_catalog_rich_message(text)
-    if not rich_message:
-        return None
-    return telegram_send_rich(chat_id, rich_message)
-
-
-def send_lead_recall(lead_id):
-    with transaction.atomic():
-        lead = Lead.objects.select_for_update().select_related("customer", "branch").filter(id=lead_id).first()
-        if not lead or lead.status == "lost" or lead.recall_sent_at or not lead.recall_at or lead.recall_at > timezone.now():
-            return None
-        title = f"Recall: Lead #{lead.id}"
-        body = f"{lead.customer} buyurtmasi 1 soat ichida yuborilishi kerak. Telefon: {lead.customer.phone or lead.customer.masked_phone}. So‘rov: {lead.request_uz or lead.request_ru}"
-        notification = Notification.objects.create(
-            branch=lead.branch,
-            notification_type="lead",
-            title_uz=title,
-            title_ru=title,
-            body_uz=body,
-            body_ru=body,
-            reference_type="lead",
-            reference_id=lead.id,
-        )
-        lead.recall_sent_at = timezone.now()
-        lead.save(update_fields=["recall_sent_at", "updated_at"])
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    group_chat_id = integration.telegram_group_chat_id or settings.TELEGRAM_GROUP_CHAT_ID
-    if group_chat_id:
-        try:
-            telegram_send(group_chat_id, f"{title}\n{body}")
-        except Exception as exc:
-            print(f"LEAD_RECALL_TELEGRAM_FAILED lead={lead_id} error={exc}", flush=True)
-    return notification
-
-
-def send_due_lead_recalls():
-    due_ids = list(Lead.objects.filter(recall_at__lte=timezone.now(), recall_sent_at__isnull=True).exclude(status="lost").values_list("id", flat=True)[:100])
-    sent = 0
-    for lead_id in due_ids:
-        if send_lead_recall(lead_id):
-            sent += 1
-    return sent
 
 
 def catalog_composition_summary(item):
@@ -908,7 +325,7 @@ def ai_tool_definitions():
                     "customer_name": {"type": ["string", "null"]},
                     "phone": {"type": ["string", "null"]},
                     "request_text": {"type": "string"},
-                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
+                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
                     "estimated_price": {"type": ["number", "null"]},
                     "catalog_items": {"type": "array", "items": lead_catalog_item_schema},
                     "stock_items": {"type": "array", "items": lead_stock_item_schema},
@@ -931,7 +348,7 @@ def ai_tool_definitions():
                     "phone": {"type": ["string", "null"]},
                     "request_text": {"type": ["string", "null"]},
                     "status": {"type": ["string", "null"]},
-                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
+                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
                     "estimated_price": {"type": ["number", "null"]},
                     "catalog_items": {"type": ["array", "null"], "items": lead_catalog_item_schema},
                     "stock_items": {"type": ["array", "null"], "items": lead_stock_item_schema},
@@ -1009,7 +426,7 @@ def execute_ai_tool(name, arguments, conversation):
         return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
     if name == "send_catalog_image":
         query = arguments.get("query") or ""
-        item = catalog_item_from_text(conversation, query)
+        item = _catalog_item_for_ai(query)
         if not item:
             item = CatalogItem.objects.filter(status="available").filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query)).select_related("social_post").first()
         if not item:
@@ -1071,7 +488,7 @@ def execute_ai_tool(name, arguments, conversation):
         if arguments.get("catalog_items") is not None:
             lead.catalog_usage.all().delete()
             for row in arguments.get("catalog_items") or []:
-                item = catalog_item_from_text(conversation, row.get("catalog_name"))
+                item = _catalog_item_for_ai(row.get("catalog_name"))
                 quantity = int(row.get("quantity") or 1)
                 if item and quantity > 0:
                     LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=quantity)
@@ -1101,7 +518,7 @@ def execute_ai_tool(name, arguments, conversation):
         source="telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
     )
     for row in arguments.get("catalog_items") or []:
-        item = catalog_item_from_text(conversation, row.get("catalog_name"))
+        item = _catalog_item_for_ai(row.get("catalog_name"))
         quantity = int(row.get("quantity") or 1)
         if item and quantity > 0:
             LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=quantity)
@@ -1124,7 +541,7 @@ def ai_response_schema():
             "phone": {"type": ["string", "null"]},
             "lead_ready": {"type": "boolean"},
             "lead_request": {"type": ["string", "null"]},
-            "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
+            "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
             "estimated_price": {"type": ["number", "null"]},
             "handoff": {"type": "boolean"},
             "catalog_items": {
@@ -1139,47 +556,6 @@ def ai_response_schema():
         "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items", "stock_items"],
         "additionalProperties": False,
     }
-
-
-def normalize_ai_reply_text(text):
-    normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", " ", text or "")
-    normalized = normalized.replace("—", "-").replace("–", "-")
-    normalized = re.sub(r"operator\s*/\s*jamoa", "operatorlarimiz", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bjamoamiz\b", "operatorlarimiz", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bjamoa\b", "operatorlarimiz", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\boperatorimiz\b", "operatorlarimiz", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"(?m)^\s*•\s*", "", normalized)
-    normalized = re.sub(r"\(([^()]{1,80})\)", r"\1", normalized)
-    normalized = re.sub(r"\s*\(?\bID\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s*\(?\bcatalog[_ ]?id\s*:\s*\d+\)?", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bcatalog\s+id\s*\d+\b", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"[^.?!\n]*(id\s*yuboring|\d+\s*deb yozing)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
-    normalized = re.sub(r"(?im)^\s*[-]?\s*(Tarkibi|Kompozitsiya|Mavjudligi)\s*:.*$", "", normalized)
-    normalized = re.sub(r"(?im)^\s*\d+(?:\.\d+)?\s*bunch(?:lik)?\.?$", "", normalized)
-    normalized = re.sub(r"\bUZS\b", "so‘m", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"[^.?!\n]*(so‘ramaymiz|so'ramaymiz|taqiqlanadi)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
-    normalized = re.sub(r"[^.?!\n]*(yetkazish/sana/vaqt|sana/vaqt|yetkazish vaqti)[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
-    normalized = re.sub(r"\bxom\s+(pion|pioni|gul|guli)\b", r"\1", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bolmaysizmi\b", "yuborasizmi", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\btaqsimlandisini\b", "taqsimlanishini", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bQani,\s*", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bborib olib ket", "kelib olib ket", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bborib olish", "kelib olish", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bombor(?:da|imizda)?\b", "skladimizda", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bомбор(?:да|имизда)?\b", "skladimizda", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"(?i)\bAjoyib\s*[-,]?\s*custom buyurtma qilasiz\.?\s*", "", normalized).strip()
-    normalized = re.sub(r"(?i)\bAvvalo:\s*", "", normalized).strip()
-    normalized = re.sub(r"(?is)Masalan:\s*[-\n ].*", "", normalized).strip()
-    normalized = re.sub(r"\s*yoki alohida 10 dona novdali atirgul sifatida yetkazib beraylikmi", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"Coral Charm katalogi tayyor gul bo‘lsa, katalogdan tekshirib chiqay[.?!]?\s*", "Coral Charm dan custom buket qilib tayyorlab beramiz. ", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s*katalogdan ko‘rsatib beraymi\??", "", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"[^.?!\n]*stokdan topolmadim[^.?!\n]*[.?!]?", "Bu gul bo‘yicha aniq ma'lumotni operatorimiz tekshirib beradi.", normalized, flags=re.IGNORECASE).strip()
-    normalized = re.sub(r"[^.?!\n]*Pochka odatda[^.?!\n]*[.?!]?", "", normalized, flags=re.IGNORECASE).strip()
-    normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\s+(Do[‘'ʻ`]?kon manzili:|Manzil:)", r"\n\n\1", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\.\s+(Operatorlarimiz siz bilan bog[‘'ʻ`]?lanadi)", r".\n\n\1", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
 
 
 def ai_reply(conversation):
@@ -1319,7 +695,7 @@ def compact_match_text(value):
     return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower()).strip()
 
 
-def catalog_search_aliases(text):
+def _catalog_text_aliases(text):
     aliases = {text}
     replacements = {
         "пиони": "pion",
@@ -1342,11 +718,11 @@ def catalog_search_aliases(text):
     return aliases
 
 
-def catalog_item_from_text(conversation, *values):
+def _catalog_item_for_ai(*values):
     texts = []
     for value in values:
         if value:
-            texts.extend(catalog_search_aliases(compact_match_text(value)))
+            texts.extend(_catalog_text_aliases(compact_match_text(value)))
     available_items = list(CatalogItem.objects.filter(status="available"))
     for text in texts:
         for item in available_items:
@@ -1361,19 +737,6 @@ def catalog_item_from_text(conversation, *values):
                 if len(matches) == 1:
                     return item
     return None
-
-
-def normalize_lead_catalog_items(result, conversation):
-    rows = []
-    for row in result.get("catalog_items") or []:
-        catalog_id = row.get("catalog_id")
-        item = CatalogItem.objects.filter(id=catalog_id).first() if catalog_id else None
-        if not item and row.get("catalog_name"):
-            item = catalog_item_from_text(conversation, row.get("catalog_name"))
-        if item:
-            rows.append({"catalog_id": item.id, "quantity": max(1, int(row.get("quantity") or 1))})
-    result["catalog_items"] = rows
-    return rows
 
 
 def create_ai_reply_for_conversation(conversation):
@@ -1405,8 +768,6 @@ def create_ai_reply_for_conversation(conversation):
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
     if result.get("lead_created_id"):
         result["lead_ready"] = False
-    if result.get("catalog_items"):
-        normalize_lead_catalog_items(result, conversation)
     if result.get("lead_ready") and not customer.name:
         result["lead_ready"] = False
         result["reply"] = "Buyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
@@ -1414,38 +775,7 @@ def create_ai_reply_for_conversation(conversation):
         result["lead_ready"] = False
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
-    if result.get("lead_ready"):
-        normalize_lead_catalog_items(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
-    if result.get("lead_ready") and result.get("lead_request"):
-        request_text = result["lead_request"]
-        request_language = result.get("detected_language", "uz")
-        details = {
-            "catalog_items": result.get("catalog_items") or [],
-            "stock_items": result.get("stock_items") or [],
-        }
-        lead = Lead.objects.create(
-            customer=customer,
-            branch=conversation.branch,
-            conversation=conversation,
-            social_post=conversation.social_post,
-            request_uz=request_text if request_language == "uz" else "",
-            request_ru=request_text if request_language == "ru" else "",
-            arrangement_type=result.get("arrangement_type") or "",
-            estimated_price=result.get("estimated_price"),
-            details=details,
-        )
-        for row in result.get("catalog_items") or []:
-            catalog_item = CatalogItem.objects.filter(id=row.get("catalog_id")).first()
-            quantity = int(row.get("quantity") or 1)
-            if catalog_item and quantity > 0:
-                LeadCatalogUsage.objects.create(lead=lead, catalog_item=catalog_item, quantity=quantity)
-        for row in result.get("stock_items") or []:
-            batch = StockBatch.objects.filter(id=row.get("batch_id"), branch=conversation.branch).first()
-            quantity_stems = int(row.get("quantity_stems") or 0)
-            if batch and quantity_stems > 0:
-                LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
-        Notification.objects.create(branch=conversation.branch, notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     if result.get("handoff"):
         Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
     return reply
@@ -1501,358 +831,3 @@ def process_pending_customer_reply(conversation_id, expected_message_id):
     else:
         Conversation.objects.filter(id=conversation_id, ai_reply_started_for_message_id=expected_message_id).update(ai_reply_started_for_message=None, ai_reply_started_at=None)
     return reply
-
-
-def flatten_interesting_payload(value, prefix=""):
-    matches = {}
-    if isinstance(value, dict):
-        for key, child in value.items():
-            path = f"{prefix}.{key}" if prefix else key
-            key_lower = key.lower()
-            if any(part in key_lower for part in ["story", "url", "link", "permalink", "media", "referral", "reply_to", "source"]):
-                matches[path] = child
-            matches.update(flatten_interesting_payload(child, path))
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            matches.update(flatten_interesting_payload(child, f"{prefix}[{index}]"))
-    return matches
-
-
-def urls_from_value(value):
-    urls = []
-    if isinstance(value, str):
-        urls.extend(re.findall(r"https?://[^\s\"'<>]+", value))
-    elif isinstance(value, dict):
-        for child in value.values():
-            urls.extend(urls_from_value(child))
-    elif isinstance(value, list):
-        for child in value:
-            urls.extend(urls_from_value(child))
-    return urls
-
-
-def attachment_kind(source, attachment_type, url):
-    text = f"{source} {attachment_type} {url}".lower()
-    if "voice" in text or "audio" in text:
-        return "voice"
-    if "story" in text:
-        return "story"
-    if "reel" in text:
-        return "reel"
-    if "post" in text or "media" in text or "instagram.com/p/" in text:
-        return "post"
-    return "media"
-
-
-def attachment_label(kind):
-    return {
-        "story": "Story link",
-        "post": "Post link",
-        "reel": "Reel link",
-        "voice": "Voice message",
-        "media": "Media link",
-    }.get(kind, "Media link")
-
-
-def unique_attachment_rows(rows):
-    result = []
-    seen = set()
-    for row in rows:
-        url = row.get("url")
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        result.append(row)
-    return result
-
-
-def append_attachment_links(text, attachments):
-    base = (text or "").strip()
-    lines = [base] if base else []
-    for row in attachments:
-        url = row.get("url")
-        if url:
-            lines.append(f"{attachment_label(row.get('kind'))}: {url}")
-    return "\n".join(lines)
-
-
-def first_string_from_keys(data, keys):
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return ""
-
-
-def social_post_media_query(media_id):
-    return Q(media_id=media_id) | Q(story_share_id=media_id) | Q(webhook_story_id=media_id) | Q(webhook_story_id__contains=media_id)
-
-
-def append_story_webhook_id(post, story_id):
-    if not story_id:
-        return False
-    values = [value.strip() for value in (post.webhook_story_id or "").splitlines() if value.strip()]
-    if story_id in values:
-        return False
-    values.append(story_id)
-    post.webhook_story_id = "\n".join(values)
-    return True
-
-
-def nested_get(data, path):
-    value = data
-    for key in path:
-        if not isinstance(value, dict):
-            return ""
-        value = value.get(key)
-    return value if isinstance(value, str) else ""
-
-
-def first_story_attachment(message):
-    for attachment in message.get("attachments", []) or []:
-        payload = attachment.get("payload", {}) or {}
-        if attachment.get("type") == "ig_story" or payload.get("story_media_id") or payload.get("story_media_url"):
-            return payload
-    return {}
-
-
-def first_media_attachment(message):
-    for attachment in message.get("attachments", []) or []:
-        payload = attachment.get("payload", {}) or {}
-        if attachment.get("type") == "ig_story" or payload.get("story_media_id"):
-            continue
-        media_url = first_string_from_keys(payload, ["url", "media_url", "permalink", "link", "share_url"])
-        media_id = first_string_from_keys(payload, ["ig_post_media_id", "ig_reel_media_id", "reel_video_id", "reel_media_id", "media_id", "media_share_id", "media_product_id", "id", "source_id", "target_id"]) or media_id_from_url(media_url)
-        if media_id or media_url:
-            return {"id": media_id, "url": media_url, "type": attachment.get("type", ""), "payload": payload}
-    return {}
-
-
-def instagram_message_metadata(event, webhook_event=None):
-    message = event.get("message", {}) or {}
-    rows = []
-    for attachment in message.get("attachments", []) or []:
-        attachment_type = attachment.get("type", "")
-        payload = attachment.get("payload", {}) or {}
-        for url in urls_from_value(payload):
-            rows.append({"kind": attachment_kind("instagram_attachment", attachment_type, url), "type": attachment_type, "url": url, "source": "instagram_attachment"})
-    for source, value in [
-        ("instagram_message", message),
-        ("instagram_referral", event.get("referral") or message.get("referral") or {}),
-        ("instagram_reply_to", message.get("reply_to") or {}),
-    ]:
-        for url in urls_from_value(value):
-            rows.append({"kind": attachment_kind(source, "", url), "type": "", "url": url, "source": source})
-    if webhook_event and webhook_event.story_url:
-        rows.append({"kind": attachment_kind("instagram_webhook_event", webhook_event.event_type, webhook_event.story_url), "type": webhook_event.event_type, "url": webhook_event.story_url, "source": "instagram_webhook_event"})
-    return {"attachments": unique_attachment_rows(rows)}
-
-
-def save_instagram_webhook_event(payload, entry, event):
-    message = event.get("message", {}) or {}
-    referral = event.get("referral") or message.get("referral") or {}
-    reply_to = message.get("reply_to") or {}
-    story_attachment = first_story_attachment(message)
-    media_attachment = first_media_attachment(message)
-    extracted = flatten_interesting_payload(event)
-    media_id = first_string_from_keys(referral, ["media_id", "source_id", "id"]) or first_string_from_keys(reply_to, ["media_id", "story_id", "id"]) or nested_get(reply_to, ["story", "id"]) or first_string_from_keys(story_attachment, ["story_media_id", "media_id", "id"]) or media_attachment.get("id", "")
-    story_id = first_string_from_keys(reply_to, ["story_id", "id"]) or first_string_from_keys(referral, ["story_id"]) or nested_get(reply_to, ["story", "id"]) or first_string_from_keys(story_attachment, ["story_media_id", "story_id", "id"])
-    story_url = first_string_from_keys(referral, ["source_url", "url", "link", "permalink"]) or first_string_from_keys(reply_to, ["url", "link", "permalink"]) or nested_get(reply_to, ["story", "url"]) or first_string_from_keys(story_attachment, ["story_media_url", "url", "media_url"]) or media_attachment.get("url", "")
-    media_id = media_id or media_id_from_url(story_url)
-    if story_attachment or reply_to:
-        story_id = story_id or media_id_from_url(story_url)
-    event_type = "story_send" if story_attachment and not reply_to else "story_reply" if reply_to or "story" in json.dumps(extracted, ensure_ascii=False).lower() else "media_send" if media_attachment else "message"
-    try:
-        saved = InstagramWebhookEvent.objects.create(
-            event_type=event_type,
-            sender_id=str(event.get("sender", {}).get("id", "")),
-            recipient_id=str(event.get("recipient", {}).get("id", "")),
-            message_id=str(message.get("mid", "")),
-            text=str(message.get("text", "")),
-            media_id=str(media_id or ""),
-            story_id=str(story_id or ""),
-            story_url=str(story_url or ""),
-            postback_referral=referral or {},
-            extracted=extracted,
-            raw_payload={"entry": entry, "event": event, "payload": payload},
-        )
-        print(f"INSTAGRAM_WEBHOOK_EVENT id={saved.id} type={saved.event_type} sender={saved.sender_id} mid={saved.message_id} media_id={saved.media_id} story_id={saved.story_id} story_url={saved.story_url} extracted_keys={list(extracted.keys())}", flush=True)
-        return saved
-    except Exception as exc:
-        print(f"INSTAGRAM_WEBHOOK_EVENT_SAVE_FAILED error={exc} event={json.dumps(event, ensure_ascii=False)}", flush=True)
-        return None
-
-
-def link_story_post_from_event(webhook_event, branch=None):
-    if not webhook_event or webhook_event.event_type not in ["story_reply", "story_send"]:
-        return None
-    story_id = webhook_event.story_id or webhook_event.media_id
-    if not story_id:
-        return None
-    exact = SocialPost.objects.filter(social_post_media_query(story_id), is_active=True).first()
-    if exact:
-        updates = []
-        if append_story_webhook_id(exact, story_id):
-            updates.append("webhook_story_id")
-        if webhook_event.story_url and exact.webhook_story_url != webhook_event.story_url:
-            exact.webhook_story_url = webhook_event.story_url
-            updates.append("webhook_story_url")
-        if updates:
-            exact.save(update_fields=updates + ["updated_at"])
-        return exact
-    queryset = SocialPost.objects.filter(post_type="story", is_active=True, webhook_story_id="")
-    if branch:
-        queryset = queryset.filter(branch=branch)
-    candidates = list(queryset.order_by("-created_at")[:2])
-    if len(candidates) != 1:
-        return None
-    post = candidates[0]
-    post.webhook_story_id = story_id
-    post.webhook_story_url = webhook_event.story_url
-    post.save(update_fields=["webhook_story_id", "webhook_story_url", "updated_at"])
-    print(f"INSTAGRAM_STORY_LINKED social_post_id={post.id} story_id={story_id} webhook_event_id={webhook_event.id}", flush=True)
-    return post
-
-
-def link_media_post_from_event(webhook_event):
-    if not webhook_event or webhook_event.event_type != "media_send":
-        return None
-    media_id = webhook_event.media_id
-    if media_id:
-        exact = SocialPost.objects.filter(media_id=media_id, is_active=True).first()
-        if exact:
-            return exact
-        media = find_media_by_id(media_id)
-        if media:
-            exact = SocialPost.objects.filter(permalink=media.get("permalink", ""), is_active=True).first()
-            if exact:
-                if exact.media_id != media_id:
-                    exact.media_id = media_id
-                    exact.save(update_fields=["media_id", "updated_at"])
-                return exact
-    if webhook_event.story_url:
-        normalized = normalize_instagram_permalink(webhook_event.story_url)
-        exact = SocialPost.objects.filter(permalink__startswith=normalized, is_active=True).first()
-        if exact and media_id and exact.media_id != media_id and not SocialPost.objects.filter(media_id=media_id).exclude(pk=exact.pk).exists():
-            exact.media_id = media_id
-            exact.save(update_fields=["media_id", "updated_at"])
-        return exact
-    return None
-
-
-def resolve_instagram_event(payload):
-    entries = payload.get("entry", [])
-    results = []
-    for entry in entries:
-        for event in entry.get("messaging", []):
-            webhook_event = save_instagram_webhook_event(payload, entry, event)
-            sender_id = event.get("sender", {}).get("id")
-            integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-            own_ids = {value for value in [integration.instagram_account_id, integration.instagram_business_id, settings.INSTAGRAM_ACCOUNT_ID] if value}
-            message = event.get("message", {})
-            text = message.get("text")
-            story_attachment = first_story_attachment(message)
-            media_attachment = first_media_attachment(message)
-            story_text = "Mijoz Instagram storyni directga yubordi." if story_attachment else ""
-            media_text = "Mijoz Instagram post/reelni directga yubordi." if media_attachment else ""
-            message_metadata = instagram_message_metadata(event, webhook_event)
-            message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
-            if not sender_id or sender_id in own_ids or not message_text or message.get("is_echo"):
-                continue
-            branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None)
-            if not branch:
-                continue
-            referral = event.get("referral") or message.get("referral") or {}
-            media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
-            post = SocialPost.objects.filter(social_post_media_query(media_id), is_active=True).first() if media_id else None
-            if not post:
-                post = link_story_post_from_event(webhook_event, branch)
-            if not post:
-                post = link_media_post_from_event(webhook_event)
-            customer, _ = Customer.objects.get_or_create(instagram_user_id=sender_id, defaults={"branch": branch})
-            conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
-            if not conversation:
-                conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch, social_post=post)
-            elif post and conversation.social_post_id != post.id:
-                conversation.social_post = post
-                conversation.branch = post.branch
-                conversation.save(update_fields=["social_post", "branch", "updated_at"])
-            elif (story_attachment or media_attachment or message_metadata.get("attachments")) and not post and conversation.social_post_id:
-                conversation.social_post = None
-                conversation.save(update_fields=["social_post", "updated_at"])
-            if (story_attachment or media_attachment or message_metadata.get("attachments")) and not post:
-                message_text = append_attachment_links(f"{message_text}\nTizim izohi: yuborilgan Instagram media bazadagi story/post/reel katalogiga bog‘lanmagan.", [])
-            saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
-            if saved_message:
-                results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
-    return results
-
-
-def telegram_media_file_id(message):
-    if message.get("voice"):
-        return "voice", message["voice"].get("file_id", "")
-    if message.get("audio"):
-        return "audio", message["audio"].get("file_id", "")
-    if message.get("video"):
-        return "video", message["video"].get("file_id", "")
-    if message.get("video_note"):
-        return "video_note", message["video_note"].get("file_id", "")
-    if message.get("document"):
-        return "document", message["document"].get("file_id", "")
-    if message.get("photo"):
-        photo = sorted(message["photo"], key=lambda row: row.get("file_size", 0))[-1]
-        return "photo", photo.get("file_id", "")
-    return "", ""
-
-
-def telegram_message_metadata(message):
-    rows = []
-    for url in urls_from_value(message):
-        rows.append({"kind": attachment_kind("telegram_message", "", url), "type": "", "url": url, "source": "telegram_message"})
-    media_type, file_id = telegram_media_file_id(message)
-    if file_id:
-        row = {"kind": attachment_kind("telegram_file", media_type, ""), "type": media_type, "file_id": file_id, "source": "telegram_file"}
-        try:
-            file_url = telegram_file_url(file_id)
-        except Exception as exc:
-            print(f"TELEGRAM_FILE_URL_FAILED file_id={file_id} error={exc}", flush=True)
-            file_url = ""
-        if file_url:
-            row["url"] = file_url
-            rows.append(row)
-        else:
-            rows.append(row)
-    return {"attachments": unique_attachment_rows(rows)}
-
-
-def resolve_telegram_update(payload):
-    message = payload.get("message") or payload.get("edited_message") or {}
-    text = (message.get("text") or "").strip()
-    metadata = telegram_message_metadata(message)
-    message_text = append_attachment_links(text, metadata.get("attachments", []))
-    chat = message.get("chat") or {}
-    user = message.get("from") or {}
-    chat_id = chat.get("id")
-    user_id = user.get("id")
-    if not chat_id or not user_id or not message_text:
-        return []
-    branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None) or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
-    if not branch:
-        return []
-    external_id = f"telegram:{user_id}"
-    defaults = {"branch": branch, "language": "uz"}
-    full_name = " ".join(part for part in [user.get("first_name", ""), user.get("last_name", "")] if part).strip()
-    if full_name:
-        defaults["name"] = full_name[:160]
-    customer, created = Customer.objects.get_or_create(instagram_user_id=external_id, defaults=defaults)
-    if not created and full_name and not customer.name:
-        customer.name = full_name[:160]
-        customer.save(update_fields=["name", "updated_at"])
-    conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
-    if not conversation:
-        conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch)
-    message_id = message.get("message_id", "")
-    saved_message = ingest_customer_message(conversation, message_text, f"telegram:{chat_id}:{message_id}", metadata)
-    if not saved_message:
-        return []
-    return [{"conversation_id": conversation.id, "message_id": saved_message.id, "chat_id": chat_id}]

@@ -8,8 +8,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, deduct_catalog_stock, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_lead_catalog_items, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .inventory_services import deduct_catalog_stock, mark_catalog_sold
+from .services import ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
+from .webhook_services import resolve_instagram_event, resolve_telegram_update
 
 
 class BusinessRulesTests(TestCase):
@@ -56,13 +58,6 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(normalize_phone("+998 ** *** ** 67"), "")
         self.assertEqual(normalize_phone("+99867"), "")
         self.assertEqual(normalize_phone("67"), "")
-
-    def test_final_reply_uses_operators_and_line_breaks_address(self):
-        text = "Rahmat, Ahmad! Buyurtmangiz qabul qilindi: Tayyor Pion buketi - 800 000 so‘m. Operator/jamoa siz bilan bog‘lanadi. Do‘kon manzili: Bobur ko‘chasi 10"
-        normalized = normalize_ai_reply_text(text)
-        self.assertNotIn("operator/jamoa", normalized.lower())
-        self.assertIn("operatorlarimiz siz bilan bog‘lanadi", normalized.lower())
-        self.assertIn("\n\nDo‘kon manzili:", normalized)
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
@@ -217,10 +212,9 @@ class BusinessRulesTests(TestCase):
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
-        rich_mock.assert_called_once_with("555", "Mana rasmi")
         text_mock.assert_called_once_with("555", "Mana rasmi")
 
     def test_delayed_telegram_reply_skips_context_image_after_tool_image(self):
@@ -229,78 +223,9 @@ class BusinessRulesTests(TestCase):
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Rasmini yubordim.", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}], "image_tool_results": [{"image_sent": True, "catalog_id": self.item.id}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value=None), patch("core.tasks.telegram_send", return_value={"ok": True}):
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}):
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
-
-    def test_telegram_catalog_rich_message_builds_table(self):
-        text = "Ha, tayyor buketlar bor.\n\n1. Pion buketi id 25 - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\n\nQaysi biri yoqdi?"
-        rich = telegram_catalog_rich_message(text)
-        self.assertIsNotNone(rich)
-        self.assertIn("<table bordered striped>", rich["html"])
-        self.assertNotIn("<th>Qoldiq</th>", rich["html"])
-        self.assertIn("<td>Pion buketi</td>", rich["html"])
-        self.assertNotIn("id 25", rich["html"])
-        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
-        self.assertNotIn("<td>10 dona</td>", rich["html"])
-        self.assertIn("Qaysi biri sizga ma&#x27;qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.", rich["html"])
-
-    def test_telegram_catalog_rich_message_drops_composition_outro(self):
-        text = "Hozirgi katalogdagi tayyor kompozitsiyalarimiz:\n1. Pion buketi - 800 000 so‘m\n2. Pushti atirgul buketi - 500 000 so‘m\n- Tarkibi: Atirgul Hermosa Pushti 101 dona 3) Qizil atirgul buketi - 400 000 so‘m"
-        rich = telegram_catalog_rich_message(text)
-        self.assertIsNotNone(rich)
-        self.assertIn("<td>Pion buketi</td>", rich["html"])
-        self.assertIn("<td>Pushti atirgul buketi</td>", rich["html"])
-        self.assertIn("<td>Qizil atirgul buketi</td>", rich["html"])
-        self.assertNotIn("Tarkibi", rich["html"])
-        self.assertNotIn("101 dona", rich["html"])
-
-    def test_telegram_catalog_rich_message_drops_inline_composition(self):
-        text = "Hozirgi katalogdagi tayyor variantlarimiz:\n1) Pion buketi - 800 000 so‘m Pion Sarah Bernhardt, 50 ta\n2) Pushti atirgul buketi - 500 000 so‘m Atirgul Hermosa Pushti, 101 ta\n3) Qizil atirgul buketi - 400 000 so‘m Atirgul Red Naomi Qizil, 60 ta\nQaysi birini xohlaysiz?"
-        rich = telegram_catalog_rich_message(text)
-        self.assertIsNotNone(rich)
-        self.assertIn("<td>Pion buketi</td>", rich["html"])
-        self.assertIn("<td>Pushti atirgul buketi</td>", rich["html"])
-        self.assertIn("<td>Qizil atirgul buketi</td>", rich["html"])
-        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
-        self.assertNotIn("Pion Sarah", rich["html"])
-        self.assertNotIn("Atirgul Hermosa", rich["html"])
-        self.assertNotIn("50 ta", rich["html"])
-
-    def test_telegram_catalog_rich_message_adds_missing_currency(self):
-        text = "Quyidagi tayyor katalog mavjud narxlar so‘mda:\n1) Pion buketi - 800 000\n2) Pushti atirgul buketi - 500 000\n3) Qizil atirgul buketi - 400 000\nQaysi birini tanlaysiz? Yoki boshqa variant/miqdor kerakmi?"
-        rich = telegram_catalog_rich_message(text)
-        self.assertIsNotNone(rich)
-        self.assertIn("<td>Pion buketi</td>", rich["html"])
-        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
-        self.assertIn("<td>500 000 so‘m</td>", rich["html"])
-        self.assertNotIn("Yoki boshqa variant", rich["html"])
-        self.assertIn("Qaysi biri sizga ma&#x27;qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.", rich["html"])
-
-    def test_telegram_catalog_rich_message_handles_dash_bullets(self):
-        text = "Hozirda katalogimizda quyidagi tayyor buketlar bor:\n- Pion buketi - 800 000 so‘m Pion Sarah Bernhardt och pushti\n- Pushti atirgul buketi - 500 000 so‘m Atirgul Hermosa pushti\n- Qizil atirgul buketi - 400 000 so‘m Atirgul Red Naomi qizil\nSiz tayyor buketlardan birini olmoqchimisiz yoki maxsus buket yasatmoqchimisiz?"
-        rich = telegram_catalog_rich_message(text)
-        self.assertIsNotNone(rich)
-        self.assertIn("<td>Pion buketi</td>", rich["html"])
-        self.assertIn("<td>Pushti atirgul buketi</td>", rich["html"])
-        self.assertIn("<td>Qizil atirgul buketi</td>", rich["html"])
-        self.assertIn("<td>800 000 so‘m</td>", rich["html"])
-        self.assertNotIn("Sarah Bernhardt", rich["html"])
-        self.assertNotIn("Hermosa", rich["html"])
-        self.assertNotIn("maxsus buket", rich["html"])
-
-    def test_delayed_telegram_reply_prefers_rich_catalog_message(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:rich", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
-        customer_message = conversation.messages.create(sender="customer", text="tayyor buketlar")
-        reply_text = "Ha, tayyor buketlar bor.\n1. Pion buketi - 800 000 so‘m (10 dona mavjud)\n2. Pushti atirgul buketi - 500 000 so‘m (3 dona mavjud)\nQaysi biri yoqdi?"
-        reply_message = Message.objects.create(conversation=conversation, sender="ai", text=reply_text, metadata={"catalog_items": []})
-        from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send_catalog_rich_if_possible", return_value={"ok": True}) as rich_mock, patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
-            result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
-        self.assertEqual(result, reply_message.id)
-        rich_mock.assert_called_once_with("555", reply_text)
-        text_mock.assert_not_called()
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
@@ -412,7 +337,7 @@ class BusinessRulesTests(TestCase):
             def json(self):
                 return {"ok": True, "result": {"file_path": "voice/file.ogg"}}
 
-        with patch("core.services.requests.post", return_value=MockResponse()):
+        with patch("core.platform_services.requests.post", return_value=MockResponse()):
             jobs = resolve_telegram_update(payload)
         self.assertEqual(len(jobs), 1)
         message = Message.objects.get(instagram_message_id="telegram:555:78")

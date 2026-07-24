@@ -299,7 +299,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
                 validated_data["media_id"] = f"story-share-{parts[2]}"
             if not validated_data.get("webhook_story_id"):
                 try:
-                    from .services import find_active_story_by_permalink
+                    from .platform_services import find_active_story_by_permalink
                     story = find_active_story_by_permalink(permalink)
                     if story:
                         validated_data["webhook_story_id"] = story.get("id", "")
@@ -310,7 +310,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     pass
         elif not validated_data.get("media_id"):
             try:
-                from .services import find_media_by_permalink
+                from .platform_services import find_media_by_permalink
                 media = find_media_by_permalink(permalink)
                 if media:
                     validated_data["media_id"] = media.get("id", "")

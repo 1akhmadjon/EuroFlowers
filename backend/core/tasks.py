@@ -1,7 +1,9 @@
 from celery import shared_task
 import threading
 import time
-from .services import SHOP_LOCATION_LINK, instagram_send, instagram_sender_action, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, send_due_lead_recalls, send_lead_recall, should_start_ai_reply, telegram_send, telegram_send_catalog_rich_if_possible, telegram_sender_action
+from .platform_services import instagram_send, instagram_sender_action, send_due_lead_recalls, send_lead_recall, telegram_send, telegram_sender_action
+from .services import SHOP_LOCATION_LINK, process_pending_customer_reply, should_start_ai_reply
+from .webhook_services import resolve_instagram_event, resolve_telegram_update
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
@@ -100,13 +102,6 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        rich_sent = False
-        try:
-            rich_sent = bool(telegram_send_catalog_rich_if_possible(chat_id, reply.text))
-        except Exception as exc:
-            print(f"TELEGRAM_RICH_SEND_FAILED conversation={conversation_id} chat={chat_id} error={exc}", flush=True)
-        if rich_sent:
-            return reply.id
         for text in split_location_reply(reply.text):
             telegram_send(chat_id, text)
         return reply.id
