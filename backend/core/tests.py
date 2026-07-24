@@ -374,6 +374,51 @@ class BusinessRulesTests(TestCase):
         self.assertIn("18151925590500461", post.webhook_story_id)
         self.assertNotIn("bazadagi story/post/reel katalogiga bog‘lanmagan", message.text)
 
+    def test_instagram_story_reply_creates_social_post_from_catalog_story_url(self):
+        item = CatalogItem.objects.create(
+            branch=self.branch,
+            name_uz="Pushti atirgul buketi",
+            name_ru="Pink rose bouquet",
+            arrangement_type="bouquet",
+            price=500000,
+            status="available",
+            instagram_story_url="https://www.instagram.com/stories/extra_teest/3948457236253594433/",
+        )
+        payload = {
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig-user-catalog-story"},
+                    "recipient": {"id": "ig-business"},
+                    "message": {
+                        "mid": "mid-catalog-story-1",
+                        "text": "narxi qancha",
+                        "attachments": [{
+                            "type": "ig_story",
+                            "payload": {
+                                "story_media_id": "18151925590500461",
+                                "story_media_url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18151925590500461&signature=test",
+                            },
+                        }],
+                    },
+                }],
+            }],
+        }
+        from unittest.mock import patch
+
+        with patch("core.webhook_services.find_active_story_by_media_url", return_value={
+            "id": "18151925590500461",
+            "media_url": "https://scontent.example/story.jpg",
+            "permalink": "https://www.instagram.com/stories/extra_teest/3948457236253594433/",
+        }):
+            jobs = resolve_instagram_event(payload)
+        self.assertEqual(len(jobs), 1)
+        item.refresh_from_db()
+        conversation = Conversation.objects.get(customer__instagram_user_id="ig-user-catalog-story")
+        message = Message.objects.get(instagram_message_id="mid-catalog-story-1")
+        self.assertIsNotNone(item.social_post_id)
+        self.assertEqual(conversation.social_post_id, item.social_post_id)
+        self.assertNotIn("bazadagi story/post/reel katalogiga bog‘lanmagan", message.text)
+
     def test_unknown_instagram_media_clears_previous_post_context(self):
         old_post = SocialPost.objects.create(branch=self.branch, post_type="reel", media_id="old-pion", title_uz="Pion buket", title_ru="Pion", is_active=True)
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-user-2")

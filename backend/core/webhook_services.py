@@ -4,7 +4,7 @@ import re
 from django.conf import settings
 from django.db.models import Q
 
-from .models import Branch, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
+from .models import Branch, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
 from .platform_services import find_active_story_by_media_url, find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
 from .services import ingest_customer_message
 
@@ -117,6 +117,77 @@ def social_post_by_media_or_url(media_id="", url="", branch=None):
     if branch:
         queryset = queryset.filter(branch=branch)
     return queryset.order_by("-updated_at", "-created_at").first()
+
+
+def catalog_item_url_query(url):
+    normalized = normalize_instagram_permalink(url)
+    asset_id = media_id_from_url(url)
+    query = Q()
+    if normalized:
+        query |= Q(instagram_story_url__startswith=normalized) | Q(social_post__permalink__startswith=normalized) | Q(social_post__webhook_story_url__startswith=normalized)
+    if asset_id:
+        query |= Q(instagram_story_url__contains=asset_id) | Q(social_post__media_id=asset_id) | Q(social_post__story_share_id=asset_id) | Q(social_post__webhook_story_id__contains=asset_id) | Q(social_post__webhook_story_url__contains=asset_id)
+    return query
+
+
+def catalog_item_by_url(url="", branch=None):
+    query = catalog_item_url_query(url)
+    if not query:
+        return None
+    queryset = CatalogItem.objects.filter(query, status="available").select_related("branch", "social_post").distinct()
+    if branch:
+        queryset = queryset.filter(branch=branch)
+    return queryset.order_by("-updated_at", "-created_at").first()
+
+
+def social_post_type_from_url(url, fallback="post"):
+    normalized = normalize_instagram_permalink(url)
+    if "/stories/" in normalized:
+        return "story"
+    if "/reel/" in normalized:
+        return "reel"
+    if "/p/" in normalized:
+        return "post"
+    return fallback
+
+
+def story_share_id_from_url(url):
+    parsed = normalize_instagram_permalink(url)
+    parts = [part for part in parsed.split("/") if part]
+    if len(parts) >= 3 and parts[-3] == "stories":
+        return parts[-1]
+    return ""
+
+
+def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
+    if not item:
+        return None
+    if item.social_post_id:
+        return item.social_post
+    permalink = permalink or item.instagram_story_url
+    media_id = (webhook_event.media_id or webhook_event.story_id) if webhook_event else ""
+    if not media_id or SocialPost.objects.filter(media_id=media_id).exists():
+        media_id = f"catalog-item-{item.id}"
+    post_type = social_post_type_from_url(permalink, "story" if webhook_event and webhook_event.event_type in ["story_reply", "story_send"] else "post")
+    post = SocialPost.objects.create(
+        branch=item.branch,
+        post_type=post_type,
+        media_id=media_id,
+        permalink=permalink,
+        story_share_id=story_share_id_from_url(permalink),
+        webhook_story_id=(webhook_event.story_id or webhook_event.media_id) if webhook_event and post_type == "story" else "",
+        webhook_story_url=webhook_event.story_url if webhook_event and post_type == "story" else "",
+        title_uz=item.name_uz,
+        title_ru=item.name_ru,
+        description_uz=item.description_uz,
+        description_ru=item.description_ru,
+        price=item.price,
+        image_url=item.image_url,
+        is_active=True,
+    )
+    item.social_post = post
+    item.save(update_fields=["social_post", "updated_at"])
+    return post
 
 
 def append_story_webhook_id(post, story_id):
@@ -241,6 +312,9 @@ def link_story_post_from_event(webhook_event, branch=None):
         story_permalink = story.get("permalink", "")
         story_api_id = str(story.get("id", ""))
         post = social_post_by_media_or_url(story_api_id, story_permalink, branch)
+        if not post:
+            item = catalog_item_by_url(story_permalink, branch)
+            post = social_post_from_catalog_item(item, webhook_event, story_permalink)
         if post:
             updates = []
             for value in [story_id, story_api_id]:
@@ -290,6 +364,9 @@ def link_media_post_from_event(webhook_event):
                 return exact
     if webhook_event.story_url:
         exact = social_post_by_media_or_url(media_id, webhook_event.story_url, None)
+        if not exact:
+            item = catalog_item_by_url(webhook_event.story_url, None)
+            exact = social_post_from_catalog_item(item, webhook_event, webhook_event.story_url)
         if exact and media_id and exact.media_id != media_id and not SocialPost.objects.filter(media_id=media_id).exclude(pk=exact.pk).exists():
             exact.media_id = media_id
             exact.save(update_fields=["media_id", "updated_at"])
@@ -316,7 +393,7 @@ def resolve_instagram_event(payload):
             message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
             if not sender_id or sender_id in own_ids or not message_text or message.get("is_echo"):
                 continue
-            branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None)
+            branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None) or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
             if not branch:
                 continue
             referral = event.get("referral") or message.get("referral") or {}
