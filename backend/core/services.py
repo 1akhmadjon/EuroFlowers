@@ -10,7 +10,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogItem, Conversation, Customer, FlowerVariant, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, SocialPost, StockBatch, StockMovement
 
 
 SHOP_ADDRESS = "Bobur ko‘chasi 10"
@@ -647,17 +647,24 @@ def recent_customer_orders(customer):
 
 
 def ai_catalog_rows(query="", limit=24):
-    queryset = CatalogItem.objects.filter(status="available").select_related("social_post").order_by("-created_at")
+    queryset = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
     if query:
         queryset = queryset.filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
     rows = []
     for row in queryset[:limit]:
+        image_url = row.image_url or (row.social_post.image_url if row.social_post_id else "")
         rows.append({
             "name_uz": row.name_uz,
             "name_ru": row.name_ru,
             "type": row.arrangement_type,
+            "description_uz": row.description_uz,
+            "description_ru": row.description_ru,
             "price": str(row.price),
-            "has_image": bool(row.image_url or (row.social_post.image_url if row.social_post_id else "")),
+            "has_image": bool(image_url),
+            "image_url": image_url,
+            "social_post_type": row.social_post.post_type if row.social_post_id else "",
+            "social_post_permalink": row.social_post.permalink if row.social_post_id else "",
+            "composition": catalog_composition_summary(row),
         })
     return rows
 
@@ -700,6 +707,36 @@ def ai_basket_rows(limit=20):
         "max": row.capacity_max_stems,
         "price": str(row.sale_price),
     } for row in Packaging.objects.filter(packaging_type="basket", is_active=True, quantity__gt=0).order_by("sale_price")[:limit]]
+
+
+def ai_flower_variant_rows(query="", limit=24):
+    queryset = FlowerVariant.objects.filter(is_active=True).select_related("flower").order_by("flower__name_uz", "color_uz", "name_uz")
+    if query:
+        queryset = queryset.filter(Q(flower__name_uz__icontains=query) | Q(flower__name_ru__icontains=query) | Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(color_uz__icontains=query) | Q(color_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
+    rows = []
+    for variant in queryset[:limit]:
+        stock_rows = StockBatch.objects.filter(variant=variant, is_active=True, remaining_stems__gt=0).order_by("sale_price_per_stem")[:10]
+        rows.append({
+            "variant_id": variant.id,
+            "flower_uz": variant.flower.name_uz,
+            "flower_ru": variant.flower.name_ru,
+            "variant_uz": variant.name_uz,
+            "variant_ru": variant.name_ru,
+            "color_uz": variant.color_uz,
+            "color_ru": variant.color_ru,
+            "description_uz": variant.description_uz,
+            "description_ru": variant.description_ru,
+            "active_stock": [{
+                "batch_id": batch.id,
+                "height_label": batch.height_label,
+                "availability": "bor" if batch.remaining_stems > batch.minimum_sale_stems else "oz qoldi",
+                "minimum_sale_stems": batch.minimum_sale_stems,
+                "stems_per_bunch": batch.stems_per_bunch,
+                "price_per_stem": str(batch.sale_price_per_stem),
+                "price_per_bunch": str(batch.sale_price_per_bunch),
+            } for batch in stock_rows],
+        })
+    return rows
 
 
 def ai_post_context(conversation):
@@ -772,6 +809,252 @@ def mini_app_custom_quote_ai(request_text, arrangement_type):
     }
 
 
+def ai_tool_definitions():
+    lead_catalog_item_schema = {
+        "type": "object",
+        "properties": {
+            "catalog_name": {"type": "string"},
+            "quantity": {"type": "integer"},
+        },
+        "required": ["catalog_name", "quantity"],
+        "additionalProperties": False,
+    }
+    lead_stock_item_schema = {
+        "type": "object",
+        "properties": {
+            "batch_id": {"type": "integer"},
+            "quantity_stems": {"type": "integer"},
+            "quantity_bunches": {"type": "number"},
+        },
+        "required": ["batch_id", "quantity_stems", "quantity_bunches"],
+        "additionalProperties": False,
+    }
+    return [
+        {
+            "type": "function",
+            "name": "client_leads_get",
+            "description": "Shu mijozning avvalgi leadlarini olish.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "client_lead_create",
+            "description": "Mijoz aniq buyurtma qilmoqchi bo'lsa va ism-telefon olingan bo'lsa lead yaratish.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": ["string", "null"]},
+                    "phone": {"type": ["string", "null"]},
+                    "request_text": {"type": "string"},
+                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
+                    "estimated_price": {"type": ["number", "null"]},
+                    "catalog_items": {"type": "array", "items": lead_catalog_item_schema},
+                    "stock_items": {"type": "array", "items": lead_stock_item_schema},
+                    "note": {"type": ["string", "null"]},
+                },
+                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "catalog_items", "stock_items", "note"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "client_lead_edit",
+            "description": "Shu mijozning mavjud leadini tahrirlash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "lead_id": {"type": "integer"},
+                    "customer_name": {"type": ["string", "null"]},
+                    "phone": {"type": ["string", "null"]},
+                    "request_text": {"type": ["string", "null"]},
+                    "status": {"type": ["string", "null"]},
+                    "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "stems", "catalog", None]},
+                    "estimated_price": {"type": ["number", "null"]},
+                    "catalog_items": {"type": ["array", "null"], "items": lead_catalog_item_schema},
+                    "stock_items": {"type": ["array", "null"], "items": lead_stock_item_schema},
+                    "note": {"type": ["string", "null"]},
+                },
+                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "catalog_items", "stock_items", "note"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "get_catalog",
+            "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "get_stock",
+            "description": "Skladdagi hozir bor gullar va narxlarini olish.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "get_flower_variant_info",
+            "description": "Gul turi/navi/rangi haqida izoh va mavjud stock ma'lumotlarini olish.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "send_catalog_image",
+            "description": "Katalogdagi aniq buket/savat rasmini mijozga yuborish.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    ]
+
+
+def execute_ai_tool(name, arguments, conversation):
+    customer = conversation.customer
+    if name == "client_leads_get":
+        limit = max(1, min(int(arguments.get("limit") or 5), 20))
+        return {"leads": recent_customer_orders(customer)[:limit]}
+    if name == "get_catalog":
+        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80)}
+    if name == "get_stock":
+        return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100), "baskets": ai_basket_rows(limit=30)}
+    if name == "get_flower_variant_info":
+        return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
+    if name == "send_catalog_image":
+        query = arguments.get("query") or ""
+        item = catalog_item_from_text(conversation, query)
+        if not item:
+            item = CatalogItem.objects.filter(status="available").filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query)).select_related("social_post").first()
+        if not item:
+            return {"ok": False, "detail": "catalog_not_found"}
+        image_url = item.image_url or (item.social_post.image_url if item.social_post_id else "")
+        if not image_url:
+            return {"ok": False, "detail": "image_not_found", "catalog_name": item.name_uz}
+        sent = None
+        if customer.instagram_user_id.startswith("telegram:"):
+            sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
+        elif customer.instagram_user_id:
+            sent = instagram_send_image(customer.instagram_user_id, image_url)
+        Message.objects.create(conversation=conversation, sender="ai", text=f"Rasm yuborildi: {image_url}", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
+        return {"ok": True, "image_sent": True, "catalog_name": item.name_uz, "image_url": image_url}
+    if name not in {"client_lead_create", "client_lead_edit"}:
+        return {"ok": False, "detail": "unknown_tool"}
+    name_value = (arguments.get("customer_name") or "").strip()
+    phone_value = normalize_phone(arguments.get("phone") or "")
+    customer_changed = []
+    if name_value and not customer.name:
+        customer.name = name_value[:160]
+        customer_changed.append("name")
+    if phone_value:
+        customer.phone = phone_value
+        customer_changed.append("phone")
+    if customer_changed:
+        customer.save(update_fields=list(set(customer_changed)) + ["updated_at"])
+    request_text = (arguments.get("request_text") or "").strip()
+    estimated_price = arguments.get("estimated_price")
+    arrangement_type = arguments.get("arrangement_type") or ""
+    details = {
+        "catalog_items": arguments.get("catalog_items") or [],
+        "stock_items": arguments.get("stock_items") or [],
+        "note": arguments.get("note") or "",
+        "created_by": "ai_tool",
+    }
+    if name == "client_lead_edit":
+        lead = Lead.objects.filter(id=arguments.get("lead_id"), customer=customer).first()
+        if not lead:
+            return {"ok": False, "detail": "lead_not_found"}
+        fields = []
+        if request_text:
+            lead.request_uz = request_text
+            fields.append("request_uz")
+        if arguments.get("status"):
+            lead.status = arguments["status"][:40]
+            fields.append("status")
+        if arrangement_type:
+            lead.arrangement_type = arrangement_type
+            fields.append("arrangement_type")
+        if estimated_price is not None:
+            lead.estimated_price = Decimal(str(estimated_price))
+            fields.append("estimated_price")
+        if arguments.get("catalog_items") is not None or arguments.get("stock_items") is not None or arguments.get("note"):
+            lead.details = details
+            fields.append("details")
+        if fields:
+            lead.save(update_fields=list(set(fields)) + ["updated_at"])
+        if arguments.get("catalog_items") is not None:
+            lead.catalog_usage.all().delete()
+            for row in arguments.get("catalog_items") or []:
+                item = catalog_item_from_text(conversation, row.get("catalog_name"))
+                quantity = int(row.get("quantity") or 1)
+                if item and quantity > 0:
+                    LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=quantity)
+        if arguments.get("stock_items") is not None:
+            lead.stock_usage.all().delete()
+            for row in arguments.get("stock_items") or []:
+                batch = StockBatch.objects.filter(id=row.get("batch_id"), is_active=True).first()
+                quantity_stems = int(row.get("quantity_stems") or 0)
+                if batch and quantity_stems > 0:
+                    LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
+        return {"ok": True, "lead_id": lead.id}
+    if not request_text:
+        return {"ok": False, "detail": "request_text_required"}
+    if not customer.name:
+        return {"ok": False, "detail": "customer_name_required"}
+    if not customer.phone:
+        return {"ok": False, "detail": "phone_required"}
+    lead = Lead.objects.create(
+        customer=customer,
+        branch=conversation.branch,
+        conversation=conversation,
+        social_post=conversation.social_post,
+        request_uz=request_text,
+        arrangement_type=arrangement_type,
+        estimated_price=Decimal(str(estimated_price)) if estimated_price is not None else None,
+        details=details,
+        source="telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
+    )
+    for row in arguments.get("catalog_items") or []:
+        item = catalog_item_from_text(conversation, row.get("catalog_name"))
+        quantity = int(row.get("quantity") or 1)
+        if item and quantity > 0:
+            LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=quantity)
+    for row in arguments.get("stock_items") or []:
+        batch = StockBatch.objects.filter(id=row.get("batch_id"), is_active=True).first()
+        quantity_stems = int(row.get("quantity_stems") or 0)
+        if batch and quantity_stems > 0:
+            LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
+    Notification.objects.create(branch=conversation.branch, notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
+    return {"ok": True, "lead_id": lead.id}
+
+
 def ai_response_schema():
     return {
         "type": "object",
@@ -842,27 +1125,32 @@ def normalize_ai_reply_text(text):
 
 def ai_reply(conversation):
     customer = conversation.customer
-    visible_messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:100])
-    fresh_session = bool(len(visible_messages) > 1 and visible_messages[0].created_at - visible_messages[1].created_at >= timedelta(hours=24))
-    history_messages = list(reversed(visible_messages))
+    history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
+    fresh_session = bool(len(history_messages) > 1 and history_messages[-1].created_at - history_messages[-2].created_at >= timedelta(hours=24))
     history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in history_messages]
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
-    recent_catalog = recent_catalog_item_for_conversation(conversation)
     context = {
-        "customer": {"name": customer.name, "phone": customer.masked_phone, "has_phone": bool(customer.phone), "language": customer.language},
-        "conversation": {"fresh_session": fresh_session, "has_ai_reply_in_session": has_ai_reply_in_session, "ai_replies_count": ai_replies_count, "last_customer_message": last_customer_message},
-        "has_post_context": bool(conversation.social_post_id),
-        "recent_catalog_selection": {"name_uz": recent_catalog.name_uz, "type": recent_catalog.arrangement_type, "price": str(recent_catalog.price)} if recent_catalog else None,
-        "catalog": ai_catalog_rows("", limit=60),
-        "stock": ai_stock_rows("", limit=80),
-        "baskets": ai_basket_rows(limit=30),
-        "post_context": ai_post_context(conversation),
-        "recent_orders": recent_customer_orders(customer),
-        "rules": {
+        "customer": {
+            "name": customer.name,
+            "phone": customer.masked_phone,
+            "has_phone": bool(customer.phone),
+            "language": customer.language,
+            "instagram_username": customer.instagram_username,
+        },
+        "conversation": {
+            "id": conversation.id,
+            "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
+            "fresh_session": fresh_session,
+            "has_ai_reply_in_session": has_ai_reply_in_session,
+            "ai_replies_count": ai_replies_count,
+            "last_customer_message": last_customer_message,
+            "social_post": ai_post_context(conversation),
+        },
+        "business": {
             "florist_fee": str(business_settings.default_florist_fee),
             "working_hours": SHOP_WORKING_HOURS,
             "shop_address": SHOP_ADDRESS,
@@ -881,9 +1169,43 @@ def ai_reply(conversation):
         "input": model_input,
         "max_output_tokens": 2000,
         "reasoning": {"effort": "minimal"},
+        "tools": ai_tool_definitions(),
+        "parallel_tool_calls": False,
         "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
     }
     response = client.responses.create(**response_kwargs)
+    tool_results = []
+    for _ in range(8):
+        calls = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", "") == "function_call":
+                calls.append(item)
+        if not calls:
+            break
+        tool_outputs = []
+        for call in calls:
+            try:
+                arguments = json.loads(call.arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            output = execute_ai_tool(call.name, arguments, conversation)
+            tool_results.append({"name": call.name, "arguments": arguments, "output": output})
+            tool_outputs.append({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": json.dumps(output, ensure_ascii=False, default=str),
+            })
+        response = client.responses.create(
+            model=ai_settings.openai_model or settings.OPENAI_MODEL,
+            instructions=ai_settings.system_prompt,
+            previous_response_id=response.id,
+            input=tool_outputs,
+            max_output_tokens=2000,
+            reasoning={"effort": "minimal"},
+            tools=ai_tool_definitions(),
+            parallel_tool_calls=False,
+            text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
+        )
     try:
         result = json.loads(response.output_text)
     except json.JSONDecodeError:
@@ -893,6 +1215,12 @@ def ai_reply(conversation):
         result = json.loads(response.output_text)
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
+    if tool_results:
+        result["tool_results"] = tool_results
+    created_leads = [row["output"].get("lead_id") for row in tool_results if row.get("name") == "client_lead_create" and row.get("output", {}).get("ok")]
+    if created_leads:
+        result["lead_created_id"] = created_leads[-1]
+        result["lead_ready"] = False
     return result
 
 
@@ -1011,6 +1339,8 @@ def create_ai_reply_for_conversation(conversation):
         changed.append("language")
     if changed:
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
+    if result.get("lead_created_id"):
+        result["lead_ready"] = False
     if result.get("catalog_items"):
         normalize_lead_catalog_items(result, conversation)
     if result.get("lead_ready") and not customer.name:

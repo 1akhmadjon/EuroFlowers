@@ -8,7 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_reply, ai_stock_rows, create_ai_reply_for_conversation, deduct_catalog_stock, mark_catalog_sold, normalize_ai_reply_text, normalize_lead_catalog_items, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, deduct_catalog_stock, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_lead_catalog_items, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -88,8 +88,8 @@ class BusinessRulesTests(TestCase):
         self.assertFalse(Lead.objects.filter(customer=customer).exists())
 
     @override_settings(OPENAI_API_KEY="test-key")
-    def test_ai_reply_sends_context_and_conversation_without_tools(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-no-tools", name="Ahmad")
+    def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-tools", name="Ahmad")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         conversation.messages.create(sender="customer", text="qanaqa gullar bor")
         payload = {
@@ -108,15 +108,42 @@ class BusinessRulesTests(TestCase):
         from unittest.mock import patch
         with patch("core.services.OpenAI") as openai_class:
             client = openai_class.return_value
-            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload))
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertNotIn("tools", kwargs)
-        self.assertNotIn("max_tool_calls", kwargs)
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image"})
+        self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
         self.assertTrue(kwargs["input"][0]["content"].startswith("REAL_CONTEXT_JSON:"))
         self.assertIn("qanaqa gullar bor", kwargs["input"][-1]["content"])
+
+    def test_ai_tool_definitions_are_whitelisted(self):
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image"})
+
+    def test_client_lead_create_tool_creates_customer_lead_and_usage(self):
+        self.item.status = "available"
+        self.item.save(update_fields=["status", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:10")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        result = execute_ai_tool("client_lead_create", {
+            "customer_name": "Ahmad",
+            "phone": "901234567",
+            "request_text": "Oq buket 1 dona, kelib olish",
+            "arrangement_type": "catalog",
+            "estimated_price": 500000,
+            "catalog_items": [{"catalog_name": "Oq buket", "quantity": 1}],
+            "stock_items": [],
+            "note": None,
+        }, conversation)
+        self.assertTrue(result["ok"])
+        customer.refresh_from_db()
+        self.assertEqual(customer.name, "Ahmad")
+        self.assertEqual(customer.phone, "+998901234567")
+        lead = Lead.objects.get(id=result["lead_id"])
+        self.assertEqual(lead.request_uz, "Oq buket 1 dona, kelib olish")
+        self.assertEqual(lead.source, "telegram")
+        self.assertTrue(LeadCatalogUsage.objects.filter(lead=lead, catalog_item=self.item, quantity=1).exists())
 
     def test_pending_customer_reply_debounces_to_latest_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
