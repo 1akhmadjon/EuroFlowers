@@ -92,6 +92,7 @@ class BusinessRulesTests(TestCase):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-tools", name="Ahmad")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         conversation.messages.create(sender="customer", text="qanaqa gullar bor")
+        conversation.messages.create(sender="ai", text="Skladimizda bor", metadata={"tool_results": [{"name": "get_stock", "output": {"stock": [{"price_per_stem": "105000.00"}]}}]})
         payload = {
             "reply": "Katalogdagi gullarni ko‘rib beraman.",
             "detected_language": "uz",
@@ -116,7 +117,8 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
         self.assertTrue(kwargs["input"][0]["content"].startswith("REAL_CONTEXT_JSON:"))
-        self.assertIn("qanaqa gullar bor", kwargs["input"][-1]["content"])
+        self.assertIn("qanaqa gullar bor", kwargs["input"][1]["content"])
+        self.assertIn("105000.00", kwargs["input"][-1]["content"])
 
     def test_ai_tool_definitions_are_whitelisted(self):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image"})
@@ -144,6 +146,10 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(lead.request_uz, "Oq buket 1 dona, kelib olish")
         self.assertEqual(lead.source, "telegram")
         self.assertTrue(LeadCatalogUsage.objects.filter(lead=lead, catalog_item=self.item, quantity=1).exists())
+
+    def test_ai_stock_rows_matches_long_price_query(self):
+        rows = ai_stock_rows("Mondial oq atirgul narxi va mavjudlik 10 dona", limit=10)
+        self.assertTrue(any(row["batch_id"] == self.batch.id for row in rows))
 
     def test_pending_customer_reply_debounces_to_latest_message(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")

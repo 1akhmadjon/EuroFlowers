@@ -620,6 +620,37 @@ def catalog_composition_summary(item):
     return rows
 
 
+def ai_search_terms(value):
+    text = compact_match_text(value)
+    replacements = {
+        "кок": "moviy",
+        "кўк": "moviy",
+        "синий": "moviy",
+        "голубой": "moviy",
+        "moviy": "blue",
+        "kok": "moviy",
+        "ko k": "moviy",
+        "гортензия": "gortenziya",
+        "гортензи": "gortenziya",
+        "гидрангея": "gortenziya",
+        "атиргул": "atirgul",
+        "роза": "atirgul",
+        "розы": "atirgul",
+        "пион": "pion",
+        "пиони": "pion",
+        "пушти": "pushti",
+        "розовый": "pushti",
+        "қизил": "qizil",
+        "кизил": "qizil",
+        "красный": "qizil",
+    }
+    expanded = text
+    for source, target in replacements.items():
+        expanded = expanded.replace(source, target)
+    stopwords = {"narxi", "narx", "nechpul", "qancha", "болади", "боларкан", "нархи", "нечпул", "dona", "tasi", "та", "дона", "buket", "savat", "yasash", "yasalgani", "qilamiz", "bilan", "uchun", "bor", "bormi", "mavjud", "price", "and", "the"}
+    return [term for term in dict.fromkeys((text + " " + expanded).split()) if len(term) >= 3 and term not in stopwords]
+
+
 def recent_customer_orders(customer):
     orders = []
     for lead in customer.leads.select_related("social_post").prefetch_related("catalog_usage__catalog_item", "stock_usage__stock_batch__variant__flower", "packaging_usage__packaging").order_by("-created_at")[:3]:
@@ -672,7 +703,23 @@ def ai_catalog_rows(query="", limit=24):
 def ai_stock_rows(query="", limit=24):
     queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("variant__flower__name_uz", "variant__color_uz", "-remaining_stems")
     if query:
-        queryset = queryset.filter(Q(variant__flower__name_uz__icontains=query) | Q(variant__flower__name_ru__icontains=query) | Q(variant__name_uz__icontains=query) | Q(variant__name_ru__icontains=query) | Q(variant__color_uz__icontains=query) | Q(variant__color_ru__icontains=query) | Q(variant__description_uz__icontains=query) | Q(variant__description_ru__icontains=query))
+        terms = ai_search_terms(query)
+        ranked = []
+        for batch in queryset:
+            haystack = compact_match_text(" ".join([
+                batch.variant.flower.name_uz,
+                batch.variant.flower.name_ru,
+                batch.variant.name_uz,
+                batch.variant.name_ru,
+                batch.variant.color_uz,
+                batch.variant.color_ru,
+                batch.variant.description_uz,
+                batch.variant.description_ru,
+            ]))
+            score = sum(1 for term in terms if term in haystack)
+            if score:
+                ranked.append((score, batch))
+        queryset = [batch for _, batch in sorted(ranked, key=lambda row: (-row[0], row[1].sale_price_per_stem))]
     rows = []
     for row in queryset[:limit]:
         rows.append({
@@ -712,7 +759,14 @@ def ai_basket_rows(limit=20):
 def ai_flower_variant_rows(query="", limit=24):
     queryset = FlowerVariant.objects.filter(is_active=True).select_related("flower").order_by("flower__name_uz", "color_uz", "name_uz")
     if query:
-        queryset = queryset.filter(Q(flower__name_uz__icontains=query) | Q(flower__name_ru__icontains=query) | Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(color_uz__icontains=query) | Q(color_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
+        terms = ai_search_terms(query)
+        ranked = []
+        for variant in queryset:
+            haystack = compact_match_text(" ".join([variant.flower.name_uz, variant.flower.name_ru, variant.name_uz, variant.name_ru, variant.color_uz, variant.color_ru, variant.description_uz, variant.description_ru]))
+            score = sum(1 for term in terms if term in haystack)
+            if score:
+                ranked.append((score, variant))
+        queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz))]
     rows = []
     for variant in queryset[:limit]:
         stock_rows = StockBatch.objects.filter(variant=variant, is_active=True, remaining_stems__gt=0).order_by("sale_price_per_stem")[:10]
@@ -1127,7 +1181,12 @@ def ai_reply(conversation):
     customer = conversation.customer
     history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
     fresh_session = bool(len(history_messages) > 1 and history_messages[-1].created_at - history_messages[-2].created_at >= timedelta(hours=24))
-    history = [{"role": "user" if m.sender == "customer" else "assistant", "content": m.text} for m in history_messages]
+    history = []
+    for message in history_messages:
+        content = message.text
+        if message.metadata:
+            content = json.dumps({"text": message.text, "metadata": message.metadata}, ensure_ascii=False, default=str)
+        history.append({"role": "user" if message.sender == "customer" else "assistant", "content": content})
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
