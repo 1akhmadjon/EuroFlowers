@@ -915,6 +915,13 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"\bolmaysizmi\b", "yuborasizmi", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\btaqsimlandisini\b", "taqsimlanishini", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\bQani,\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bborib olib ket", "kelib olib ket", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bborib olish", "kelib olish", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bombor(?:da|imizda)?\b", "skladimizda", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bомбор(?:да|имизда)?\b", "skladimizda", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"(?i)\bAjoyib\s*[-,]?\s*custom buyurtma qilasiz\.?\s*", "", normalized).strip()
+    normalized = re.sub(r"(?i)\bAvvalo:\s*", "", normalized).strip()
+    normalized = re.sub(r"(?is)Masalan:\s*[-\n ].*", "", normalized).strip()
     normalized = re.sub(r"\s*yoki alohida 10 dona novdali atirgul sifatida yetkazib beraylikmi", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"Coral Charm katalogi tayyor gul bo‘lsa, katalogdan tekshirib chiqay[.?!]?\s*", "Coral Charm dan custom buket qilib tayyorlab beramiz. ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s*katalogdan ko‘rsatib beraymi\??", "", normalized, flags=re.IGNORECASE)
@@ -923,6 +930,7 @@ def normalize_ai_reply_text(text):
     normalized = re.sub(r"(Buyurtma qabul qilindi:[^.?!]+[.?!]?)\s*Rahmat,\s*buyurtmangiz qabul qilindi,?\s*", r"\1\nRahmat, ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s+(Do[‘'ʻ`]?kon manzili:|Manzil:)", r"\n\n\1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\.\s+(Operatorlarimiz siz bilan bog[‘'ʻ`]?lanadi)", r".\n\n\1", normalized, flags=re.IGNORECASE)
+    normalized = normalize_contact_request_phrase(normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.replace("hozirtayyor", "hozir tayyor").replace("Hozirtayyor", "Hozir tayyor")
 
@@ -977,6 +985,15 @@ def clean_overlong_custom_reply_text(text):
     return cleaned or text
 
 
+def normalize_contact_request_phrase(text):
+    if not text:
+        return ""
+    cleaned = re.sub(r"ism(?:ingiz)?\s+va\s+(?:telefon\s+)?raqam(?:ingiz)?ni\s+(?:yozib\s+)?(?:yuborasizmi|yuboring|qoldiring)", "ism va raqamingizni yozib yuboraolasizmi?", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"telefon\s+raqam(?:ingiz)?ni\s+(?:to[‘'ʻ`]?liq\s+)?(?:yozib\s+)?(?:yuborasizmi|yuboring|qoldiring)", "raqamingizni yozib yuboraolasizmi?", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+\?\s*\.", "?", cleaned)
+    return cleaned
+
+
 def format_money(value):
     return f"{int(Decimal(str(value))):,}".replace(",", " ")
 
@@ -1018,13 +1035,25 @@ def normalize_flower_availability_reply(result, conversation):
 def catalog_flow_guardrail(result, conversation, recent_catalog):
     if not recent_catalog:
         return result
+    latest_text = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or ""
+    if is_price_objection_text(latest_text):
+        result["catalog_items"] = []
+        result["stock_items"] = []
+        result["lead_ready"] = False
+        result["handoff"] = False
+        result["reply"] = "Xohlasangiz operatorlarimiz sizga arzonroq variantlar bilan tanishtiradilar.\n\nIsm va raqamingizni yozib yuboraolasizmi?"
+        return result
+    if is_custom_build_text(latest_text):
+        result["catalog_items"] = []
+        result["arrangement_type"] = "basket" if "savat" in compact_match_text(latest_text) else "bouquet"
+        return result
     reply = result.get("reply", "")
     lowered = reply.lower()
     has_bad_custom_question = any(pattern in lowered for pattern in ["o‘lcham", "olcham", "paket", "custom buket", "maxsus buket", "buketmi yoki savatmi", "savatmi yoki buketmi"])
     if not has_bad_custom_question:
         return result
     customer = conversation.customer
-    last_text = conversation.messages.filter(sender="customer").order_by("-created_at").values_list("text", flat=True).first() or ""
+    last_text = latest_text
     result["catalog_items"] = [{"catalog_name": recent_catalog.name_uz, "quantity": 1}]
     result["arrangement_type"] = "catalog"
     result["estimated_price"] = float(recent_catalog.price)
@@ -1037,7 +1066,7 @@ def catalog_flow_guardrail(result, conversation, recent_catalog):
     elif "yetkaz" in compact_match_text(last_text) or re.search(r"\b(ga|ko[‘'ʻ`]?cha|mahalla|dom|uy|xadra|chilonzor|yunusobod|mirzo|bobur)\b", last_text, flags=re.IGNORECASE):
         result["reply"] = f"Tushunarli, {recent_catalog.name_uz} uchun yetkazib berish ma'lumotini yozib oldim.\n\nQaysi sana va vaqtga kerak?"
     else:
-        result["reply"] = f"{recent_catalog.name_uz} - {format_money(recent_catalog.price)} so‘m.\n\nYetkazib beraylikmi yoki borib olib ketasizmi?"
+        result["reply"] = f"{recent_catalog.name_uz} - {format_money(recent_catalog.price)} so‘m.\n\nYetkazib beraylikmi yoki kelib olib ketasizmi?"
     return result
 
 
@@ -1070,7 +1099,7 @@ def remove_premature_catalog_contact_request(text):
     cleaned = "\n".join(lines).rstrip()
     cleaned_lines = cleaned.splitlines()
     if cleaned != text and (not cleaned_lines or "?" not in cleaned_lines[-1]):
-        cleaned = cleaned.rstrip() + "\n\nQaysi biri yoqdi, rasmini ko‘rsataman?"
+        cleaned = cleaned.rstrip() + "\n\nQaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman."
     return cleaned
 
 
@@ -1149,7 +1178,7 @@ def ai_reply(conversation):
         " Katalog/tayyor buket so‘ralsa get_catalog chaqir. Aniq bitta katalog gulining rasmi yoki ma'lumoti so‘ralsa get_catalog query bilan chaqir va final catalog_items ichida faqat o‘sha katalog nomi quantity=1 bo‘lsin."
         " recent_catalog_selection bo‘lsa va mijoz manzil, sana, vaqt, 'olaman', 'kerak', 'tayyor yasalganni olaman' kabi yozsa, bu tayyor katalog buyurtmasi davomidir. Uni custom yasatish deb talqin qilma."
         " Tayyor katalog item tanlanganidan keyin o‘lcham, paket, custom buketmi, savatmi, qaysi guldan yasaymiz kabi savollarni hech qachon so‘rama. Tayyor katalog mahsuloti allaqachon yasalgan bo‘ladi."
-        " Tayyor katalog buyurtmasi flowi: avval yetkazib berishmi yoki borib olishmi aniqlanadi; yetkazish bo‘lsa manzil, sana va vaqt olinadi; keyin ism va telefon olinadi. Mijoz manzil/sana/vaqtni aytgan bo‘lsa qayta so‘rama, faqat qolgan ism yoki telefonni so‘ra."
+        " Tayyor katalog buyurtmasi flowi: avval yetkazib berishmi yoki kelib olib ketishmi aniqlanadi; yetkazish bo‘lsa manzil, sana va vaqt olinadi; keyin ism va telefon olinadi. Mijoz manzil/sana/vaqtni aytgan bo‘lsa qayta so‘rama, faqat qolgan ism yoki telefonni so‘ra."
         " Tayyor katalog buyurtmasida narx aniq bo‘ladi, florist haqi, o‘lcham, paket yoki tarkibni mijoz so‘ramasa aytma."
         " Custom yasatish/yig‘dirish konteksti faqat mijoz 'yasatmoqchiman', 'yig‘dirmoqchiman', 'yasab berasizlarmi', 'buket yasatishga', 'savat yasatishga', 'savatga yig‘ib' kabi aniq aytsa boshlanadi. Shundagina search_stock chaqir."
         " Custom yasatishga qanaqa gullar bor deb so‘ralsa search_stock chaqir, lekin stock narxlarini yozma. Faqat gul nomi, rangi va bo‘yini qisqa sanab, qaysi guldan yig‘ib beraylik deb so‘ra."
@@ -1162,19 +1191,21 @@ def ai_reply(conversation):
         " Katalog ro‘yxatini faqat raqamlangan formatda yoz: '1. Pion buketi - 800 000 so‘m'. Defisli bullet bilan '- Pion buketi' deb boshlama."
         " Katalog ro‘yxatida har bir qatorda narx yonida albatta 'so‘m' yoz: '1. Pion buketi - 800 000 so‘m'. 'Narxlar so‘mda' deb tepada umumiy yozib, qatorda so‘mni tashlab ketma."
         " Katalog ro‘yxati bosqichida ism, telefon, raqam, manzil, sana, vaqt yoki yetkazishni so‘rash taqiqlanadi. Bu bosqichdagi oxirgi savol aynan shu mazmunda bo‘lsin: 'Qaysi biri sizga ma'qul bo‘lsa tanlang, rasmlari bilan ko‘rsataman.' 'Yoki boshqa variant/miqdor kerakmi' deb so‘rama."
-        " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin."
+        " Custom buket yoki savat suhbatida bir javobda faqat bitta narsani aniqlashtir: avval gul/rang, keyin buketmi yoki savat, keyin miqdor, keyin ism/telefon. Bitta xabarda 3-5 ta savol bermagin. 'Ajoyib - custom buyurtma qilasiz', 'Avvalo:' kabi botga o‘xshash kirishlarni yozma."
         " Custom buket/savat suhbatida mijoz aniq so‘ramasa savat ro‘yxatini, bezak ro‘yxatini, parvarish bo‘yicha uzun maslahatni yoki bir nechta paket/uslub variantini sanama."
+        " Custom yasatishda mijoz aniq gul va miqdorni aytsa qisqa aniqlashtir: 'Buket qilib yig‘dirasizmi yoki savatga joylaymizmi?' Rang noaniq bo‘lsa faqat rangini so‘ra."
         " Custom buket/savat uchun narx aytilsa faqat taxminiy deb ayt. Florist haqi 50 000 so‘mdan boshlanishini va obyomga qarab o‘zgarishini ayt. Aniq narxni operator hisoblab berishini yoz."
         " Custom savat hisobida gullar narxi, mos savat va florist haqini taxminiy qo‘shib ayt; keyin 'Aniq narxni operatorimiz hisoblab beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?' deb so‘ra."
-        " Mijoz 'nimaga ism raqam kerak' yoki shunga o‘xshash so‘rasa javob aynan shu mazmunda bo‘lsin: 'Ism va raqamingiz operatorimiz sizga aloqaga chiqib, aniq ma'lumotlarni berishi uchun kerak.'"
-        " Mijoz do‘kon manzili, lokatsiya, qayerdaligi, ish vaqti yoki borib olib ketish haqida so‘rasa mijoz manzilini so‘rama. Do‘kon manzilini yoz: Bobur ko‘chasi 10, lokatsiya linki https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
-        " Mijoz borib olib ketmoqchi bo‘lsa, ism va telefon olingandan keyingi yakuniy javobda buyurtma qabul qilinganini ayt va do‘kon manzilini alohida blokda yoz: Bobur ko‘chasi 10, https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
+        " Mijoz 'nimaga ism raqam kerak' yoki shunga o‘xshash so‘rasa javob aynan shu mazmunda bo‘lsin: 'Ism va raqamingiz operatorlarimiz sizga aloqaga chiqib, aniq ma'lumotlarni berishi uchun kerak.'"
+        " Mijoz narx qimmatligini, boshqa joyda arzonroq ko‘rganini, skidka yoki arzonroq variant so‘rasa bahslashma, uzun izoh yozma, rasm taklif qilma. Javob aynan shu mazmunda bo‘lsin: 'Xohlasangiz operatorlarimiz sizga arzonroq variantlar bilan tanishtiradilar. Ism va raqamingizni yozib yuboraolasizmi?'"
+        " Mijoz do‘kon manzili, lokatsiya, qayerdaligi, ish vaqti yoki kelib olib ketish haqida so‘rasa mijoz manzilini so‘rama. Do‘kon manzilini yoz: Bobur ko‘chasi 10, lokatsiya linki https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
+        " Mijoz kelib olib ketmoqchi bo‘lsa, ism va telefon olingandan keyingi yakuniy javobda buyurtma qabul qilinganini ayt va do‘kon manzilini alohida blokda yoz: Bobur ko‘chasi 10, https://yandex.uz/maps/-/CTbofDyT, orientir Next Mall dan o'tgandan keyin o‘ng qo‘lda, ish vaqti 24/7."
         " Mijoz yetkazib berish narxi, dostavka usuli yoki qanday yetkazishingizni so‘rasa qisqa javob ber: Toshkent bo‘yicha gullarni Yandex Dostavka orqali chiqarib yuboramiz. Yetkazib berish narxini operator manzilga qarab aniqlashtirib beradi."
         " Mijoz '10 ta atirgul olmoqchiman' kabi yozsa, 'individual', 'paket', 'bog‘lam' kabi keraksiz variantlar o‘ylab topma. Qisqa javob ber: rangini aniqlashtir yoki buket qilib yig‘ib beraylikmi deb so‘ra."
         " Gulni alohida novda sifatida yetkazib berishni taklif qilma; mijoz custom gul so‘rasa buket yoki savat qilib yig‘ishni taklif qil."
         " Mijoz '3ta pochka dan', '3 pochka dan', '3 pochka' desa bu umumiy 3 pochka degani. Mijoz bir nechta buket demaguncha 'har bir buket 3 pochka mi yoki jami 3 pochka mi' deb qayta so‘rama."
         " Coral Charm, pion, atirgul kabi stock gul nomlarini mijoz custom yasatish kontekstida aytsa, katalogga o‘tkazma. Katalog faqat mijoz tayyor buket/katalog/story/post/reel so‘raganda ishlatiladi."
-        " Tool natijasida gul topilmasa yoki noaniq bo‘lsa, uzun variantlar sanama. Qisqa yoz: 'Bu gul bo‘yicha aniq ma'lumotni operatorimiz tekshirib beradi. Ismingiz va telefon raqamingizni yozib yuborasizmi?'"
+        " Tool natijasida gul topilmasa yoki noaniq bo‘lsa, uzun variantlar sanama. 'omborda' dema, 'skladimizda' de. Agar shu gulning boshqa ranglari bor bo‘lsa qisqa yoz: 'Skladimizda oq gortenziya yo‘q edi, o‘rniga pushti va krem gortenziya bor ekan.' Agar umuman topilmasa: 'Bu gul bo‘yicha aniq ma'lumotni operatorlarimiz tekshirib beradi. Ism va raqamingizni yozib yuboraolasizmi?'"
         " Mijoz aniq gul, miqdor, telefon va manzilni yuborgan bo‘lsa, keyingi savol faqat ism bo‘lsin. Mijoz ismini yozsa lead_ready=true qaytar."
         " 'Flarisla', 'floristla', 'floristlar', 'florisla' kabi yozuvlar florist xizmatini bildiradi, gul nomi emas. Bunday savolga 'Ha, floristlarimiz chiroyli qilib yig‘ib beradi' deb qisqa javob ber."
         " Ichki cheklovlarni mijozga yozma: 'so‘ramaymiz', 'taqiqlanadi', 'hozir so‘ramaymiz' kabi iboralarni ishlatma."
@@ -1184,6 +1215,7 @@ def ai_reply(conversation):
         " Mijoz custom yasatiladigan gul rasmini so‘rasa va aniq tayyor katalog item tanlanmagan bo‘lsa, qisqa yoz: 'Aynan siz so‘ragan custom buket hali tayyor rasmda yo‘q. Xohlasangiz katalogdagi o‘xshash variant rasmini ko‘rsataman.'"
         " Buyurtma qabul qilinganda uzun invoice yozma. 2-3 qatorda rahmat, buyurtma qisqacha, operatorlarimiz bog‘lanishini ayt. Hech qachon 'operator/jamoa', 'jamoa' yoki 'operatorimiz' deb yozma, faqat 'operatorlarimiz' deb yoz."
         " Mijozga hech qachon ichki id, ID, catalog_id, batch_id yoki qavs ichidagi raqamli ID yozma. 'catalog id 24', 'id yuboring', '24 deb yozing' kabi gaplar mutlaqo taqiqlanadi."
+        " Kontakt so‘rash kerak bo‘lsa doim shu iborani ishlat: 'Ism va raqamingizni yozib yuboraolasizmi?'"
         " Javobda '—', '•' va qavs belgilarini ishlatma. Ro‘yxat kerak bo‘lsa '1. Gul nomi - Narx: 800 000 so‘m' formatida yoz."
         " Mijoz 'uzur adashib yozdim', 'xato yozdim', 'e'tibor bermang' desa tool chaqirma, qisqa javob ber: 'Hechqisi yo‘q. Davom etamizmi?'"
         " Rasm yuborish faqat send_catalog_image tool orqali qilinadi. Final catalog_items rasm yuborish uchun emas, tanlangan katalogni metadata/lead uchun belgilashga ishlatiladi."
@@ -1340,6 +1372,16 @@ def is_catalog_image_request_text(text):
     return any(pattern in lowered for pattern in ["rasm", "korsat", "ko rsat", "tasha", "tashab", "tashavor", "tashen", "таш", "расм", "корсат", "кани"])
 
 
+def is_price_objection_text(text):
+    lowered = compact_match_text(text)
+    return any(pattern in lowered for pattern in ["qimmat", "киммат", "дорого", "arzon", "арзон", "boshqa joy", "бошка жой", "400 minga", "400 минг"])
+
+
+def is_custom_build_text(text):
+    lowered = compact_match_text(text)
+    return any(pattern in lowered for pattern in ["yegdir", "yegdiraman", "yigdir", "yasat", "yasab ber", "buket qilib", "savatga", "йегдир", "йегдираман", "йигдир", "ясат", "ясаб бер", "букет килиб", "сават"])
+
+
 def required_catalog_image_item(conversation, result=None):
     latest = recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else ""
     if not is_catalog_image_request_text(latest):
@@ -1403,7 +1445,7 @@ def is_contact_or_name_text(text, customer=None):
     if normalize_phone(value):
         return True
     lowered = compact_match_text(value)
-    if any(pattern in lowered for pattern in ["borib", "olaman", "opket", "yetkaz", "dastafka", "dostavka", "manzil", "kerak", "ertaga", "bugun", "soat"]):
+    if any(pattern in lowered for pattern in ["borib", "kelib", "olaman", "opket", "yetkaz", "dastafka", "dostavka", "manzil", "kerak", "ertaga", "bugun", "soat"]):
         return False
     if customer and customer.name and compact_match_text(value) == compact_match_text(customer.name):
         return True
@@ -1427,8 +1469,8 @@ def lead_customer_context_texts(conversation):
 def extract_lead_fulfillment_note(conversation):
     texts = lead_customer_context_texts(conversation)
     joined = compact_match_text(" ".join(texts))
-    if any(pattern in joined for pattern in ["borib ol", "borb opket", "opket", "olib ket", "do kondan olib", "dokondan olib"]):
-        return "borib olib ketish"
+    if any(pattern in joined for pattern in ["borib ol", "kelib ol", "borb opket", "opket", "olib ket", "do kondan olib", "dokondan olib"]):
+        return "kelib olib ketish"
     delivery_text = ""
     for text in reversed(texts):
         lowered = compact_match_text(text)
@@ -1472,7 +1514,11 @@ def is_catalog_browsing_intent(conversation):
 
 
 def normalize_lead_catalog_items(result, conversation):
-    inferred = catalog_item_from_text(conversation, result.get("reply"), recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else "", result.get("lead_request"))
+    latest_text = recent_customer_texts(conversation, limit=1)[0] if recent_customer_texts(conversation, limit=1) else ""
+    if is_custom_build_text(latest_text):
+        result["catalog_items"] = []
+        return []
+    inferred = catalog_item_from_text(conversation, result.get("reply"), latest_text, result.get("lead_request"))
     if inferred:
         result["catalog_items"] = [{"catalog_id": inferred.id, "quantity": 1}]
         result["estimated_price"] = float(inferred.price)

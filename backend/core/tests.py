@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
-from .services import ai_stock_rows, ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, clean_overlong_custom_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_flower_availability_reply, normalize_phone, process_pending_customer_reply, required_catalog_image_item, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
+from .services import ai_stock_rows, ai_tool_definitions, catalog_flow_guardrail, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, clean_overlong_custom_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_flower_availability_reply, normalize_lead_catalog_items, normalize_phone, process_pending_customer_reply, required_catalog_image_item, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 
 
@@ -101,6 +101,26 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("Mini velvet basket", cleaned)
         self.assertNotIn("Rustic", cleaned)
         self.assertIn("Shunday qilib tayyorlab beraylikmi?", cleaned)
+
+    def test_price_objection_reply_asks_contact_for_operator_options(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-price")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti atirgul buketi", name_ru="Розовый букет", arrangement_type="bouquet", price=500000, status="available")
+        conversation.messages.create(sender="ai", text="Pushti atirgul buketi - 500 000 so‘m", metadata={"catalog_items": [{"catalog_id": item.id, "quantity": 1}]})
+        conversation.messages.create(sender="customer", text="нимага киммат бошка жойда 400 минг")
+        result = catalog_flow_guardrail({"reply": "Narx qimmat ekan.", "catalog_items": [{"catalog_id": item.id, "quantity": 1}], "stock_items": [], "lead_ready": False, "handoff": False}, conversation, item)
+        self.assertEqual(result["catalog_items"], [])
+        self.assertIn("arzonroq variantlar", result["reply"])
+        self.assertIn("Ism va raqamingizni yozib yuboraolasizmi?", result["reply"])
+
+    def test_custom_build_text_does_not_normalize_to_catalog_item(self):
+        CatalogItem.objects.create(branch=self.branch, name_uz="Pion buketi", name_ru="Букет пионов", arrangement_type="bouquet", price=800000, status="available")
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-custom")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="йок ман озим йегдираман, кок гортензия билан пион кере")
+        result = {"reply": "Pion buketi - 800 000 so‘m", "catalog_items": [{"catalog_name": "Pion buketi", "quantity": 1}], "estimated_price": 800000}
+        self.assertEqual(normalize_lead_catalog_items(result, conversation), [])
+        self.assertEqual(result["catalog_items"], [])
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
@@ -235,7 +255,7 @@ class BusinessRulesTests(TestCase):
         conversation.messages.create(sender="customer", text="907776677")
         conversation.messages.create(sender="customer", text="Ahmad")
         enriched = enrich_lead_request_text("Pion buketi - 1 dona", conversation)
-        self.assertEqual(enriched, "Pion buketi - 1 dona, borib olib ketish")
+        self.assertEqual(enriched, "Pion buketi - 1 dona, kelib olib ketish")
 
     def test_lead_request_enrichment_adds_delivery_details(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-delivery", name="Ahmad", phone="+998901234567")
