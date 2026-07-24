@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-from .models import Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
 from .services import ai_tool_definitions, catalog_image_for_conversation, clean_catalog_order_reply_text, clean_image_reply_text, create_ai_reply_for_conversation, deduct_catalog_stock, enrich_lead_request_text, execute_ai_tool, mark_catalog_sold, normalize_ai_reply_text, normalize_phone, process_pending_customer_reply, resolve_instagram_event, resolve_telegram_update, telegram_catalog_rich_message
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
@@ -882,6 +882,49 @@ class ApiTests(TestCase):
         self.assertEqual(item.quantity_sold, 0)
         self.assertEqual(item.quantity_stock_deducted, 0)
         self.assertEqual(item.status, "available")
+
+    def test_catalog_lead_stock_returns_when_won_is_deleted(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Delete buket", name_ru="Delete bouquet", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        payload = {
+            "branch": self.branch.id,
+            "status": "new",
+            "request_uz": "Delete lead",
+            "arrangement_type": "catalog",
+            "customer_name": "Sardor",
+            "customer_phone": "901234001",
+            "catalog_usage_input": [{"catalog_item": item.id, "quantity": 2}],
+        }
+        response = self.client.post("/api/leads/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        lead_id = response.json()["id"]
+        response = self.client.patch(f"/api/leads/{lead_id}/", {"status": "won"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(item.quantity_sold, 2)
+        response = self.client.delete(f"/api/leads/{lead_id}/")
+        self.assertEqual(response.status_code, 204)
+        self.batch.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(item.quantity_sold, 0)
+        self.assertEqual(item.quantity_stock_deducted, 0)
+        self.assertFalse(Lead.objects.filter(id=lead_id).exists())
+        audit = AuditLog.objects.filter(action="lead_deleted", entity_id=str(lead_id)).first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.before["status"], "won")
+        self.assertEqual(audit.after["restored_before_delete"]["stock_deducted_at"], None)
+
+    def test_audit_hides_developer_logs_from_non_developer(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        developer = User.objects.create_user("developer-audit", password="password")
+        UserProfile.objects.create(user=developer, role="developer")
+        AuditLog.objects.create(user=developer, action="secret", entity_type="AISettings", entity_id="1")
+        AuditLog.objects.create(user=self.user, action="visible", entity_type="Lead", entity_id="1")
+        response = self.client.get("/api/audit/")
+        self.assertEqual(response.status_code, 403)
 
     def test_analytics_and_dashboard_include_top_selling_flowers(self):
         item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", name_ru="Analytics bouquet", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")

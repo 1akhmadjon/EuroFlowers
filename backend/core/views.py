@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.deletion import ProtectedError
@@ -113,6 +114,51 @@ def forbidden():
     return Response({"detail": "Sizda bu sahifa uchun ruxsat yo‘q."}, status=status.HTTP_403_FORBIDDEN)
 
 
+def json_safe(value):
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
+
+
+def instance_snapshot(instance):
+    data = {}
+    for field in instance._meta.concrete_fields:
+        key = field.name
+        value = getattr(instance, field.attname)
+        data[key] = value
+    if isinstance(instance, Lead):
+        data["catalog_usage"] = [{"catalog_item": row.catalog_item_id, "catalog_name": row.catalog_item.name_uz, "quantity": row.quantity} for row in instance.catalog_usage.select_related("catalog_item")]
+        data["stock_usage"] = [{"stock_batch": row.stock_batch_id, "batch_number": row.stock_batch.batch_number, "quantity_stems": row.quantity_stems, "quantity_bunches": row.quantity_bunches} for row in instance.stock_usage.select_related("stock_batch")]
+        data["packaging_usage"] = [{"packaging": row.packaging_id, "packaging_name": row.packaging.name_uz, "quantity": row.quantity} for row in instance.packaging_usage.select_related("packaging")]
+    if isinstance(instance, User):
+        profile = getattr(instance, "profile", None)
+        data["profile"] = {"role": profile.role, "language": profile.language} if profile else None
+        data["permissions"] = [{"page": row.page, "can_view": row.can_view, "can_control": row.can_control} for row in instance.page_permissions.order_by("page")]
+    return json_safe(data)
+
+
+def changed_snapshot(before, after):
+    keys = sorted(set(before) | set(after))
+    before_changed = {}
+    after_changed = {}
+    for key in keys:
+        if before.get(key) != after.get(key):
+            before_changed[key] = before.get(key)
+            after_changed[key] = after.get(key)
+    return before_changed, after_changed
+
+
+def write_audit(user, action, instance, before=None, after=None):
+    if isinstance(instance, AuditLog):
+        return None
+    return AuditLog.objects.create(
+        user=user if getattr(user, "is_authenticated", False) else None,
+        action=action,
+        entity_type=instance.__class__.__name__,
+        entity_id=str(getattr(instance, "id", "")),
+        before=json_safe(before or {}),
+        after=json_safe(after or {}),
+    )
+
+
 class ScopedViewSet(viewsets.ModelViewSet):
     permission_classes = [RolePermission]
 
@@ -132,6 +178,23 @@ class ScopedViewSet(viewsets.ModelViewSet):
         if queryset.model is Branch:
             return queryset.filter(id__in=branch_ids)
         return queryset
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_created", instance, before={}, after=instance_snapshot(instance))
+
+    def perform_update(self, serializer):
+        before = instance_snapshot(serializer.instance)
+        instance = serializer.save()
+        after = instance_snapshot(instance)
+        before_changed, after_changed = changed_snapshot(before, after)
+        if before_changed or after_changed:
+            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_updated", instance, before=before_changed, after=after_changed)
+
+    def perform_destroy(self, instance):
+        before = instance_snapshot(instance)
+        write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_deleted", instance, before=before, after={})
+        instance.delete()
 
 
 class BranchViewSet(ScopedViewSet):
@@ -161,17 +224,38 @@ class UserViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if request.data.get("role") == "developer" and not self.get_developer_role():
             return forbidden()
-        return super().create(request, *args, **kwargs)
+        response = super().create(request, *args, **kwargs)
+        if response.status_code < 400:
+            user = User.objects.filter(id=response.data.get("id")).first()
+            if user:
+                write_audit(request.user, "user_created", user, before={}, after=instance_snapshot(user))
+        return response
 
     def update(self, request, *args, **kwargs):
         if request.data.get("role") == "developer" and not self.get_developer_role():
             return forbidden()
-        return super().update(request, *args, **kwargs)
+        user = self.get_object()
+        before = instance_snapshot(user)
+        response = super().update(request, *args, **kwargs)
+        if response.status_code < 400:
+            user.refresh_from_db()
+            before_changed, after_changed = changed_snapshot(before, instance_snapshot(user))
+            if before_changed or after_changed:
+                write_audit(request.user, "user_updated", user, before=before_changed, after=after_changed)
+        return response
 
     def partial_update(self, request, *args, **kwargs):
         if request.data.get("role") == "developer" and not self.get_developer_role():
             return forbidden()
-        return super().partial_update(request, *args, **kwargs)
+        user = self.get_object()
+        before = instance_snapshot(user)
+        response = super().partial_update(request, *args, **kwargs)
+        if response.status_code < 400:
+            user.refresh_from_db()
+            before_changed, after_changed = changed_snapshot(before, instance_snapshot(user))
+            if before_changed or after_changed:
+                write_audit(request.user, "user_updated", user, before=before_changed, after=after_changed)
+        return response
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -183,8 +267,11 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def deactivate(self, request, pk=None):
         user = self.get_object()
+        before = instance_snapshot(user)
         user.is_active = False
         user.save(update_fields=["is_active"])
+        before_changed, after_changed = changed_snapshot(before, instance_snapshot(user))
+        write_audit(request.user, "user_deactivated", user, before=before_changed, after=after_changed)
         return Response(UserSerializer(user).data)
 
 
@@ -342,6 +429,7 @@ class CustomerViewSet(ScopedViewSet):
         try:
             return super().destroy(request, *args, **kwargs)
         except ProtectedError:
+            before = instance_snapshot(customer)
             customer.name = ""
             customer.phone = ""
             customer.instagram_username = ""
@@ -349,6 +437,8 @@ class CustomerViewSet(ScopedViewSet):
             customer.notes = (customer.notes + "\n" if customer.notes else "") + "Client arxivlandi. Lead tarixi saqlandi."
             customer.is_blocked = True
             customer.save(update_fields=["name", "phone", "instagram_username", "instagram_user_id", "notes", "is_blocked", "updated_at"])
+            before_changed, after_changed = changed_snapshot(before, instance_snapshot(customer))
+            write_audit(self.request.user, "customer_archived", customer, before=before_changed, after=after_changed)
             return Response({"detail": "Client arxivlandi. Lead tarixi saqlandi.", "id": customer.id, "archived": True})
 
 
@@ -380,6 +470,7 @@ class LeadViewSet(ScopedViewSet):
                 status_value = serializer.validated_data.get("status", "new")
                 extra["sort_order"] = next_lead_sort_order(branch, status_value)
             lead = serializer.save(**extra)
+            write_audit(self.request.user, "lead_created", lead, before={}, after=instance_snapshot(lead))
             if lead.status == "won":
                 try:
                     deduct_lead_stock(lead, self.request.user)
@@ -402,6 +493,7 @@ class LeadViewSet(ScopedViewSet):
         sort_order = serializer.validated_data.get("sort_order")
         with transaction.atomic():
             lead = Lead.objects.select_for_update().get(pk=lead.pk)
+            before_snapshot = instance_snapshot(lead)
             before_status = lead.status
             if sort_order is None:
                 sort_order = lead_sort_order_between(before, after, lead.branch, status_value)
@@ -417,6 +509,10 @@ class LeadViewSet(ScopedViewSet):
             elif before_status == "won" and lead.status != "won":
                 restore_lead_stock(lead, self.request.user)
                 lead.refresh_from_db()
+            after_snapshot = instance_snapshot(lead)
+            before_changed, after_changed = changed_snapshot(before_snapshot, after_snapshot)
+            if before_changed or after_changed:
+                write_audit(self.request.user, "lead_moved", lead, before=before_changed, after=after_changed)
         return Response(LeadSerializer(lead, context={"request": request}).data)
 
     @extend_schema(request=LeadColumnReorderSerializer, responses=inline_serializer(name="LeadColumnReorderResponse", fields={"updated": serializers.IntegerField()}))
@@ -442,6 +538,7 @@ class LeadViewSet(ScopedViewSet):
         with transaction.atomic():
             for index, lead_id in enumerate(lead_ids, start=1):
                 lead = Lead.objects.select_for_update().get(id=lead_id)
+                before_snapshot = instance_snapshot(lead)
                 before_status = lead.status
                 lead.status = status_value
                 lead.sort_order = Decimal(index * 1000)
@@ -453,10 +550,16 @@ class LeadViewSet(ScopedViewSet):
                         raise serializers.ValidationError({"detail": str(exc)})
                 elif before_status == "won" and lead.status != "won":
                     restore_lead_stock(lead, self.request.user)
+                lead.refresh_from_db()
+                after_snapshot = instance_snapshot(lead)
+                before_changed, after_changed = changed_snapshot(before_snapshot, after_snapshot)
+                if before_changed or after_changed:
+                    write_audit(self.request.user, "lead_reordered", lead, before=before_changed, after=after_changed)
         return Response({"updated": len(lead_ids)})
 
     def perform_update(self, serializer):
         with transaction.atomic():
+            before_snapshot = instance_snapshot(serializer.instance)
             before_status = serializer.instance.status
             lead = serializer.save()
             if lead.status == "won" and before_status != "won":
@@ -468,7 +571,23 @@ class LeadViewSet(ScopedViewSet):
             elif before_status == "won" and lead.status != "won":
                 restore_lead_stock(lead, self.request.user)
                 serializer.instance.refresh_from_db()
+            lead.refresh_from_db()
+            after_snapshot = instance_snapshot(lead)
+            before_changed, after_changed = changed_snapshot(before_snapshot, after_snapshot)
+            if before_changed or after_changed:
+                write_audit(self.request.user, "lead_updated", lead, before=before_changed, after=after_changed)
             transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            lead = Lead.objects.select_for_update().get(pk=instance.pk)
+            before_snapshot = instance_snapshot(lead)
+            if lead.stock_deducted_at:
+                restore_lead_stock(lead, self.request.user)
+                lead.refresh_from_db()
+            after_restore_snapshot = instance_snapshot(lead)
+            write_audit(self.request.user, "lead_deleted", lead, before=before_snapshot, after={"restored_before_delete": after_restore_snapshot})
+            lead.delete()
 
 
 class SocialPostViewSet(ScopedViewSet):
@@ -586,6 +705,13 @@ class AuditLogViewSet(ScopedViewSet):
     write_roles = []
     http_method_names = ["get", "head", "options"]
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(getattr(self.request.user, "profile", None), "role", None)
+        if role != "developer":
+            queryset = queryset.exclude(user__profile__role="developer")
+        return queryset
+
 
 class PagePermissionViewSet(viewsets.ModelViewSet):
     permission_classes = [RolePermission]
@@ -600,6 +726,22 @@ class PagePermissionViewSet(viewsets.ModelViewSet):
         if role != "developer":
             queryset = queryset.exclude(page__in=PagePermission.DEVELOPER_ONLY_PAGES).exclude(user__profile__role="developer")
         return queryset
+
+    def perform_create(self, serializer):
+        permission = serializer.save()
+        write_audit(self.request.user, "pagepermission_created", permission, before={}, after=instance_snapshot(permission))
+
+    def perform_update(self, serializer):
+        before = instance_snapshot(serializer.instance)
+        permission = serializer.save()
+        before_changed, after_changed = changed_snapshot(before, instance_snapshot(permission))
+        if before_changed or after_changed:
+            write_audit(self.request.user, "pagepermission_updated", permission, before=before_changed, after=after_changed)
+
+    def perform_destroy(self, instance):
+        before = instance_snapshot(instance)
+        write_audit(self.request.user, "pagepermission_deleted", instance, before=before, after={})
+        instance.delete()
 
 
 class InstagramWebhookEventViewSet(viewsets.ReadOnlyModelViewSet):
