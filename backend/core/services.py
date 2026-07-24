@@ -103,9 +103,10 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
     queryset = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
     if arrangement_type in ["bouquet", "basket", "box"]:
         queryset = queryset.filter(arrangement_type=arrangement_type)
-    generic_query_terms = {"vitrina", "vitrinadagi", "katalog", "catalog", "tayyor", "tayyor gullar", "tayyor buket", "tayyor buketlar", "gullar", "buketlar", "savatlar"}
+    generic_query_terms = {"vitrina", "katalog", "catalog", "tayyor", "mahsulot", "gulla", "buketlar", "savatlar"}
     normalized_query = compact_match_text(query)
-    if query and normalized_query not in generic_query_terms:
+    is_generic_query = bool(normalized_query) and any(term in normalized_query for term in generic_query_terms)
+    if query and not is_generic_query:
         queryset = queryset.filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
     rows = []
     for row in queryset[:limit]:
