@@ -324,6 +324,19 @@ class BusinessRulesTests(TestCase):
         rows = ai_stock_rows("gortenziya", limit=10)
         self.assertFalse(any(row["variant_uz"] in {"Snowball", "Limelight"} for row in rows))
 
+    def test_ai_stock_rows_include_full_variant_display_names(self):
+        flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya-display")
+        golland = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Golland", name_ru="Гортензия Голландия", color_uz="Moviy", color_ru="Синий")
+        kolumbiya = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Kolumbiya", name_ru="Гортензия Колумбия", color_uz="Moviy", color_ru="Синий")
+        StockBatch.objects.create(branch=self.branch, variant=golland, batch_number="GOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=70000, sale_price_per_stem=105000, sale_price_per_bunch=500000)
+        StockBatch.objects.create(branch=self.branch, variant=kolumbiya, batch_number="KOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=35000, sale_price_per_stem=60000, sale_price_per_bunch=285000)
+        rows = ai_stock_rows("gortenziya kok", limit=10)
+        rows_by_name = {row["display_name_uz"]: row for row in rows}
+        self.assertIn("Gortenziya Golland Moviy", rows_by_name)
+        self.assertIn("Gortenziya Kolumbiya Moviy", rows_by_name)
+        self.assertEqual(rows_by_name["Gortenziya Golland Moviy"]["price_per_stem"], "105000.00")
+        self.assertEqual(rows_by_name["Gortenziya Kolumbiya Moviy"]["price_per_stem"], "60000.00")
+
     def test_ai_flower_variant_rows_can_show_specific_variant_without_stock(self):
         flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya")
         FlowerVariant.objects.create(flower=flower, name_uz="Snowball", name_ru="Snowball", color_uz="Oq", color_ru="Белый")

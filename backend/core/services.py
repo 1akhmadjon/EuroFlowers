@@ -130,9 +130,27 @@ def stock_availability(batch):
     return "bor"
 
 
+def flower_variant_display_name(variant, language):
+    flower_name = variant.flower.name_ru if language == "ru" else variant.flower.name_uz
+    variant_name = variant.name_ru if language == "ru" else variant.name_uz
+    color = variant.color_ru if language == "ru" else variant.color_uz
+    flower_compact = compact_match_text(flower_name)
+    variant_compact = compact_match_text(variant_name)
+    if variant_name and flower_compact and variant_compact.startswith(flower_compact):
+        parts = [variant_name]
+    else:
+        parts = [flower_name, variant_name]
+    current_compact = compact_match_text(" ".join(part for part in parts if part))
+    if color and compact_match_text(color) not in current_compact:
+        parts.append(color)
+    return " ".join(part for part in parts if part).strip()
+
+
 def stock_batch_ai_row(batch):
     return {
         "batch_id": batch.id,
+        "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
+        "display_name_ru": flower_variant_display_name(batch.variant, "ru"),
         "flower_uz": batch.variant.flower.name_uz,
         "flower_ru": batch.variant.flower.name_ru,
         "variant_uz": batch.variant.name_uz,
@@ -156,6 +174,8 @@ def stock_batch_ai_row(batch):
 def variant_without_stock_ai_row(variant):
     return {
         "batch_id": None,
+        "display_name_uz": flower_variant_display_name(variant, "uz"),
+        "display_name_ru": flower_variant_display_name(variant, "ru"),
         "flower_uz": variant.flower.name_uz,
         "flower_ru": variant.flower.name_ru,
         "variant_uz": variant.name_uz,
@@ -328,6 +348,8 @@ def ai_flower_variant_rows(query="", limit=24):
         stock_rows = StockBatch.objects.filter(variant=variant, is_active=True).order_by("-remaining_stems", "sale_price_per_stem", "id")[:10]
         rows.append({
             "variant_id": variant.id,
+            "display_name_uz": flower_variant_display_name(variant, "uz"),
+            "display_name_ru": flower_variant_display_name(variant, "ru"),
             "flower_uz": variant.flower.name_uz,
             "flower_ru": variant.flower.name_ru,
             "variant_uz": variant.name_uz,
@@ -338,6 +360,8 @@ def ai_flower_variant_rows(query="", limit=24):
             "description_ru": variant.description_ru,
             "active_stock": [{
                 "batch_id": batch.id,
+                "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
+                "display_name_ru": flower_variant_display_name(batch.variant, "ru"),
                 "height_label": batch.height_label,
                 "availability": stock_availability(batch),
                 "remaining_stems": batch.remaining_stems,
