@@ -160,6 +160,10 @@ class FlowerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Flower
         fields = "__all__"
+        extra_kwargs = {"slug": {"required": False, "allow_blank": True, "allow_null": True}}
+
+    def validate_slug(self, value):
+        return value or None
 
 
 class FlowerVariantSerializer(serializers.ModelSerializer):

@@ -70,13 +70,18 @@ class PagePermission(TimeStampedModel):
 class Flower(TimeStampedModel):
     name_uz = models.CharField(max_length=120)
     name_ru = models.CharField(max_length=120)
-    slug = models.SlugField(unique=True)
+    slug = models.SlugField(unique=True, null=True, blank=True)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
     season_start_month = models.PositiveSmallIntegerField(null=True, blank=True)
     season_end_month = models.PositiveSmallIntegerField(null=True, blank=True)
     image_url = models.URLField(blank=True)
     is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.slug == "":
+            self.slug = None
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name_uz
