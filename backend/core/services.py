@@ -229,6 +229,9 @@ def ai_search_terms(value):
         "пиони": "pion",
         "пушти": "pushti",
         "розовый": "pushti",
+        "ок": "oq",
+        "оқ": "oq",
+        "белый": "oq",
         "қизил": "qizil",
         "кизил": "qizil",
         "красный": "qizil",
@@ -238,6 +241,10 @@ def ai_search_terms(value):
         expanded = expanded.replace(source, target)
     stopwords = {"narxi", "narx", "nechpul", "qancha", "болади", "боларкан", "нархи", "нечпул", "dona", "tasi", "та", "дона", "buket", "savat", "yasash", "yasalgani", "qilamiz", "bilan", "uchun", "bor", "bormi", "mavjud", "price", "and", "the"}
     return [term for term in dict.fromkeys((text + " " + expanded).split()) if len(term) >= 3 and term not in stopwords]
+
+
+def ai_color_search_terms(terms):
+    return {term for term in terms if term in {"moviy", "blue", "pushti", "qizil", "oq", "yashil", "sariq", "binafsha"}}
 
 
 def recent_customer_orders(customer):
@@ -305,9 +312,12 @@ def ai_stock_rows(query="", limit=24):
     )
     if query:
         terms = ai_search_terms(query)
+        color_terms = ai_color_search_terms(terms)
         ranked = []
         for variant in queryset:
             haystack = flower_variant_search_haystack(variant)
+            if color_terms and not any(term in haystack for term in color_terms):
+                continue
             score = sum(1 for term in terms if term in haystack)
             if score:
                 ranked.append((score, variant))
@@ -336,9 +346,12 @@ def ai_flower_variant_rows(query="", limit=24):
     queryset = FlowerVariant.objects.filter(is_active=True).select_related("flower").order_by("flower__name_uz", "color_uz", "name_uz")
     if query:
         terms = ai_search_terms(query)
+        color_terms = ai_color_search_terms(terms)
         ranked = []
         for variant in queryset:
             haystack = flower_variant_search_haystack(variant)
+            if color_terms and not any(term in haystack for term in color_terms):
+                continue
             score = sum(1 for term in terms if term in haystack)
             if score:
                 ranked.append((score, variant))

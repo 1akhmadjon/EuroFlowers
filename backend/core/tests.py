@@ -336,6 +336,7 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Gortenziya Kolumbiya Moviy", rows_by_name)
         self.assertEqual(rows_by_name["Gortenziya Golland Moviy"]["price_per_stem"], "105000.00")
         self.assertEqual(rows_by_name["Gortenziya Kolumbiya Moviy"]["price_per_stem"], "60000.00")
+        self.assertTrue(all(row["color_uz"] == "Moviy" for row in rows if row["flower_uz"] == "Gortenziya"))
 
     def test_ai_flower_variant_rows_can_show_specific_variant_without_stock(self):
         flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya")
