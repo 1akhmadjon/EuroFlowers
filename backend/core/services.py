@@ -81,6 +81,38 @@ def language_control_message(reply_script):
     )
 
 
+def customer_message_is_greeting(text):
+    compact = compact_match_text(text)
+    greeting_markers = {
+        "salom", "assalomu", "assalomalaykum", "assalomualaykum", "assalomu alaykum",
+        "ассалому", "ассаломуалайкум", "ассалому алайкум", "салом", "здравствуйте", "привет",
+    }
+    return any(marker in compact for marker in greeting_markers)
+
+
+def greeting_control_message(reply_script):
+    if reply_script == "uz_cyril":
+        return (
+            "GREETING_CONTROL:\n"
+            "This is the first AI reply in the session and the customer greeted in Uzbek Cyrillic before asking a question.\n"
+            "Start the reply with an Uzbek Cyrillic greeting, then answer the customer's business question in the same message.\n"
+            "Do not send greeting alone."
+        )
+    if reply_script == "ru":
+        return (
+            "GREETING_CONTROL:\n"
+            "This is the first AI reply in the session and the customer greeted before asking a question.\n"
+            "Start the reply with a Russian greeting, then answer the customer's business question in the same message.\n"
+            "Do not send greeting alone."
+        )
+    return (
+        "GREETING_CONTROL:\n"
+        "This is the first AI reply in the session and the customer greeted before asking a question.\n"
+        "Start the reply with an Uzbek Latin greeting, then answer the customer's business question in the same message.\n"
+        "Do not send greeting alone."
+    )
+
+
 def catalog_composition_summary(item):
     rows = []
     for row in item.composition.select_related("stock_batch__variant__flower"):
@@ -720,8 +752,11 @@ def ai_reply(conversation):
         history.append({"role": "user" if message.sender == "customer" else "assistant", "content": content})
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
+    latest_ai_index = max((index for index, message in enumerate(history_messages) if message.sender == "ai"), default=-1)
+    pending_customer_messages = [message.text for message in history_messages[latest_ai_index + 1:] if message.sender == "customer"]
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
     reply_script = detect_customer_reply_script(last_customer_message)
+    must_greet = not has_ai_reply_in_session and any(customer_message_is_greeting(text) for text in pending_customer_messages)
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
@@ -739,8 +774,10 @@ def ai_reply(conversation):
             "has_ai_reply_in_session": has_ai_reply_in_session,
             "ai_replies_count": ai_replies_count,
             "last_customer_message": last_customer_message,
+            "pending_customer_messages": pending_customer_messages,
             "latest_reply_script": reply_script,
             "language_control": language_control_message(reply_script),
+            "conversation_start_requires_greeting": must_greet,
             "social_post": ai_post_context(conversation),
         },
         "business": {
@@ -758,7 +795,10 @@ def ai_reply(conversation):
     model_input = [
         {"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)},
         {"role": "user", "content": language_control_message(reply_script)},
-    ] + history
+    ]
+    if must_greet:
+        model_input.append({"role": "user", "content": greeting_control_message(reply_script)})
+    model_input += history
     response_kwargs = {
         "model": ai_settings.openai_model or settings.OPENAI_MODEL,
         "instructions": ai_settings.system_prompt,

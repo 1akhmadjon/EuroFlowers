@@ -224,6 +224,36 @@ class BusinessRulesTests(TestCase):
         self.assertIn("qanaqa gullar bor", kwargs["input"][2]["content"])
         self.assertIn("105000.00", kwargs["input"][-1]["content"])
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_ai_reply_adds_greeting_control_for_first_batched_greeting(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-greeting-batch")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="Ассалому Алайкум")
+        conversation.messages.create(sender="customer", text="гортензия кере")
+        payload = {
+            "reply": "Ассалому алайкум! Складимизда гортензия бор.",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
+            result = ai_reply(conversation)
+        kwargs = client.responses.create.call_args.kwargs
+        self.assertIn("Uzbek Cyrillic", kwargs["input"][1]["content"])
+        self.assertTrue(kwargs["input"][2]["content"].startswith("GREETING_CONTROL:"))
+        self.assertIn("Ассалому Алайкум", kwargs["input"][3]["content"])
+        self.assertEqual(result["detected_language"], "uz")
+
     def test_ai_tool_definitions_are_whitelisted(self):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images"})
 
