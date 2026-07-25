@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
-from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, execute_ai_tool, normalize_phone, process_pending_customer_reply
+from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 
@@ -58,6 +58,11 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(normalize_phone("+998 ** *** ** 67"), "")
         self.assertEqual(normalize_phone("+99867"), "")
         self.assertEqual(normalize_phone("67"), "")
+
+    def test_detect_customer_reply_script_distinguishes_uzbek_cyrillic_from_russian(self):
+        self.assertEqual(detect_customer_reply_script("гортензия кере"), "uz_cyril")
+        self.assertEqual(detect_customer_reply_script("силада сотаслами ози"), "uz_cyril")
+        self.assertEqual(detect_customer_reply_script("сколько стоит гортензия"), "ru")
 
     def test_ai_catalog_generic_query_returns_available_items(self):
         from .services import ai_catalog_rows
@@ -215,7 +220,8 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
         self.assertTrue(kwargs["input"][0]["content"].startswith("REAL_CONTEXT_JSON:"))
-        self.assertIn("qanaqa gullar bor", kwargs["input"][1]["content"])
+        self.assertTrue(kwargs["input"][1]["content"].startswith("LANGUAGE_CONTROL:"))
+        self.assertIn("qanaqa gullar bor", kwargs["input"][2]["content"])
         self.assertIn("105000.00", kwargs["input"][-1]["content"])
 
     def test_ai_tool_definitions_are_whitelisted(self):

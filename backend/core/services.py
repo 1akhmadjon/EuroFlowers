@@ -34,6 +34,53 @@ def valid_customer_name(value):
     return bool(text) and compact_match_text(text) not in {"", "unknown", "nomalum", "noma lum"}
 
 
+def detect_customer_reply_script(text):
+    value = text or ""
+    compact = compact_match_text(value)
+    has_cyrillic = bool(re.search(r"[а-яёқўғҳ]", value.lower()))
+    if not has_cyrillic:
+        return "uz_latin"
+    uz_markers = {
+        "канча", "канчадан", "нечпул", "канака", "канакаси", "силада", "сизларда", "борми",
+        "бовотти", "кере", "керак", "керакми", "килиб", "бер", "беринг", "пушти", "кизил",
+        "қизил", "кок", "кўк", "ок", "оқ", "манга", "менга", "шуни", "бита", "битта",
+        "дона", "сават", "гулла", "гуллар", "бизда", "нарх", "нархи", "сум", "сўм",
+    }
+    if any(marker in compact for marker in uz_markers):
+        return "uz_cyril"
+    ru_markers = {
+        "сколько", "стоит", "продается", "продаете", "есть", "какие", "почему", "дорого",
+        "дешево", "доставка", "нужно", "цвет", "штук", "можно", "заказать",
+    }
+    if any(marker in compact for marker in ru_markers):
+        return "ru"
+    return "uz_cyril"
+
+
+def language_control_message(reply_script):
+    if reply_script == "uz_cyril":
+        return (
+            "LANGUAGE_CONTROL:\n"
+            "The latest customer message is Uzbek written in Cyrillic script.\n"
+            "Reply fully in Uzbek Cyrillic script only.\n"
+            "Do not reply in Russian.\n"
+            "Use detected_language = uz."
+        )
+    if reply_script == "ru":
+        return (
+            "LANGUAGE_CONTROL:\n"
+            "The latest customer message is Russian.\n"
+            "Reply fully in Russian only.\n"
+            "Use detected_language = ru."
+        )
+    return (
+        "LANGUAGE_CONTROL:\n"
+        "The latest customer message is Uzbek Latin.\n"
+        "Reply fully in Uzbek Latin only.\n"
+        "Use detected_language = uz."
+    )
+
+
 def catalog_composition_summary(item):
     rows = []
     for row in item.composition.select_related("stock_batch__variant__flower"):
@@ -674,6 +721,7 @@ def ai_reply(conversation):
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
+    reply_script = detect_customer_reply_script(last_customer_message)
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
     context = {
@@ -691,6 +739,8 @@ def ai_reply(conversation):
             "has_ai_reply_in_session": has_ai_reply_in_session,
             "ai_replies_count": ai_replies_count,
             "last_customer_message": last_customer_message,
+            "latest_reply_script": reply_script,
+            "language_control": language_control_message(reply_script),
             "social_post": ai_post_context(conversation),
         },
         "business": {
@@ -705,7 +755,10 @@ def ai_reply(conversation):
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     client = OpenAI(api_key=api_key)
-    model_input = [{"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)}] + history
+    model_input = [
+        {"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)},
+        {"role": "user", "content": language_control_message(reply_script)},
+    ] + history
     response_kwargs = {
         "model": ai_settings.openai_model or settings.OPENAI_MODEL,
         "instructions": ai_settings.system_prompt,
@@ -760,6 +813,10 @@ def ai_reply(conversation):
     result.setdefault("stock_items", [])
     if tool_results:
         result["tool_results"] = tool_results
+    if reply_script in ["uz_cyril", "uz_latin"]:
+        result["detected_language"] = "uz"
+    elif reply_script == "ru":
+        result["detected_language"] = "ru"
     created_leads = [row["output"].get("lead_id") for row in tool_results if row.get("name") == "client_lead_create" and row.get("output", {}).get("ok")]
     if created_leads:
         result["lead_created_id"] = created_leads[-1]
