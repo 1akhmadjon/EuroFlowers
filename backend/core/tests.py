@@ -156,6 +156,35 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("Qaysini tanlaysiz", reply.text)
         self.assertNotIn("rasmni", reply.text.lower())
 
+    def test_ai_multiple_selected_catalog_images_are_sent(self):
+        self.item.status = "available"
+        self.item.image_url = "https://example.com/oq-buket.jpg"
+        self.item.save(update_fields=["status", "image_url", "updated_at"])
+        second = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti buket", name_ru="Pink bouquet", arrangement_type="bouquet", price=600000, status="available", image_url="https://example.com/pushti-buket.jpg")
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-multi-catalog")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        conversation.messages.create(sender="customer", text="shu ikkalasini rasmini yuboring")
+        payload = {
+            "reply": "Rasmlarini ko'rsataman.",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": "catalog",
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [{"catalog_name": self.item.name_uz, "quantity": 1}, {"catalog_name": second.name_uz, "quantity": 1}],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload), patch("core.services.instagram_send_image", return_value={"ok": True}) as image_mock:
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertEqual(image_mock.call_count, 2)
+        image_mock.assert_any_call("ig-multi-catalog", "https://example.com/oq-buket.jpg")
+        image_mock.assert_any_call("ig-multi-catalog", "https://example.com/pushti-buket.jpg")
+        self.assertEqual(reply.metadata["tool_results"][-1]["name"], "send_catalog_images")
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-tools", name="Ahmad")
@@ -181,7 +210,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
@@ -190,7 +219,7 @@ class BusinessRulesTests(TestCase):
         self.assertIn("105000.00", kwargs["input"][-1]["content"])
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = CatalogItem.objects.create(branch=self.branch, name_uz="Oq savat", name_ru="Белая корзина", arrangement_type="basket", price=700000, status="available")
@@ -278,6 +307,17 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(mocked.call_count, 1)
         self.assertEqual(conversation.ai_replied_to_message_id, second.id)
 
+    def test_delayed_reply_waits_until_latest_message_is_old_enough(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:444", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        message = conversation.messages.create(sender="customer", text="salom")
+        from unittest.mock import patch
+        with patch("core.tasks.process_delayed_telegram_reply.apply_async") as schedule_mock, patch("core.tasks.process_pending_customer_reply") as reply_mock:
+            result = process_delayed_telegram_reply(conversation.id, message.id, "444")
+        self.assertIsNone(result)
+        schedule_mock.assert_called_once()
+        reply_mock.assert_not_called()
+
     def test_pending_customer_reply_handles_empty_social_post(self):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-no-post", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch, social_post=None)
@@ -316,6 +356,7 @@ class BusinessRulesTests(TestCase):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
+        Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(seconds=8))
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
         from unittest.mock import patch
         with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
@@ -327,6 +368,7 @@ class BusinessRulesTests(TestCase):
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
+        Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(seconds=8))
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Rasmini yubordim.", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}], "image_tool_results": [{"image_sent": True, "catalog_id": self.item.id}]})
         from unittest.mock import patch
         with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}):

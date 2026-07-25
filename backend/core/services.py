@@ -15,6 +15,7 @@ SHOP_ADDRESS = "Bobur ko‘chasi 10"
 SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTfQ6TMD"
 SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
 SHOP_WORKING_HOURS = "24/7"
+AI_REPLY_WAIT_SECONDS = 7
 
 
 def normalize_phone(value):
@@ -485,7 +486,35 @@ def ai_tool_definitions():
             },
             "strict": True,
         },
+        {
+            "type": "function",
+            "name": "send_catalog_images",
+            "description": "Katalogdagi bir nechta aniq buket/savat rasmlarini mijozga yuborish.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "queries": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["queries"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
     ]
+
+
+def send_catalog_item_image(conversation, item):
+    customer = conversation.customer
+    image_url = item.image_url or (item.social_post.image_url if item.social_post_id else "")
+    if not image_url:
+        return {"ok": False, "detail": "image_not_found", "catalog_id": item.id, "catalog_name": item.name_uz}
+    sent = None
+    if customer.instagram_user_id.startswith("telegram:"):
+        sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
+    elif customer.instagram_user_id:
+        sent = instagram_send_image(customer.instagram_user_id, image_url)
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
+    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url}
 
 
 def execute_ai_tool(name, arguments, conversation):
@@ -499,6 +528,16 @@ def execute_ai_tool(name, arguments, conversation):
         return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100), "baskets": ai_basket_rows(limit=30)}
     if name == "get_flower_variant_info":
         return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
+    if name == "send_catalog_images":
+        results = []
+        seen = set()
+        for query in arguments.get("queries") or []:
+            item = _catalog_item_for_ai(query)
+            if not item or item.id in seen:
+                continue
+            seen.add(item.id)
+            results.append(send_catalog_item_image(conversation, item))
+        return {"ok": bool(results), "images": results}
     if name == "send_catalog_image":
         query = arguments.get("query") or ""
         item = _catalog_item_for_ai(query)
@@ -506,16 +545,7 @@ def execute_ai_tool(name, arguments, conversation):
             item = CatalogItem.objects.filter(status="available").filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query)).select_related("social_post").first()
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
-        image_url = item.image_url or (item.social_post.image_url if item.social_post_id else "")
-        if not image_url:
-            return {"ok": False, "detail": "image_not_found", "catalog_name": item.name_uz}
-        sent = None
-        if customer.instagram_user_id.startswith("telegram:"):
-            sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
-        elif customer.instagram_user_id:
-            sent = instagram_send_image(customer.instagram_user_id, image_url)
-        Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
-        return {"ok": True, "image_sent": True, "catalog_name": item.name_uz, "image_url": image_url}
+        return send_catalog_item_image(conversation, item)
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}
     name_value = (arguments.get("customer_name") or "").strip()
@@ -752,6 +782,17 @@ def ingest_customer_message(conversation, message_text, instagram_message_id="",
     return message
 
 
+def ai_reply_wait_seconds_remaining(conversation_id, expected_message_id):
+    conversation = Conversation.objects.filter(id=conversation_id).first()
+    if not conversation:
+        return None
+    latest = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    if not latest or latest.id != expected_message_id:
+        return None
+    elapsed = (timezone.now() - latest.created_at).total_seconds()
+    return max(0, AI_REPLY_WAIT_SECONDS - elapsed)
+
+
 def recent_catalog_item_for_conversation(conversation):
     for message in conversation.messages.exclude(metadata={}).order_by("-created_at")[:20]:
         for row in (message.metadata or {}).get("catalog_items") or []:
@@ -859,8 +900,10 @@ def ai_reply_asks_for_catalog_image(text):
         "rasmini yuboraymi",
         "rasmni korsataman",
         "rasmini korsataman",
+        "rasmlarini korsataman",
         "rasmni ko rsataman",
         "rasmini ko rsataman",
+        "rasmlarini ko rsataman",
         "qaysini tanlaysiz",
     ]
     return any(phrase in compact for phrase in phrases)
@@ -874,6 +917,17 @@ def catalog_image_already_sent(conversation, item):
         if str(image_result.get("catalog_id") or "") == str(item.id) and image_result.get("sent") is not None:
             return True
     return False
+
+
+def catalog_items_from_ai_result(result):
+    items = []
+    seen = set()
+    for row in result.get("catalog_items") or []:
+        item = _catalog_item_for_ai(row.get("catalog_name"))
+        if item and item.id not in seen:
+            seen.add(item.id)
+            items.append(item)
+    return items
 
 
 def single_catalog_item_from_ai_result(result, conversation):
@@ -897,13 +951,24 @@ def single_catalog_item_from_ai_result(result, conversation):
     return None, ""
 
 
-def enforce_single_catalog_image_flow(result, conversation):
+def enforce_catalog_image_flow(result, conversation):
+    selected_items = catalog_items_from_ai_result(result)
+    if len(selected_items) > 1 and ai_reply_asks_for_catalog_image(result.get("reply", "")):
+        outputs = []
+        for item in selected_items:
+            if catalog_image_already_sent(conversation, item):
+                outputs.append({"ok": False, "detail": "image_already_sent", "catalog_id": item.id, "catalog_name": item.name_uz})
+            else:
+                outputs.append(send_catalog_item_image(conversation, item))
+        result.setdefault("tool_results", [])
+        result["tool_results"].append({"name": "send_catalog_images", "arguments": {"queries": [item.name_uz for item in selected_items]}, "output": {"ok": True, "images": outputs}})
+        return result
     item, source = single_catalog_item_from_ai_result(result, conversation)
     if not item or not ai_reply_asks_for_catalog_image(result.get("reply", "")):
         return result
     tool_result = {"ok": False, "detail": "image_already_sent", "catalog_name": item.name_uz}
     if not catalog_image_already_sent(conversation, item):
-        tool_result = execute_ai_tool("send_catalog_image", {"query": item.name_uz}, conversation)
+        tool_result = send_catalog_item_image(conversation, item)
     result.setdefault("tool_results", [])
     result["tool_results"].append({"name": "send_catalog_image", "arguments": {"query": item.name_uz}, "output": tool_result})
     result["catalog_items"] = [{"catalog_name": item.name_uz, "quantity": 1}]
@@ -953,7 +1018,7 @@ def create_ai_reply_for_conversation(conversation):
         result["lead_ready"] = False
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
-    result = enforce_single_catalog_image_flow(result, conversation)
+    result = enforce_catalog_image_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
         Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)

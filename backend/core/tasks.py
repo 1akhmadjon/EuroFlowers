@@ -1,8 +1,9 @@
 from celery import shared_task
+from math import ceil
 import threading
 import time
 from .platform_services import instagram_send, instagram_sender_action, send_due_lead_recalls, send_lead_recall, telegram_send, telegram_sender_action
-from .services import SHOP_LOCATION_LINK, process_pending_customer_reply, should_start_ai_reply
+from .services import SHOP_LOCATION_LINK, ai_reply_wait_seconds_remaining, process_pending_customer_reply, should_start_ai_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 
 
@@ -56,13 +57,19 @@ def keep_typing(send_action, stop_event, error_label, interval=4):
 def process_instagram_webhook(payload):
     jobs = resolve_instagram_event(payload)
     for job in jobs:
-        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=8)
+        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=7)
     return jobs
 
 
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
 def process_delayed_instagram_reply(conversation_id, expected_message_id, recipient_id):
     if not should_start_ai_reply(conversation_id, expected_message_id):
+        return None
+    remaining = ai_reply_wait_seconds_remaining(conversation_id, expected_message_id)
+    if remaining is None:
+        return None
+    if remaining > 0:
+        process_delayed_instagram_reply.apply_async(args=[conversation_id, expected_message_id, recipient_id], countdown=ceil(remaining))
         return None
     stop_typing = threading.Event()
     typing_thread = threading.Thread(target=keep_typing, args=(lambda: instagram_sender_action(recipient_id, "typing_on"), stop_typing, f"INSTAGRAM_TYPING_ON_FAILED recipient={recipient_id}"), daemon=True)
@@ -87,13 +94,19 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
 def process_telegram_webhook(payload):
     jobs = resolve_telegram_update(payload)
     for job in jobs:
-        process_delayed_telegram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["chat_id"]], countdown=8)
+        process_delayed_telegram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["chat_id"]], countdown=7)
     return jobs
 
 
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
 def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id):
     if not should_start_ai_reply(conversation_id, expected_message_id):
+        return None
+    remaining = ai_reply_wait_seconds_remaining(conversation_id, expected_message_id)
+    if remaining is None:
+        return None
+    if remaining > 0:
+        process_delayed_telegram_reply.apply_async(args=[conversation_id, expected_message_id, chat_id], countdown=ceil(remaining))
         return None
     stop_typing = threading.Event()
     typing_thread = threading.Thread(target=keep_typing, args=(lambda: telegram_sender_action(chat_id, "typing"), stop_typing, f"TELEGRAM_TYPING_FAILED chat={chat_id}"), daemon=True)
