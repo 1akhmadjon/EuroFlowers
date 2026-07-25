@@ -216,10 +216,7 @@ def ai_stock_rows(query="", limit=24):
     rows = []
     for variant in queryset:
         batches = getattr(variant, "ai_stock_batches", [])
-        if batches:
-            rows.extend(stock_batch_ai_row(batch) for batch in batches)
-        else:
-            rows.append(variant_without_stock_ai_row(variant))
+        rows.extend(stock_batch_ai_row(batch) for batch in batches if batch.remaining_stems > 0)
         if len(rows) >= limit:
             break
     return rows[:limit]
