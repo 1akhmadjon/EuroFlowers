@@ -69,7 +69,6 @@ def stock_batch_ai_row(batch):
         "availability": stock_availability(batch),
         "remaining_stems": batch.remaining_stems,
         "stems_per_bunch": batch.stems_per_bunch,
-        "minimum_sale_stems": batch.minimum_sale_stems,
         "price_per_stem": str(batch.sale_price_per_stem),
         "price_per_bunch": str(batch.sale_price_per_bunch),
     }
@@ -93,7 +92,6 @@ def variant_without_stock_ai_row(variant):
         "availability": "qolmagan",
         "remaining_stems": 0,
         "stems_per_bunch": variant.default_stems_per_bunch,
-        "minimum_sale_stems": variant.minimum_sale_stems,
         "price_per_stem": "",
         "price_per_bunch": "",
     }
@@ -267,7 +265,6 @@ def ai_flower_variant_rows(query="", limit=24):
                 "height_label": batch.height_label,
                 "availability": stock_availability(batch),
                 "remaining_stems": batch.remaining_stems,
-                "minimum_sale_stems": batch.minimum_sale_stems,
                 "stems_per_bunch": batch.stems_per_bunch,
                 "price_per_stem": str(batch.sale_price_per_stem),
                 "price_per_bunch": str(batch.sale_price_per_bunch),
