@@ -30,6 +30,8 @@ class UserProfile(TimeStampedModel):
         ("admin", "Administrator"),
         ("operator", "Operator"),
         ("florist", "Florist"),
+        ("apprentice", "Shogird"),
+        ("supervisor", "Nazoratchi"),
         ("warehouse", "Skladchi"),
         ("content", "Kontent menejer"),
     ]
@@ -50,6 +52,9 @@ class PagePermission(TimeStampedModel):
         ("conversations", "Instagram inbox"),
         ("social_posts", "Postlar"),
         ("notifications", "Bildirishnomalar"),
+        ("suppliers", "Postavshiklar"),
+        ("florists", "Floristlar"),
+        ("attendance", "Ish vaqti"),
         ("settings", "Sozlamalar"),
         ("ai_settings", "AI sozlamalari"),
         ("integrations", "Integratsiyalar"),
@@ -101,9 +106,23 @@ class FlowerVariant(TimeStampedModel):
         return f"{self.flower.name_uz} · {self.name_uz} · {self.color_uz}"
 
 
+class Supplier(TimeStampedModel):
+    name = models.CharField(max_length=160)
+    phone = models.CharField(max_length=30, blank=True)
+    notes = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
 class StockBatch(TimeStampedModel):
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="stock_batches")
     variant = models.ForeignKey(FlowerVariant, on_delete=models.PROTECT, related_name="batches")
+    supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_batches")
     batch_number = models.CharField(max_length=40)
     received_at = models.DateField(default=timezone.localdate)
     height_cm = models.PositiveIntegerField()
@@ -201,6 +220,77 @@ class PackagingMovement(TimeStampedModel):
         ordering = ["-created_at"]
 
 
+class FloristProfile(TimeStampedModel):
+    STAFF_CHOICES = [("florist", "Florist"), ("apprentice", "Shogird")]
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="florist_profile")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="florists")
+    staff_type = models.CharField(max_length=20, choices=STAFF_CHOICES, default="florist")
+    phone = models.CharField(max_length=30, blank=True)
+    daily_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    work_start_time = models.TimeField(null=True, blank=True)
+    work_end_time = models.TimeField(null=True, blank=True)
+    shop_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    shop_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    arrival_radius_meters = models.PositiveIntegerField(default=50)
+    departure_radius_meters = models.PositiveIntegerField(default=80)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["user__first_name", "user__username"]
+
+    def __str__(self):
+        return self.user.get_full_name() or self.user.username
+
+
+class FloristAttendance(TimeStampedModel):
+    SOURCE_CHOICES = [("mobile", "Mobile"), ("manual", "Qo‘lda")]
+    florist = models.ForeignKey(FloristProfile, on_delete=models.CASCADE, related_name="attendance")
+    work_date = models.DateField(default=timezone.localdate)
+    check_in_at = models.DateTimeField(null=True, blank=True)
+    check_out_at = models.DateTimeField(null=True, blank=True)
+    check_in_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    check_in_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    check_out_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    check_out_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="mobile")
+    note = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["florist", "work_date"], name="unique_florist_attendance_date")]
+        ordering = ["-work_date", "-id"]
+
+
+class FloristSalaryEntry(TimeStampedModel):
+    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("daily", "Kunlik"), ("manual", "Qo‘lda")]
+    florist = models.ForeignKey(FloristProfile, on_delete=models.CASCADE, related_name="salary_entries")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    source = models.CharField(max_length=30, choices=SOURCE_CHOICES)
+    work_date = models.DateField(default=timezone.localdate)
+    catalog_item = models.ForeignKey("CatalogItem", null=True, blank=True, on_delete=models.SET_NULL, related_name="salary_entries")
+    attendance = models.ForeignKey(FloristAttendance, null=True, blank=True, on_delete=models.SET_NULL, related_name="salary_entries")
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_salary_entries")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["florist", "source", "catalog_item"], name="unique_florist_catalog_salary_entry")]
+        ordering = ["-work_date", "-id"]
+
+
+class FloristVolumeRate(TimeStampedModel):
+    ARRANGEMENT_CHOICES = [("bouquet", "Buket"), ("basket", "Savat")]
+    VOLUME_CHOICES = [("small", "Small"), ("medium", "Medium"), ("large", "Large")]
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="florist_volume_rates")
+    arrangement_type = models.CharField(max_length=20, choices=ARRANGEMENT_CHOICES)
+    volume = models.CharField(max_length=20, choices=VOLUME_CHOICES)
+    default_stems = models.PositiveIntegerField(default=0)
+    florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["branch", "arrangement_type", "volume"], name="unique_branch_arrangement_volume_rate")]
+        ordering = ["arrangement_type", "volume"]
+
+
 class Customer(TimeStampedModel):
     name = models.CharField(max_length=160, blank=True)
     phone = models.CharField(max_length=30, blank=True, db_index=True)
@@ -245,15 +335,23 @@ class SocialPost(TimeStampedModel):
 
 class CatalogItem(TimeStampedModel):
     STATUS_CHOICES = [("draft", "Qoralama"), ("available", "Sotuvda"), ("reserved", "Band"), ("sold", "Sotildi"), ("archived", "Arxiv")]
+    CATALOG_KIND_CHOICES = [("standard", "Standart"), ("custom", "Custom")]
+    VOLUME_CHOICES = [("small", "Small"), ("medium", "Medium"), ("large", "Large")]
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="catalog_items")
     name_uz = models.CharField(max_length=180)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti")])
+    catalog_kind = models.CharField(max_length=20, choices=CATALOG_KIND_CHOICES, default="standard")
+    volume = models.CharField(max_length=20, choices=VOLUME_CHOICES, blank=True)
+    florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     height_cm = models.PositiveIntegerField(null=True, blank=True)
     diameter_cm = models.PositiveIntegerField(null=True, blank=True)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("50000"))
+    calculated_cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    calculated_component_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
     image_url = models.URLField(blank=True)
     instagram_story_url = models.URLField(blank=True)
@@ -373,7 +471,7 @@ class LeadCatalogUsage(TimeStampedModel):
 
 
 class Notification(TimeStampedModel):
-    TYPE_CHOICES = [("stock_pending", "Sklad kamaytirilmagan"), ("low_stock", "Kam qoldiq"), ("lead", "Yangi lead"), ("handoff", "Operator kerak")]
+    TYPE_CHOICES = [("stock_pending", "Sklad kamaytirilmagan"), ("low_stock", "Kam qoldiq"), ("lead", "Yangi lead"), ("handoff", "Operator kerak"), ("supplier_stock", "Postavshik kirimi")]
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="notifications")
     notification_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
     title_uz = models.CharField(max_length=180)

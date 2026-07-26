@@ -24,9 +24,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .branching import default_branch
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .inventory_services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -77,15 +77,35 @@ def lead_sort_order_between(before, after, branch, status_value):
 
 
 class StockMovementFilter(CreatedAtRangeFilter):
+    supplier = django_filters.ModelChoiceFilter(field_name="batch__supplier", queryset=Supplier.objects.all())
+
     class Meta:
         model = StockMovement
-        fields = ["batch", "movement_type", "created_at"]
+        fields = ["batch", "supplier", "movement_type", "created_at"]
 
 
 class PackagingMovementFilter(CreatedAtRangeFilter):
     class Meta:
         model = PackagingMovement
         fields = ["packaging", "movement_type", "created_at"]
+
+
+class StockBatchFilter(CreatedAtRangeFilter):
+    class Meta:
+        model = StockBatch
+        fields = ["variant", "supplier", "height_cm", "height_from_cm", "height_to_cm", "is_active", "created_at"]
+
+
+class FloristAttendanceFilter(CreatedAtRangeFilter):
+    class Meta:
+        model = FloristAttendance
+        fields = ["florist", "work_date", "source", "created_at"]
+
+
+class FloristSalaryEntryFilter(CreatedAtRangeFilter):
+    class Meta:
+        model = FloristSalaryEntry
+        fields = ["florist", "source", "work_date", "created_at"]
 
 
 class ConversationFilter(CreatedAtRangeFilter):
@@ -329,19 +349,154 @@ class FlowerVariantViewSet(ScopedViewSet):
             write_audit(self.request.user, "flowervariant_archived", instance, before=before_changed, after=after_changed)
 
 
+class SupplierViewSet(ScopedViewSet):
+    permission_page = "suppliers"
+    write_roles = ["admin", "warehouse"]
+    queryset = Supplier.objects.annotate(batches_count=Count("stock_batches", distinct=True), total_received_stems=Coalesce(Sum("stock_batches__received_stems"), 0)).all()
+    serializer_class = SupplierSerializer
+    filterset_fields = ["is_active"]
+    search_fields = ["name", "phone", "notes"]
+
+
+class FloristVolumeRateViewSet(ScopedViewSet):
+    permission_page = "florists"
+    write_roles = ["admin"]
+    queryset = FloristVolumeRate.objects.select_related("branch").all()
+    serializer_class = FloristVolumeRateSerializer
+    filterset_fields = ["branch", "arrangement_type", "volume", "is_active"]
+
+
+class FloristProfileViewSet(ScopedViewSet):
+    permission_page = "florists"
+    write_roles = ["admin", "supervisor"]
+    queryset = FloristProfile.objects.select_related("user", "branch").annotate(salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")), catalog_count=Count("catalog_items", distinct=True)).all()
+    serializer_class = FloristProfileSerializer
+    filterset_fields = ["staff_type", "branch", "is_active"]
+    search_fields = ["user__first_name", "user__last_name", "user__username", "phone"]
+
+    @action(detail=False, methods=["get"], url_path="me")
+    def me_profile(self, request):
+        profile = FloristProfile.objects.select_related("user", "branch").filter(user=request.user).first()
+        if not profile:
+            return Response({"detail": "Florist profili topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self.get_serializer(profile).data)
+
+    @action(detail=False, methods=["get"], url_path="me/dashboard")
+    def me_dashboard(self, request):
+        profile = FloristProfile.objects.filter(user=request.user).first()
+        if not profile:
+            return Response({"detail": "Florist profili topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+        start, end = dashboard_period(request)
+        salary = apply_created_range(profile.salary_entries.all(), start, end)
+        attendance = apply_created_range(profile.attendance.all(), start, end)
+        catalog = apply_created_range(profile.catalog_items.all(), start, end)
+        return Response({
+            "florist": FloristProfileSerializer(profile).data,
+            "period": {"from": start, "to": end},
+            "salary_total": salary.aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
+            "salary_entries_count": salary.count(),
+            "catalog_count": catalog.count(),
+            "custom_catalog_count": catalog.filter(catalog_kind="custom").count(),
+            "attendance_days": attendance.count(),
+            "latest_salary_entries": FloristSalaryEntrySerializer(salary.select_related("catalog_item", "florist__user")[:20], many=True).data,
+            "latest_attendance": FloristAttendanceSerializer(attendance[:20], many=True).data,
+        })
+
+
+class FloristAttendanceViewSet(ScopedViewSet):
+    permission_page = "attendance"
+    write_roles = ["admin", "supervisor", "florist", "apprentice"]
+    queryset = FloristAttendance.objects.select_related("florist__user", "florist__branch").all()
+    serializer_class = FloristAttendanceSerializer
+    filterset_class = FloristAttendanceFilter
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if has_page_permission(self.request.user, "attendance", True):
+            return queryset
+        profile = FloristProfile.objects.filter(user=self.request.user).first()
+        return queryset.filter(florist=profile) if profile else queryset.none()
+
+    def _profile_from_request(self, request):
+        florist_id = request.data.get("florist")
+        if florist_id and has_page_permission(request.user, "attendance", True):
+            profile = FloristProfile.objects.filter(id=florist_id).first()
+        else:
+            profile = FloristProfile.objects.filter(user=request.user).first()
+        if not profile:
+            raise serializers.ValidationError({"florist": "Florist profili topilmadi"})
+        return profile
+
+    @action(detail=False, methods=["post"], url_path="check-in")
+    def check_in(self, request):
+        profile = self._profile_from_request(request)
+        checked_at = parse_datetime(request.data.get("checked_at") or "") or timezone.now()
+        if timezone.is_naive(checked_at):
+            checked_at = timezone.make_aware(checked_at)
+        work_date = timezone.localtime(checked_at).date()
+        row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": request.data.get("source") or "mobile"})
+        row.check_in_at = row.check_in_at or checked_at
+        row.check_in_latitude = request.data.get("latitude") or row.check_in_latitude
+        row.check_in_longitude = request.data.get("longitude") or row.check_in_longitude
+        row.source = request.data.get("source") or row.source
+        row.note = request.data.get("note") or row.note
+        row.save(update_fields=["check_in_at", "check_in_latitude", "check_in_longitude", "source", "note", "updated_at"])
+        if profile.staff_type == "apprentice" and profile.daily_pay:
+            FloristSalaryEntry.objects.update_or_create(florist=profile, source="daily", attendance=row, defaults={"amount": profile.daily_pay, "work_date": work_date, "note": "Shogird kunlik ish haqi", "created_by": request.user})
+        return Response(self.get_serializer(row).data)
+
+    @action(detail=False, methods=["post"], url_path="check-out")
+    def check_out(self, request):
+        profile = self._profile_from_request(request)
+        checked_at = parse_datetime(request.data.get("checked_at") or "") or timezone.now()
+        if timezone.is_naive(checked_at):
+            checked_at = timezone.make_aware(checked_at)
+        work_date = timezone.localtime(checked_at).date()
+        row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": request.data.get("source") or "mobile"})
+        row.check_out_at = checked_at
+        row.check_out_latitude = request.data.get("latitude") or row.check_out_latitude
+        row.check_out_longitude = request.data.get("longitude") or row.check_out_longitude
+        row.source = request.data.get("source") or row.source
+        row.note = request.data.get("note") or row.note
+        row.save(update_fields=["check_out_at", "check_out_latitude", "check_out_longitude", "source", "note", "updated_at"])
+        return Response(self.get_serializer(row).data)
+
+
+class FloristSalaryEntryViewSet(ScopedViewSet):
+    permission_page = "florists"
+    write_roles = ["admin", "supervisor"]
+    queryset = FloristSalaryEntry.objects.select_related("florist__user", "catalog_item", "attendance", "created_by").all()
+    serializer_class = FloristSalaryEntrySerializer
+    filterset_class = FloristSalaryEntryFilter
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+
 class StockBatchViewSet(ScopedViewSet):
     permission_page = "inventory"
     write_roles = ["admin", "warehouse"]
-    queryset = StockBatch.objects.select_related("branch", "variant__flower").all()
+    queryset = StockBatch.objects.select_related("branch", "variant__flower", "supplier").all()
     serializer_class = StockBatchSerializer
-    filterset_fields = ["variant", "height_cm", "height_from_cm", "height_to_cm", "is_active"]
-    search_fields = ["batch_number", "variant__flower__name_uz", "variant__name_uz", "variant__color_uz"]
+    filterset_class = StockBatchFilter
+    search_fields = ["batch_number", "variant__flower__name_uz", "variant__name_uz", "variant__color_uz", "supplier__name", "supplier__phone"]
     ordering_fields = ["received_at", "remaining_stems", "sale_price_per_stem", "height_cm", "height_from_cm", "height_to_cm"]
 
     def perform_create(self, serializer):
         batch = serializer.save()
         StockMovement.objects.create(batch=batch, movement_type="in", quantity_stems=batch.received_stems, quantity_bunches=batch.received_stems / batch.stems_per_bunch, reason="Partiya kirimi", performed_by=self.request.user)
         AuditLog.objects.create(user=self.request.user, action="stock_received", entity_type="StockBatch", entity_id=str(batch.id), after={"received_stems": batch.received_stems})
+        if batch.supplier_id:
+            title = "Yangi gul kirimi"
+            body = f"{batch.supplier.name} postavshikdan {batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz} keldi. Partiya: {batch.batch_number}. Miqdor: {batch.received_stems} dona."
+            Notification.objects.create(branch=batch.branch, notification_type="supplier_stock", title_uz=title, title_ru=title, body_uz=body, body_ru=body, reference_type="stock_batch", reference_id=batch.id)
+            integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+            group_chat_id = integration.telegram_group_chat_id or settings.TELEGRAM_GROUP_CHAT_ID
+            if group_chat_id:
+                try:
+                    telegram_send(group_chat_id, f"{title}\n{body}")
+                except Exception as exc:
+                    print(f"SUPPLIER_STOCK_TELEGRAM_FAILED batch={batch.id} error={exc}", flush=True)
 
     def destroy(self, request, *args, **kwargs):
         batch = self.get_object()
@@ -359,7 +514,7 @@ class StockBatchViewSet(ScopedViewSet):
         serializer = MovementRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            movement = apply_stock_movement(batch, serializer.validated_data["movement_type"], serializer.validated_data["quantity_stems"], serializer.validated_data.get("reason", ""), request.user)
+            movement = apply_stock_movement(batch, serializer.validated_data["movement_type"], serializer.validated_data.get("quantity_stems"), serializer.validated_data.get("reason", ""), request.user, serializer.validated_data.get("quantity_bunches"))
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(StockMovementSerializer(movement).data)
@@ -862,6 +1017,8 @@ def dashboard(request):
     period_won_leads = apply_updated_range(won_leads, period_start, period_end)
     period_stock_out = apply_created_range(stock_movements.filter(movement_type="out", quantity_stems__lt=0), period_start, period_end)
     flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
+    period_catalog_sold = apply_updated_range(catalog.filter(quantity_sold__gt=0), period_start, period_end)
+    catalog_financials = catalog_sale_financials(period_catalog_sold)
     leads_total = leads.count()
     conversations_total = conversations.count()
     conversion_base = conversations_total or leads_total
@@ -880,7 +1037,14 @@ def dashboard(request):
         "daily_stats": dashboard_daily_stats(period_leads, period_conversations, period_start, period_end),
         "top_selling_flowers": top_selling_flowers(period_won_leads)[:5],
         "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
+        "florist_salary_total": apply_created_range(FloristSalaryEntry.objects.all(), period_start, period_end).aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
         "flowers_sold_stems": abs(int(flowers_sold)),
+        "catalog_revenue": catalog_financials["revenue"],
+        "catalog_cost": catalog_financials["cost"],
+        "catalog_discount": catalog_financials["discount"],
+        "net_profit": catalog_financials["profit"],
+        "batch_inventory_stats": batch_inventory_stats(period_start, period_end)[:10],
+        "florist_production_stats": florist_production_stats(period_start, period_end)[:10],
         "conversion_rate": round((won_leads.count() / conversion_base) * 100, 2) if conversion_base else 0,
         "available_catalog": catalog.filter(status="available").count(),
         "pending_deductions": catalog.filter(quantity_sold__gt=F("quantity_stock_deducted")).count(),
@@ -927,6 +1091,8 @@ def analytics(request):
     period_won_leads = apply_updated_range(won_leads, period_start, period_end)
     period_stock_out = apply_created_range(stock_movements.filter(movement_type="out", quantity_stems__lt=0), period_start, period_end)
     flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
+    period_catalog_sold = apply_updated_range(CatalogItem.objects.filter(quantity_sold__gt=0), period_start, period_end)
+    catalog_financials = catalog_sale_financials(period_catalog_sold)
     data = {
         "period": {"from": period_start, "to": period_end},
         "summary": {
@@ -936,13 +1102,20 @@ def analytics(request):
             "orders": period_won_leads.count(),
             "revenue": period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
             "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
+            "florist_salary_total": apply_created_range(FloristSalaryEntry.objects.all(), period_start, period_end).aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
             "flowers_sold_stems": abs(int(flowers_sold)),
+            "catalog_revenue": catalog_financials["revenue"],
+            "catalog_cost": catalog_financials["cost"],
+            "catalog_discount": catalog_financials["discount"],
+            "net_profit": catalog_financials["profit"],
             "conversion_rate": round((period_won_leads.count() / (period_conversations.count() or period_leads.count())) * 100, 2) if (period_conversations.count() or period_leads.count()) else 0,
         },
         "daily_stats": analytics_daily_stats(period_leads, period_conversations, period_won_leads, period_start, period_end),
         "top_selling_flowers": top_selling_flowers(period_won_leads),
         "top_catalog_items": top_catalog_items(period_won_leads),
         "recent_top_catalog_items": recent_top_catalog_items(period_won_leads),
+        "batch_inventory_stats": batch_inventory_stats(period_start, period_end),
+        "florist_production_stats": florist_production_stats(period_start, period_end),
         "lead_statuses": list(period_leads.values("status").annotate(count=Count("id")).order_by("status")),
         "arrangement_types": list(period_leads.values("arrangement_type").annotate(count=Count("id")).order_by("arrangement_type")),
         "conversation_sources": conversation_source_breakdown(period_conversations),
@@ -1109,6 +1282,82 @@ def conversation_source_breakdown(conversations):
 def revenue_by_source(won_leads):
     rows = list(won_leads.values("source").annotate(orders=Count("id"), revenue=Coalesce(Sum("estimated_price"), Decimal("0"))).order_by("source"))
     return [{"source": row["source"] or "unknown", "orders": row["orders"], "revenue": row["revenue"]} for row in rows]
+
+
+def catalog_sale_financials(queryset):
+    revenue = Decimal("0")
+    cost = Decimal("0")
+    florist_salary = Decimal("0")
+    discount = Decimal("0")
+    for item in queryset:
+        sold = Decimal(item.quantity_sold or 0)
+        total = Decimal(item.quantity_total or 1)
+        ratio = sold / total if total else Decimal("0")
+        revenue += Decimal(item.price or 0) * sold
+        cost += Decimal(item.calculated_cost_price or 0) * ratio
+        florist_salary += Decimal(item.florist_fee or 0) * sold
+        discount += Decimal(item.discount_amount or 0) * ratio
+    return {"revenue": revenue, "cost": cost, "florist_salary": florist_salary, "discount": discount, "profit": revenue - cost}
+
+
+def batch_inventory_stats(start, end):
+    movements = apply_created_range(StockMovement.objects.select_related("batch__variant__flower", "batch__supplier").filter(Q(reference_type="catalog_item") | Q(movement_type="waste")), start, end)
+    catalog_ids = [row.reference_id for row in movements if row.reference_type == "catalog_item" and row.reference_id]
+    catalog_kinds = {item.id: item.catalog_kind for item in CatalogItem.objects.filter(id__in=catalog_ids)}
+    rows = {}
+    for movement in movements:
+        batch = movement.batch
+        key = batch.id
+        variant = batch.variant
+        row = rows.setdefault(key, {
+            "batch_id": batch.id,
+            "batch_number": batch.batch_number,
+            "supplier_id": batch.supplier_id,
+            "supplier_name": batch.supplier.name if batch.supplier_id else "",
+            "flower": variant.flower.name_uz,
+            "variant": variant.name_uz,
+            "color": variant.color_uz,
+            "standard_catalog_stems": 0,
+            "custom_catalog_stems": 0,
+            "waste_stems": 0,
+            "total_out_stems": 0,
+        })
+        stems = abs(int(movement.quantity_stems or 0))
+        if movement.movement_type == "waste":
+            row["waste_stems"] += stems
+        elif movement.reference_type == "catalog_item":
+            if catalog_kinds.get(movement.reference_id) == "custom":
+                row["custom_catalog_stems"] += stems
+            else:
+                row["standard_catalog_stems"] += stems
+        if movement.quantity_stems < 0:
+            row["total_out_stems"] += stems
+    return sorted(rows.values(), key=lambda row: row["total_out_stems"], reverse=True)
+
+
+def florist_production_stats(start, end):
+    catalog = apply_created_range(CatalogItem.objects.select_related("florist__user").filter(florist__isnull=False), start, end)
+    salary = apply_created_range(FloristSalaryEntry.objects.select_related("florist__user"), start, end)
+    salary_by_florist = {row["florist_id"]: row["amount"] for row in salary.values("florist_id").annotate(amount=Coalesce(Sum("amount"), Decimal("0")))}
+    rows = {}
+    for item in catalog:
+        profile = item.florist
+        row = rows.setdefault(profile.id, {
+            "florist_id": profile.id,
+            "name": profile.user.get_full_name() or profile.user.username,
+            "staff_type": profile.staff_type,
+            "standard_bouquets": 0,
+            "standard_baskets": 0,
+            "custom_bouquets": 0,
+            "custom_baskets": 0,
+            "catalog_total": 0,
+            "salary_total": salary_by_florist.get(profile.id, Decimal("0")),
+        })
+        row["catalog_total"] += 1
+        key = f"{item.catalog_kind}_{'baskets' if item.arrangement_type == 'basket' else 'bouquets'}"
+        if key in row:
+            row[key] += 1
+    return sorted(rows.values(), key=lambda row: row["catalog_total"], reverse=True)
 
 
 def apply_created_range(queryset, start, end):

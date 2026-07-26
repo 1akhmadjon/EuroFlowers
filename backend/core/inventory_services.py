@@ -1,7 +1,75 @@
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, CatalogItem, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+from .models import AuditLog, CatalogItem, FloristSalaryEntry, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+
+
+def catalog_component_total(item):
+    quantity = int(item.quantity_total or 1)
+    stock_total = Decimal("0")
+    for row in item.composition.select_related("stock_batch"):
+        stock_total += Decimal(row.quantity_stems * quantity) * row.stock_batch.sale_price_per_stem
+    material_total = Decimal("0")
+    for row in item.materials.select_related("packaging"):
+        material_total += Decimal(row.quantity * quantity) * row.packaging.sale_price
+    florist_total = Decimal(item.florist_fee or 0) * Decimal(quantity)
+    return stock_total + material_total + florist_total
+
+
+def catalog_cost_total(item):
+    quantity = int(item.quantity_total or 1)
+    stock_total = Decimal("0")
+    for row in item.composition.select_related("stock_batch"):
+        stock_total += Decimal(row.quantity_stems * quantity) * row.stock_batch.cost_per_stem
+    material_total = Decimal("0")
+    for row in item.materials.select_related("packaging"):
+        material_total += Decimal(row.quantity * quantity) * row.packaging.cost_price
+    florist_total = Decimal(item.florist_fee or 0) * Decimal(quantity)
+    return stock_total + material_total + florist_total
+
+
+def apply_volume_rate(item):
+    if not item.volume or not item.arrangement_type or item.florist_fee:
+        return item
+    rate = FloristVolumeRate.objects.filter(branch=item.branch, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
+    if rate:
+        item.florist_fee = rate.florist_fee
+    return item
+
+
+def sync_catalog_financials(item):
+    item = CatalogItem.objects.get(pk=item.pk)
+    apply_volume_rate(item)
+    total = catalog_component_total(item)
+    cost_total = catalog_cost_total(item)
+    sale_total = Decimal(item.price or 0) * Decimal(item.quantity_total or 1)
+    item.calculated_cost_price = cost_total
+    item.calculated_component_price = total
+    item.discount_amount = max(total - sale_total, Decimal("0"))
+    item.save(update_fields=["florist_fee", "calculated_cost_price", "calculated_component_price", "discount_amount", "updated_at"])
+    return item
+
+
+def sync_catalog_florist_salary(item, user):
+    item = CatalogItem.objects.select_related("florist").get(pk=item.pk)
+    if not item.florist_id or not item.florist_fee:
+        FloristSalaryEntry.objects.filter(catalog_item=item).delete()
+        return None
+    source = "custom_catalog" if item.catalog_kind == "custom" else "catalog"
+    FloristSalaryEntry.objects.filter(catalog_item=item).exclude(florist=item.florist, source=source).delete()
+    amount = Decimal(item.florist_fee) * Decimal(item.quantity_total or 1)
+    entry, _ = FloristSalaryEntry.objects.update_or_create(
+        florist=item.florist,
+        source=source,
+        catalog_item=item,
+        defaults={
+            "amount": amount,
+            "work_date": timezone.localtime(item.created_at).date() if item.created_at else timezone.localdate(),
+            "note": f"{item.name_uz} uchun florist haqi",
+            "created_by": user if getattr(user, "is_authenticated", False) else None,
+        },
+    )
+    return entry
 
 
 def ensure_catalog_stock_available(item, quantity=None):
@@ -269,20 +337,25 @@ def restore_lead_stock(lead, user):
     return lead
 
 
-def apply_stock_movement(batch, movement_type, quantity_stems, reason, user):
+def apply_stock_movement(batch, movement_type, quantity_stems=None, reason="", user=None, quantity_bunches=None):
     with transaction.atomic():
         batch = StockBatch.objects.select_for_update().get(pk=batch.pk)
+        if quantity_stems is None:
+            quantity_stems = int(Decimal(quantity_bunches or 0) * Decimal(batch.stems_per_bunch))
         delta = abs(quantity_stems) if movement_type in ["in", "transfer_in"] else -abs(quantity_stems)
         if batch.remaining_stems + delta < 0:
             raise ValueError("Skladda yetarli gul yo‘q")
         before = batch.remaining_stems
         batch.remaining_stems += delta
         batch.save(update_fields=["remaining_stems", "updated_at"])
+        movement_bunches = Decimal(delta) / Decimal(batch.stems_per_bunch)
+        if quantity_bunches is not None:
+            movement_bunches = abs(Decimal(quantity_bunches)) if delta > 0 else -abs(Decimal(quantity_bunches))
         movement = StockMovement.objects.create(
             batch=batch,
             movement_type=movement_type,
             quantity_stems=delta,
-            quantity_bunches=Decimal(delta) / Decimal(batch.stems_per_bunch),
+            quantity_bunches=movement_bunches,
             reason=reason,
             performed_by=user,
         )

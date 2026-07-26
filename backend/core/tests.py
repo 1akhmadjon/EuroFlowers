@@ -6,8 +6,8 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
-from .serializers import ConversationSerializer, permission_matrix
+from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .serializers import CatalogItemSerializer, ConversationSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
@@ -50,6 +50,39 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(self.batch.remaining_stems, 91)
         self.assertEqual(item.quantity_stock_deducted, 3)
         self.assertEqual(item.status, "available")
+
+    def test_custom_catalog_deducts_inventory_and_creates_florist_salary(self):
+        florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
+        florist = FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        FloristVolumeRate.objects.create(branch=self.branch, arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
+        packaging = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Test qogoz", cost_price=10000, sale_price=20000, quantity=5)
+        serializer = CatalogItemSerializer(data={
+            "name_uz": "Custom buket",
+            "arrangement_type": "bouquet",
+            "catalog_kind": "custom",
+            "volume": "small",
+            "florist": florist.id,
+            "price": "250000.00",
+            "quantity_total": 1,
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10, "quantity_bunches": "0.50"}],
+            "materials": [{"packaging": packaging.id, "quantity": 1}],
+        }, context={"request": SimpleNamespace(user=self.user)})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        item = serializer.save()
+        self.batch.refresh_from_db()
+        packaging.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(item.status, "sold")
+        self.assertEqual(item.quantity_sold, 1)
+        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(packaging.quantity, 4)
+        self.assertEqual(item.florist_fee, Decimal("70000.00"))
+        self.assertEqual(item.calculated_component_price, Decimal("390000.00"))
+        self.assertEqual(item.calculated_cost_price, Decimal("280000.00"))
+        self.assertEqual(item.discount_amount, Decimal("140000.00"))
+        salary = FloristSalaryEntry.objects.get(catalog_item=item)
+        self.assertEqual(salary.amount, Decimal("70000.00"))
+        self.assertEqual(salary.florist, florist)
 
     def test_phone_normalization(self):
         self.assertEqual(normalize_phone("90 123-45-67"), "+998901234567")

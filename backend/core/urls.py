@@ -1,19 +1,24 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
-from .views import AuditLogViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, LeadStatusViewSet, LeadViewSet, NotificationViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, UserViewSet, ai_settings, analytics, business_settings, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
+from .views import AuditLogViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FloristAttendanceViewSet, FloristProfileViewSet, FloristSalaryEntryViewSet, FloristVolumeRateViewSet, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, LeadStatusViewSet, LeadViewSet, NotificationViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, SupplierViewSet, UserViewSet, ai_settings, analytics, business_settings, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
 
 router = DefaultRouter()
 router.register("users", UserViewSet)
 router.register("permissions", PagePermissionViewSet)
 router.register("flowers", FlowerViewSet)
 router.register("flower-variants", FlowerVariantViewSet)
+router.register("suppliers", SupplierViewSet)
 router.register("stock-batches", StockBatchViewSet)
 router.register("stock-movements", StockMovementViewSet)
 router.register("packaging", PackagingViewSet)
 router.register("packaging-movements", PackagingMovementViewSet)
 router.register("materials", PackagingViewSet, basename="materials")
 router.register("material-movements", PackagingMovementViewSet, basename="material-movements")
+router.register("florists", FloristProfileViewSet)
+router.register("florist-attendance", FloristAttendanceViewSet)
+router.register("florist-salary", FloristSalaryEntryViewSet)
+router.register("florist-volume-rates", FloristVolumeRateViewSet)
 router.register("catalog", CatalogItemViewSet)
 router.register("customers", CustomerViewSet)
 router.register("lead-statuses", LeadStatusViewSet)

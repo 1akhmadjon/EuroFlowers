@@ -8,7 +8,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .branching import default_branch
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, UserProfile
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -173,11 +173,73 @@ class FlowerVariantSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class SupplierSerializer(serializers.ModelSerializer):
+    batches_count = serializers.IntegerField(read_only=True)
+    total_received_stems = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Supplier
+        fields = "__all__"
+
+
+class FloristProfileSerializer(serializers.ModelSerializer):
+    user_detail = UserSerializer(source="user", read_only=True)
+    branch_detail = BranchSerializer(source="branch", read_only=True)
+    salary_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    catalog_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = FloristProfile
+        fields = "__all__"
+
+    def create(self, validated_data):
+        validated_data.setdefault("branch", default_branch())
+        return super().create(validated_data)
+
+
+class FloristAttendanceSerializer(serializers.ModelSerializer):
+    florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+
+    class Meta:
+        model = FloristAttendance
+        fields = "__all__"
+
+
+class FloristSalaryEntrySerializer(serializers.ModelSerializer):
+    florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    catalog_item_detail = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FloristSalaryEntry
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_catalog_item_detail(self, obj):
+        if not obj.catalog_item_id:
+            return None
+        return {"id": obj.catalog_item_id, "name_uz": obj.catalog_item.name_uz, "catalog_kind": obj.catalog_item.catalog_kind, "arrangement_type": obj.catalog_item.arrangement_type}
+
+
+class FloristVolumeRateSerializer(serializers.ModelSerializer):
+    branch_detail = BranchSerializer(source="branch", read_only=True)
+
+    class Meta:
+        model = FloristVolumeRate
+        fields = "__all__"
+
+    def create(self, validated_data):
+        validated_data.setdefault("branch", default_branch())
+        return super().create(validated_data)
+
+
 class StockBatchSerializer(serializers.ModelSerializer):
     variant_detail = FlowerVariantSerializer(source="variant", read_only=True)
+    supplier_detail = SupplierSerializer(source="supplier", read_only=True)
     remaining_bunches = serializers.IntegerField(read_only=True)
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     height_label = serializers.CharField(read_only=True)
+    received_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, write_only=True, required=False)
 
     class Meta:
         model = StockBatch
@@ -191,6 +253,10 @@ class StockBatchSerializer(serializers.ModelSerializer):
                     data.pop(key)
         if not data.get("height_cm") and data.get("height_from_cm"):
             data["height_cm"] = data["height_from_cm"]
+        if not data.get("received_stems") and data.get("received_bunches") and data.get("stems_per_bunch"):
+            data["received_stems"] = int(Decimal(str(data["received_bunches"])) * Decimal(str(data["stems_per_bunch"])))
+        if data.get("received_stems") and not data.get("remaining_stems"):
+            data["remaining_stems"] = data["received_stems"]
         return super().to_internal_value(data)
 
     def validate(self, attrs):
@@ -210,8 +276,13 @@ class StockBatchSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        validated_data.pop("received_bunches", None)
         validated_data.setdefault("branch", default_branch())
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop("received_bunches", None)
+        return super().update(instance, validated_data)
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -262,11 +333,12 @@ class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     composition = CatalogCompositionSerializer(many=True, required=False)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
+    florist_detail = FloristProfileSerializer(source="florist", read_only=True)
 
     class Meta:
         model = CatalogItem
-        fields = ["id", "name_uz", "description_uz", "description_ru", "arrangement_type", "height_cm", "diameter_cm", "price", "florist_fee", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials"]
-        read_only_fields = ["quantity_sold", "quantity_stock_deducted"]
+        fields = ["id", "name_uz", "description_uz", "description_ru", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "height_cm", "diameter_cm", "price", "florist_fee", "calculated_component_price", "discount_amount", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials"]
+        read_only_fields = ["quantity_sold", "quantity_stock_deducted", "calculated_component_price", "discount_amount"]
 
 
 def catalog_stock_error(batch, needed):
@@ -294,6 +366,20 @@ def catalog_material_error(packaging, needed):
         f"Bor: {remaining} dona\n"
         f"Yetmayapti: {missing} dona"
     )
+
+
+def apply_volume_rate_to_attrs(attrs, initial_data=None):
+    data = initial_data or {}
+    if "florist_fee" in attrs or "florist_fee" in data:
+        return attrs
+    branch = attrs.get("branch") or default_branch()
+    arrangement_type = attrs.get("arrangement_type")
+    volume = attrs.get("volume")
+    if arrangement_type and volume:
+        rate = FloristVolumeRate.objects.filter(branch=branch, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
+        if rate:
+            attrs["florist_fee"] = rate.florist_fee
+    return attrs
 
 
 class SocialPostSerializer(serializers.ModelSerializer):
@@ -416,7 +502,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
         return attrs
 
     def _sync_catalog_items(self, post, catalog_items):
-        from .inventory_services import deduct_catalog_inventory, restore_catalog_inventory
+        from .inventory_services import deduct_catalog_inventory, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
         user = getattr(self.context.get("request"), "user", None)
         for item_data in catalog_items:
             has_composition = "composition" in item_data
@@ -439,8 +525,17 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     setattr(item, key, value)
                 item.branch = post.branch
                 item.social_post = post
+                if item.catalog_kind == "custom":
+                    item.status = "sold"
+                    item.quantity_sold = item.quantity_total
+                    item.sold_at = timezone.now()
                 item.save()
             else:
+                item_data = apply_volume_rate_to_attrs(item_data, item_data)
+                if item_data.get("catalog_kind") == "custom":
+                    item_data["status"] = "sold"
+                    item_data["quantity_sold"] = item_data.get("quantity_total") or 1
+                    item_data["sold_at"] = timezone.now()
                 item = CatalogItem.objects.create(branch=post.branch, social_post=post, **item_data)
             if has_composition:
                 item.composition.all().delete()
@@ -458,6 +553,8 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     restore_catalog_inventory(item, user, abs(delta))
             elif not item_id:
                 deduct_catalog_inventory(item, user, item.quantity_total)
+            sync_catalog_financials(item)
+            sync_catalog_florist_salary(item, user)
 
     def create(self, validated_data):
         catalog_items = validated_data.pop("catalog_items", [])
@@ -483,10 +580,11 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     composition = CatalogCompositionSerializer(many=True, required=False)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
+    florist_detail = FloristProfileSerializer(source="florist", read_only=True)
     class Meta:
         model = CatalogItem
         exclude = ["branch"]
-        read_only_fields = ["created_by", "sold_at", "stock_deducted_at"]
+        read_only_fields = ["created_by", "sold_at", "stock_deducted_at", "calculated_component_price", "discount_amount"]
 
     def validate(self, attrs):
         attrs.setdefault("branch", getattr(self.instance, "branch", None) or default_branch())
@@ -529,10 +627,15 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        from .inventory_services import deduct_catalog_inventory
+        from .inventory_services import deduct_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
         composition = validated_data.pop("composition", [])
         materials = validated_data.pop("materials", [])
+        validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
         validated_data = self._sync_social_post_image_data(validated_data)
+        if validated_data.get("catalog_kind") == "custom":
+            validated_data["status"] = "sold"
+            validated_data["quantity_sold"] = validated_data.get("quantity_total") or 1
+            validated_data["sold_at"] = timezone.now()
         user = getattr(self.context.get("request"), "user", None)
         with transaction.atomic():
             item = CatalogItem.objects.create(**validated_data)
@@ -542,13 +645,16 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 deduct_catalog_inventory(item, user, item.quantity_total)
             except ValueError as exc:
                 raise serializers.ValidationError({"detail": str(exc)})
+            sync_catalog_financials(item)
+            sync_catalog_florist_salary(item, user)
             self._sync_social_post_image(item)
         return item
 
     def update(self, instance, validated_data):
-        from .inventory_services import deduct_catalog_inventory, restore_catalog_inventory
+        from .inventory_services import deduct_catalog_inventory, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
         composition = validated_data.pop("composition", None)
         materials = validated_data.pop("materials", None)
+        validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
         validated_data = self._sync_social_post_image_data(validated_data)
         user = getattr(self.context.get("request"), "user", None)
         old_quantity_total = instance.quantity_total
@@ -562,6 +668,11 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             if materials is not None:
                 instance.materials.all().delete()
                 CatalogMaterialUsage.objects.bulk_create([CatalogMaterialUsage(catalog_item=instance, **row) for row in materials])
+            if instance.catalog_kind == "custom":
+                instance.status = "sold"
+                instance.quantity_sold = instance.quantity_total
+                instance.sold_at = instance.sold_at or timezone.now()
+                instance.save(update_fields=["status", "quantity_sold", "sold_at", "updated_at"])
             try:
                 if composition is not None or materials is not None:
                     deduct_catalog_inventory(instance, user, instance.quantity_total)
@@ -573,6 +684,8 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                         restore_catalog_inventory(instance, user, abs(delta))
             except ValueError as exc:
                 raise serializers.ValidationError({"detail": str(exc)})
+            sync_catalog_financials(instance)
+            sync_catalog_florist_salary(instance, user)
             self._sync_social_post_image(instance)
         return instance
 
@@ -891,9 +1004,14 @@ class SimulateResponseSerializer(serializers.Serializer):
 
 class MovementRequestSerializer(serializers.Serializer):
     movement_type = serializers.ChoiceField(choices=StockMovement.TYPE_CHOICES)
-    quantity_stems = serializers.IntegerField(min_value=1)
+    quantity_stems = serializers.IntegerField(min_value=1, required=False)
     quantity_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
     reason = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if not attrs.get("quantity_stems") and not attrs.get("quantity_bunches"):
+            raise serializers.ValidationError({"quantity": "quantity_stems yoki quantity_bunches yuboring"})
+        return attrs
 
 
 class PackagingMovementRequestSerializer(serializers.Serializer):
