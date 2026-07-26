@@ -131,9 +131,9 @@ def stock_availability(batch):
 
 
 def flower_variant_display_name(variant, language):
-    flower_name = variant.flower.name_ru if language == "ru" else variant.flower.name_uz
-    variant_name = variant.name_ru if language == "ru" else variant.name_uz
-    color = variant.color_ru if language == "ru" else variant.color_uz
+    flower_name = variant.flower.name_uz
+    variant_name = variant.name_uz
+    color = variant.color_uz
     flower_compact = compact_match_text(flower_name)
     variant_compact = compact_match_text(variant_name)
     if variant_name and flower_compact and variant_compact.startswith(flower_compact):
@@ -150,13 +150,9 @@ def stock_batch_ai_row(batch):
     return {
         "batch_id": batch.id,
         "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
-        "display_name_ru": flower_variant_display_name(batch.variant, "ru"),
         "flower_uz": batch.variant.flower.name_uz,
-        "flower_ru": batch.variant.flower.name_ru,
         "variant_uz": batch.variant.name_uz,
-        "variant_ru": batch.variant.name_ru,
         "color_uz": batch.variant.color_uz,
-        "color_ru": batch.variant.color_ru,
         "description_uz": batch.variant.description_uz,
         "description_ru": batch.variant.description_ru,
         "height_cm": batch.height_cm,
@@ -175,13 +171,9 @@ def variant_without_stock_ai_row(variant):
     return {
         "batch_id": None,
         "display_name_uz": flower_variant_display_name(variant, "uz"),
-        "display_name_ru": flower_variant_display_name(variant, "ru"),
         "flower_uz": variant.flower.name_uz,
-        "flower_ru": variant.flower.name_ru,
         "variant_uz": variant.name_uz,
-        "variant_ru": variant.name_ru,
         "color_uz": variant.color_uz,
-        "color_ru": variant.color_ru,
         "description_uz": variant.description_uz,
         "description_ru": variant.description_ru,
         "height_cm": None,
@@ -199,11 +191,8 @@ def variant_without_stock_ai_row(variant):
 def flower_variant_search_haystack(variant):
     return compact_match_text(" ".join([
         variant.flower.name_uz,
-        variant.flower.name_ru,
         variant.name_uz,
-        variant.name_ru,
         variant.color_uz,
-        variant.color_ru,
         variant.description_uz,
         variant.description_ru,
     ]))
@@ -281,13 +270,12 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
     normalized_query = compact_match_text(query)
     is_generic_query = bool(normalized_query) and any(term in normalized_query for term in generic_query_terms)
     if query and not is_generic_query:
-        queryset = queryset.filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
+        queryset = queryset.filter(Q(name_uz__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
     rows = []
     for row in queryset[:limit]:
         image_url = row.image_url or (row.social_post.image_url if row.social_post_id else "")
         rows.append({
             "name_uz": row.name_uz,
-            "name_ru": row.name_ru,
             "type": row.arrangement_type,
             "description_uz": row.description_uz,
             "description_ru": row.description_ru,
@@ -335,7 +323,6 @@ def ai_basket_rows(limit=20):
     return [{
         "id": row.id,
         "name_uz": row.name_uz,
-        "name_ru": row.name_ru,
         "min": row.capacity_min_stems,
         "max": row.capacity_max_stems,
         "price": str(row.sale_price),
@@ -362,19 +349,14 @@ def ai_flower_variant_rows(query="", limit=24):
         rows.append({
             "variant_id": variant.id,
             "display_name_uz": flower_variant_display_name(variant, "uz"),
-            "display_name_ru": flower_variant_display_name(variant, "ru"),
             "flower_uz": variant.flower.name_uz,
-            "flower_ru": variant.flower.name_ru,
             "variant_uz": variant.name_uz,
-            "variant_ru": variant.name_ru,
             "color_uz": variant.color_uz,
-            "color_ru": variant.color_ru,
             "description_uz": variant.description_uz,
             "description_ru": variant.description_ru,
             "active_stock": [{
                 "batch_id": batch.id,
                 "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
-                "display_name_ru": flower_variant_display_name(batch.variant, "ru"),
                 "height_label": batch.height_label,
                 "availability": stock_availability(batch),
                 "remaining_stems": batch.remaining_stems,
@@ -400,7 +382,6 @@ def ai_post_context(conversation):
         "price": str(post.price or ""),
         "catalog": [{
             "name_uz": row.name_uz,
-            "name_ru": row.name_ru,
             "type": row.arrangement_type,
             "description_uz": row.description_uz,
             "description_ru": row.description_ru,
@@ -652,7 +633,7 @@ def execute_ai_tool(name, arguments, conversation):
         query = arguments.get("query") or ""
         item = _catalog_item_for_ai(query)
         if not item:
-            item = CatalogItem.objects.filter(status="available").filter(Q(name_uz__icontains=query) | Q(name_ru__icontains=query)).select_related("social_post").first()
+            item = CatalogItem.objects.filter(status="available").filter(Q(name_uz__icontains=query)).select_related("social_post").first()
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
@@ -1064,7 +1045,7 @@ def single_catalog_item_from_ai_result(result, conversation):
             continue
         catalog = tool_result.get("output", {}).get("catalog") or []
         if len(catalog) == 1:
-            item = _catalog_item_for_ai(catalog[0].get("name_uz"), catalog[0].get("name_ru"))
+            item = _catalog_item_for_ai(catalog[0].get("name_uz"))
             if item:
                 return item, "catalog_filter"
     catalog_rows = result.get("catalog_items") or []

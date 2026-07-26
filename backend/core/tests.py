@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import ConversationSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
@@ -18,17 +18,17 @@ class BusinessRulesTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("admin", password="password")
         self.branch = Branch.objects.create(name="Test", code="TEST")
-        flower = Flower.objects.create(name_uz="Atirgul", name_ru="Роза", slug="rose")
-        variant = FlowerVariant.objects.create(flower=flower, name_uz="Mondial", name_ru="Mondial", color_uz="Oq", color_ru="Белый")
+        flower = Flower.objects.create(name_uz="Atirgul", slug="rose")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Mondial", color_uz="Oq")
         self.batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="T-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=20000, sale_price_per_stem=30000, sale_price_per_bunch=580000)
-        self.item = CatalogItem.objects.create(branch=self.branch, name_uz="Oq buket", name_ru="Белый букет", arrangement_type="bouquet", price=500000)
+        self.item = CatalogItem.objects.create(branch=self.branch, name_uz="Oq buket", arrangement_type="bouquet", price=500000)
         CatalogComposition.objects.create(catalog_item=self.item, stock_batch=self.batch, quantity_stems=15)
 
     def test_selling_does_not_automatically_deduct_stock(self):
         mark_catalog_sold(self.item, self.user)
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 100)
-        self.assertTrue(Notification.objects.filter(notification_type="stock_pending", reference_id=self.item.id).exists())
+        self.assertFalse(Notification.objects.filter(notification_type="stock_pending", reference_id=self.item.id).exists())
 
     def test_manual_deduction_is_atomic_and_once_only(self):
         mark_catalog_sold(self.item, self.user)
@@ -39,12 +39,12 @@ class BusinessRulesTests(TestCase):
             deduct_catalog_stock(self.item, self.user)
 
     def test_catalog_partial_sales_deduct_composition_per_quantity(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil set", name_ru="Красный сет", arrangement_type="bouquet", price=900000, quantity_total=10, status="available")
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil set", arrangement_type="bouquet", price=900000, quantity_total=10, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=3)
         mark_catalog_sold(item, self.user, quantity=3)
         item.refresh_from_db()
         self.assertEqual(item.quantity_sold, 3)
-        deduct_catalog_stock(item, self.user)
+        deduct_catalog_stock(item, self.user, quantity=3)
         self.batch.refresh_from_db()
         item.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 91)
@@ -150,7 +150,7 @@ class BusinessRulesTests(TestCase):
             "handoff": False,
             "catalog_items": [],
             "stock_items": [],
-            "tool_results": [{"name": "get_catalog", "arguments": {"arrangement_type": "basket"}, "output": {"catalog": [{"name_uz": "Oq buket", "name_ru": "Белый букет", "price": "500000.00"}]}}],
+            "tool_results": [{"name": "get_catalog", "arguments": {"arrangement_type": "basket"}, "output": {"catalog": [{"name_uz": "Oq buket", "price": "500000.00"}]}}],
         }
         from unittest.mock import patch
         with patch("core.services.ai_reply", return_value=payload), patch("core.services.instagram_send_image", return_value={"ok": True}) as image_mock:
@@ -165,7 +165,7 @@ class BusinessRulesTests(TestCase):
         self.item.status = "available"
         self.item.image_url = "https://example.com/oq-buket.jpg"
         self.item.save(update_fields=["status", "image_url", "updated_at"])
-        second = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti buket", name_ru="Pink bouquet", arrangement_type="bouquet", price=600000, status="available", image_url="https://example.com/pushti-buket.jpg")
+        second = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti buket", arrangement_type="bouquet", price=600000, status="available", image_url="https://example.com/pushti-buket.jpg")
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-multi-catalog")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         conversation.messages.create(sender="customer", text="shu ikkalasini rasmini yuboring")
@@ -258,7 +258,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images"})
 
     def test_get_catalog_tool_filters_baskets(self):
-        basket = CatalogItem.objects.create(branch=self.branch, name_uz="Oq savat", name_ru="Белая корзина", arrangement_type="basket", price=700000, status="available")
+        basket = CatalogItem.objects.create(branch=self.branch, name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
         customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:11")
@@ -318,16 +318,16 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(any(row["batch_id"] == self.batch.id for row in rows))
 
     def test_ai_stock_rows_excludes_variants_without_stock_from_general_list(self):
-        flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya")
-        FlowerVariant.objects.create(flower=flower, name_uz="Snowball", name_ru="Snowball", color_uz="Oq", color_ru="Белый")
-        FlowerVariant.objects.create(flower=flower, name_uz="Limelight", name_ru="Limelight", color_uz="Yashil", color_ru="Зеленый")
+        flower = Flower.objects.create(name_uz="Gortenziya", slug="gortenziya")
+        FlowerVariant.objects.create(flower=flower, name_uz="Snowball", color_uz="Oq")
+        FlowerVariant.objects.create(flower=flower, name_uz="Limelight", color_uz="Yashil")
         rows = ai_stock_rows("gortenziya", limit=10)
         self.assertFalse(any(row["variant_uz"] in {"Snowball", "Limelight"} for row in rows))
 
     def test_ai_stock_rows_include_full_variant_display_names(self):
-        flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya-display")
-        golland = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Golland", name_ru="Гортензия Голландия", color_uz="Moviy", color_ru="Синий")
-        kolumbiya = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Kolumbiya", name_ru="Гортензия Колумбия", color_uz="Moviy", color_ru="Синий")
+        flower = Flower.objects.create(name_uz="Gortenziya", slug="gortenziya-display")
+        golland = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Golland", color_uz="Moviy")
+        kolumbiya = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Kolumbiya", color_uz="Moviy")
         StockBatch.objects.create(branch=self.branch, variant=golland, batch_number="GOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=70000, sale_price_per_stem=105000, sale_price_per_bunch=500000)
         StockBatch.objects.create(branch=self.branch, variant=kolumbiya, batch_number="KOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=35000, sale_price_per_stem=60000, sale_price_per_bunch=285000)
         rows = ai_stock_rows("gortenziya kok", limit=10)
@@ -339,8 +339,8 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(all(row["color_uz"] == "Moviy" for row in rows if row["flower_uz"] == "Gortenziya"))
 
     def test_ai_flower_variant_rows_can_show_specific_variant_without_stock(self):
-        flower = Flower.objects.create(name_uz="Gortenziya", name_ru="Гортензия", slug="gortenziya")
-        FlowerVariant.objects.create(flower=flower, name_uz="Snowball", name_ru="Snowball", color_uz="Oq", color_ru="Белый")
+        flower = Flower.objects.create(name_uz="Gortenziya", slug="gortenziya")
+        FlowerVariant.objects.create(flower=flower, name_uz="Snowball", color_uz="Oq")
         rows = ai_flower_variant_rows("gortenziya snow ball", limit=10)
         self.assertTrue(any(row["variant_uz"] == "Snowball" and row["active_stock"] == [] for row in rows))
 
@@ -506,7 +506,6 @@ class BusinessRulesTests(TestCase):
             branch=self.branch,
             social_post=post,
             name_uz="Pion buketi",
-            name_ru="Pion bouquet",
             arrangement_type="bouquet",
             price=800000,
             status="available",
@@ -548,7 +547,6 @@ class BusinessRulesTests(TestCase):
         item = CatalogItem.objects.create(
             branch=self.branch,
             name_uz="Pushti atirgul buketi",
-            name_ru="Pink rose bouquet",
             arrangement_type="bouquet",
             price=500000,
             status="available",
@@ -694,8 +692,8 @@ class ApiTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         self.branch = Branch.objects.create(name="API Test", code="API")
-        flower = Flower.objects.create(name_uz="Atirgul API", name_ru="Роза API", slug="rose-api")
-        variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", name_ru="Freedom", color_uz="Qizil", color_ru="Красный")
+        flower = Flower.objects.create(name_uz="Atirgul API", slug="rose-api")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
         self.batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="API-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=400000)
 
     def test_dashboard_requires_authentication(self):
@@ -755,7 +753,7 @@ class ApiTests(TestCase):
         post = SocialPost.objects.create(branch=self.branch, post_type="story", title_uz="Story buket", title_ru="Story bouquet", is_active=True)
         customer = Customer.objects.create(branch=self.branch, name="Madina", phone="+998901234567", instagram_user_id="ig-lead")
         lead = Lead.objects.create(customer=customer, branch=self.branch, social_post=post, status="won", request_uz="Storydagi buket", arrangement_type="catalog", estimated_price=400000)
-        item = CatalogItem.objects.create(branch=self.branch, social_post=post, name_uz="Qizil buket", name_ru="Red bouquet", arrangement_type="bouquet", price=400000, quantity_total=4, status="available")
+        item = CatalogItem.objects.create(branch=self.branch, social_post=post, name_uz="Qizil buket", arrangement_type="bouquet", price=400000, quantity_total=4, status="available")
         lead.catalog_usage.create(catalog_item=item, quantity=1)
         response = self.client.get(f"/api/social-posts/{post.id}/")
         self.assertEqual(response.status_code, 200)
@@ -777,7 +775,6 @@ class ApiTests(TestCase):
             "is_active": True,
             "catalog_items": [{
                 "name_uz": "Qizil atirgul buket",
-                "name_ru": "Букет красных роз",
                 "arrangement_type": "bouquet",
                 "price": "400000.00",
                 "quantity_total": 4,
@@ -797,6 +794,44 @@ class ApiTests(TestCase):
         self.assertEqual(composition.stock_batch_id, self.batch.id)
         self.assertEqual(composition.quantity_stems, 3)
         self.assertEqual(response.json()["catalog_items"][0]["composition"][0]["stock_batch"], self.batch.id)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 88)
+
+    def test_catalog_create_deducts_flowers_and_materials_then_delete_restores_unsold(self):
+        material = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Koreya qogoz", quantity=10, sale_price=50000)
+        payload = {
+            "name_uz": "Materialli buket",
+            "arrangement_type": "bouquet",
+            "price": "450000.00",
+            "quantity_total": 3,
+            "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 4}],
+            "materials": [{"packaging": material.id, "quantity": 2}],
+        }
+        response = self.client.post("/api/catalog/", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        item_id = response.json()["id"]
+        self.batch.refresh_from_db()
+        material.refresh_from_db()
+        item = CatalogItem.objects.get(id=item_id)
+        self.assertEqual(self.batch.remaining_stems, 88)
+        self.assertEqual(material.quantity, 4)
+        self.assertEqual(item.quantity_stock_deducted, 3)
+        self.assertTrue(CatalogMaterialUsage.objects.filter(catalog_item=item, packaging=material, quantity=2).exists())
+        response = self.client.patch(f"/api/catalog/{item_id}/", {"quantity_total": 2}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.batch.refresh_from_db()
+        material.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 92)
+        self.assertEqual(material.quantity, 6)
+        self.assertEqual(item.quantity_stock_deducted, 2)
+        response = self.client.delete(f"/api/catalog/{item_id}/")
+        self.assertEqual(response.status_code, 204)
+        self.batch.refresh_from_db()
+        material.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(material.quantity, 10)
 
     def test_conversation_response_includes_source(self):
         instagram_customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
@@ -866,7 +901,7 @@ class ApiTests(TestCase):
         created = User.objects.get(username="branch-default")
         self.assertIn(self.branch, list(created.profile.branches.all()))
         self.assertNotIn("branches", response.json()["profile"])
-        response = self.client.post("/api/packaging/", {"packaging_type": "basket", "name_uz": "Branchsiz savat", "name_ru": "Basket", "quantity": 1, "sale_price": "100000.00"}, format="json")
+        response = self.client.post("/api/packaging/", {"packaging_type": "basket", "name_uz": "Branchsiz savat", "quantity": 1, "sale_price": "100000.00"}, format="json")
         self.assertEqual(response.status_code, 201)
         self.assertNotIn("branch", response.json())
         response = self.client.get("/api/dashboard/")
@@ -893,14 +928,14 @@ class ApiTests(TestCase):
 
     def test_packaging_movement_updates_quantity(self):
         branch = Branch.objects.create(name="Packaging", code="PKG")
-        response = self.client.post("/api/packaging/", {"branch": branch.id, "packaging_type": "basket", "name_uz": "API savat", "name_ru": "API корзина", "quantity": 4, "sale_price": "90000.00"}, format="json")
+        response = self.client.post("/api/packaging/", {"branch": branch.id, "packaging_type": "basket", "name_uz": "API savat", "quantity": 4, "sale_price": "90000.00"}, format="json")
         self.assertEqual(response.status_code, 201)
         api_packaging = Packaging.objects.get(id=response.json()["id"])
         self.assertTrue(PackagingMovement.objects.filter(packaging=api_packaging, movement_type="in", quantity=4).exists())
         response = self.client.patch(f"/api/packaging/{api_packaging.id}/", {"quantity": 6}, format="json")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(PackagingMovement.objects.filter(packaging=api_packaging, movement_type="adjustment", quantity=2).exists())
-        packaging = Packaging.objects.create(branch=branch, packaging_type="basket", name_uz="Test savat", name_ru="Тест корзина", quantity=10, sale_price=100000)
+        packaging = Packaging.objects.create(branch=branch, packaging_type="basket", name_uz="Test savat", quantity=10, sale_price=100000)
         response = self.client.post(f"/api/packaging/{packaging.id}/movement/", {"movement_type": "out", "quantity": 3, "reason": "test"}, format="json")
         self.assertEqual(response.status_code, 200)
         packaging.refresh_from_db()
@@ -915,7 +950,7 @@ class ApiTests(TestCase):
 
     def test_mini_app_lead_history_returns_customer_orders(self):
         branch = Branch.objects.create(name="Mini", code="MINI")
-        CatalogItem.objects.create(branch=branch, name_uz="Mini katalog", name_ru="Мини каталог", arrangement_type="bouquet", price=250000, status="available")
+        CatalogItem.objects.create(branch=branch, name_uz="Mini katalog", arrangement_type="bouquet", price=250000, status="available")
         init_data = 'user={"id":777,"first_name":"Ali"}'
         payload = {"init_data": init_data, "branch": branch.id, "arrangement_type": "basket", "request_text": "7 ta gortenziya savatga", "name": "Ali", "phone": "901234567", "note": "Bugun kerak"}
         from unittest.mock import patch
@@ -946,7 +981,6 @@ class ApiTests(TestCase):
         payload = {
             "branch": self.branch.id,
             "name_uz": "Kop buket",
-            "name_ru": "Много букетов",
             "arrangement_type": "bouquet",
             "price": "100000.00",
             "status": "available",
@@ -963,8 +997,8 @@ class ApiTests(TestCase):
         self.assertIn("Yetmayapti: 20 dona", data["detail"][0])
 
     def test_flower_delete_archives_when_variants_exist(self):
-        flower = Flower.objects.create(name_uz="Liliya", name_ru="Лилия", slug="lily-delete")
-        FlowerVariant.objects.create(flower=flower, name_uz="Oriental", name_ru="Oriental", color_uz="Oq", color_ru="Белый")
+        flower = Flower.objects.create(name_uz="Liliya", slug="lily-delete")
+        FlowerVariant.objects.create(flower=flower, name_uz="Oriental", color_uz="Oq")
         response = self.client.delete(f"/api/flowers/{flower.id}/")
         self.assertEqual(response.status_code, 204)
         flower.refresh_from_db()
@@ -1021,7 +1055,7 @@ class ApiTests(TestCase):
         self.assertEqual(rows[0]["height_to_cm"], 60)
 
     def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
-        packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", name_ru="Lead basket", quantity=2, sale_price=50000)
+        packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", quantity=2, sale_price=50000)
         payload = {
             "branch": self.branch.id,
             "status": "new",
@@ -1066,8 +1100,9 @@ class ApiTests(TestCase):
         self.assertEqual(packaging.quantity, 1)
 
     def test_catalog_lead_stock_returns_when_won_is_reverted(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Catalog buket", name_ru="Catalog bouquet", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Catalog buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        deduct_catalog_stock(item, self.user)
         payload = {
             "branch": self.branch.id,
             "status": "new",
@@ -1084,21 +1119,22 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.batch.refresh_from_db()
         item.refresh_from_db()
-        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(self.batch.remaining_stems, 85)
         self.assertEqual(item.quantity_sold, 2)
-        self.assertEqual(item.quantity_stock_deducted, 2)
+        self.assertEqual(item.quantity_stock_deducted, 3)
         response = self.client.post(f"/api/leads/{lead_id}/move/", {"status": "new"}, format="json")
         self.assertEqual(response.status_code, 200)
         self.batch.refresh_from_db()
         item.refresh_from_db()
-        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(self.batch.remaining_stems, 85)
         self.assertEqual(item.quantity_sold, 0)
-        self.assertEqual(item.quantity_stock_deducted, 0)
+        self.assertEqual(item.quantity_stock_deducted, 3)
         self.assertEqual(item.status, "available")
 
     def test_catalog_lead_stock_returns_when_won_is_deleted(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Delete buket", name_ru="Delete bouquet", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Delete buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        deduct_catalog_stock(item, self.user)
         payload = {
             "branch": self.branch.id,
             "status": "new",
@@ -1115,15 +1151,15 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.batch.refresh_from_db()
         item.refresh_from_db()
-        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(self.batch.remaining_stems, 85)
         self.assertEqual(item.quantity_sold, 2)
         response = self.client.delete(f"/api/leads/{lead_id}/")
         self.assertEqual(response.status_code, 204)
         self.batch.refresh_from_db()
         item.refresh_from_db()
-        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(self.batch.remaining_stems, 85)
         self.assertEqual(item.quantity_sold, 0)
-        self.assertEqual(item.quantity_stock_deducted, 0)
+        self.assertEqual(item.quantity_stock_deducted, 3)
         self.assertFalse(Lead.objects.filter(id=lead_id).exists())
         audit = AuditLog.objects.filter(action="lead_deleted", entity_id=str(lead_id)).first()
         self.assertIsNotNone(audit)
@@ -1140,7 +1176,7 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_analytics_and_dashboard_include_top_selling_flowers(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", name_ru="Analytics bouquet", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=4)
         customer = Customer.objects.create(branch=self.branch, name="Analytics", phone="+998901234501", instagram_user_id="analytics")
         lead = Lead.objects.create(customer=customer, branch=self.branch, status="won", request_uz="Analytics lead", arrangement_type="catalog", estimated_price=600000, source="instagram")

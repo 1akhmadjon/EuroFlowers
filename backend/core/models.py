@@ -69,7 +69,6 @@ class PagePermission(TimeStampedModel):
 
 class Flower(TimeStampedModel):
     name_uz = models.CharField(max_length=120)
-    name_ru = models.CharField(max_length=120)
     slug = models.SlugField(unique=True, null=True, blank=True)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
@@ -90,9 +89,7 @@ class Flower(TimeStampedModel):
 class FlowerVariant(TimeStampedModel):
     flower = models.ForeignKey(Flower, on_delete=models.PROTECT, related_name="variants")
     name_uz = models.CharField(max_length=120)
-    name_ru = models.CharField(max_length=120)
     color_uz = models.CharField(max_length=80)
-    color_ru = models.CharField(max_length=80)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
     default_stems_per_bunch = models.PositiveIntegerField(default=10)
@@ -169,11 +166,10 @@ class StockMovement(TimeStampedModel):
 
 
 class Packaging(TimeStampedModel):
-    TYPE_CHOICES = [("wrap", "O‘ram"), ("basket", "Savat"), ("box", "Quti"), ("accessory", "Aksessuar")]
+    TYPE_CHOICES = [("wrap", "Buket qog‘ozi"), ("basket", "Savat"), ("box", "Quti"), ("other", "Boshqalar")]
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="packaging")
     packaging_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     name_uz = models.CharField(max_length=120)
-    name_ru = models.CharField(max_length=120)
     size = models.CharField(max_length=40, blank=True)
     capacity_min_stems = models.PositiveIntegerField(default=1)
     capacity_max_stems = models.PositiveIntegerField(default=999)
@@ -251,7 +247,6 @@ class CatalogItem(TimeStampedModel):
     STATUS_CHOICES = [("draft", "Qoralama"), ("available", "Sotuvda"), ("reserved", "Band"), ("sold", "Sotildi"), ("archived", "Arxiv")]
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="catalog_items")
     name_uz = models.CharField(max_length=180)
-    name_ru = models.CharField(max_length=180)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti")])
@@ -279,6 +274,12 @@ class CatalogComposition(TimeStampedModel):
     stock_batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="catalog_usages")
     quantity_stems = models.PositiveIntegerField()
     quantity_bunches = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+
+class CatalogMaterialUsage(TimeStampedModel):
+    catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="materials")
+    packaging = models.ForeignKey(Packaging, on_delete=models.PROTECT, related_name="catalog_usages")
+    quantity = models.PositiveIntegerField(default=1)
 
 
 class Conversation(TimeStampedModel):

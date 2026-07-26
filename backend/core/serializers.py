@@ -8,7 +8,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .branching import default_branch
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -250,13 +250,22 @@ class CatalogCompositionSerializer(serializers.ModelSerializer):
         fields = ["id", "stock_batch", "batch_detail", "quantity_stems", "quantity_bunches"]
 
 
+class CatalogMaterialUsageSerializer(serializers.ModelSerializer):
+    packaging_detail = PackagingSerializer(source="packaging", read_only=True)
+
+    class Meta:
+        model = CatalogMaterialUsage
+        fields = ["id", "packaging", "packaging_detail", "quantity"]
+
+
 class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     composition = CatalogCompositionSerializer(many=True, required=False)
+    materials = CatalogMaterialUsageSerializer(many=True, required=False)
 
     class Meta:
         model = CatalogItem
-        fields = ["id", "name_uz", "name_ru", "description_uz", "description_ru", "arrangement_type", "height_cm", "diameter_cm", "price", "florist_fee", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition"]
+        fields = ["id", "name_uz", "description_uz", "description_ru", "arrangement_type", "height_cm", "diameter_cm", "price", "florist_fee", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials"]
         read_only_fields = ["quantity_sold", "quantity_stock_deducted"]
 
 
@@ -269,6 +278,18 @@ def catalog_stock_error(batch, needed):
         "Katalogni saqlash uchun sklad qoldig'i yetarli emas.\n"
         f"Gul: {flower_name}\n"
         f"Partiya: {batch.batch_number}\n"
+        f"Kerak: {needed} dona\n"
+        f"Bor: {remaining} dona\n"
+        f"Yetmayapti: {missing} dona"
+    )
+
+
+def catalog_material_error(packaging, needed):
+    remaining = packaging.quantity
+    missing = max(needed - remaining, 0)
+    return (
+        "Katalogni saqlash uchun material qoldig'i yetarli emas.\n"
+        f"Material: {packaging.name_uz}\n"
         f"Kerak: {needed} dona\n"
         f"Bor: {remaining} dona\n"
         f"Yetmayapti: {missing} dona"
@@ -379,6 +400,14 @@ class SocialPostSerializer(serializers.ModelSerializer):
                 if batch.remaining_stems < needed:
                     detail = catalog_stock_error(batch, needed)
                     raise serializers.ValidationError({"detail": detail, "catalog_items": detail})
+            for row in item.get("materials") or []:
+                packaging = row["packaging"]
+                if branch and packaging.branch_id != branch.id:
+                    raise serializers.ValidationError({"catalog_items": f"{packaging.name_uz} boshqa filialga tegishli"})
+                needed = row.get("quantity", 1) * quantity_total
+                if packaging.quantity < needed:
+                    detail = catalog_material_error(packaging, needed)
+                    raise serializers.ValidationError({"detail": detail, "catalog_items": detail})
 
     def validate(self, attrs):
         attrs.setdefault("branch", default_branch())
@@ -387,9 +416,13 @@ class SocialPostSerializer(serializers.ModelSerializer):
         return attrs
 
     def _sync_catalog_items(self, post, catalog_items):
+        from .inventory_services import deduct_catalog_inventory, restore_catalog_inventory
+        user = getattr(self.context.get("request"), "user", None)
         for item_data in catalog_items:
             has_composition = "composition" in item_data
             composition = item_data.pop("composition", None)
+            has_materials = "materials" in item_data
+            materials = item_data.pop("materials", None)
             item_id = item_data.pop("id", None)
             if not item_data.get("image_url") and post.image_url:
                 item_data["image_url"] = post.image_url
@@ -397,6 +430,11 @@ class SocialPostSerializer(serializers.ModelSerializer):
                 item_data["instagram_story_url"] = post.permalink
             if item_id:
                 item = post.catalog_items.get(id=item_id)
+                old_quantity_total = item.quantity_total
+                if item.quantity_sold and (has_composition or has_materials):
+                    raise serializers.ValidationError({"catalog_items": "Sotilgan katalog tarkibini o‘zgartirib bo‘lmaydi"})
+                if has_composition or has_materials:
+                    restore_catalog_inventory(item, user, item.quantity_stock_deducted)
                 for key, value in item_data.items():
                     setattr(item, key, value)
                 item.branch = post.branch
@@ -407,6 +445,19 @@ class SocialPostSerializer(serializers.ModelSerializer):
             if has_composition:
                 item.composition.all().delete()
                 CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=item, **row) for row in composition])
+            if has_materials:
+                item.materials.all().delete()
+                CatalogMaterialUsage.objects.bulk_create([CatalogMaterialUsage(catalog_item=item, **row) for row in materials])
+            if item_id and (has_composition or has_materials):
+                deduct_catalog_inventory(item, user, item.quantity_total)
+            elif item_id:
+                delta = item.quantity_total - old_quantity_total
+                if delta > 0:
+                    deduct_catalog_inventory(item, user, delta)
+                elif delta < 0:
+                    restore_catalog_inventory(item, user, abs(delta))
+            elif not item_id:
+                deduct_catalog_inventory(item, user, item.quantity_total)
 
     def create(self, validated_data):
         catalog_items = validated_data.pop("catalog_items", [])
@@ -430,6 +481,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
 
 class CatalogItemSerializer(serializers.ModelSerializer):
     composition = CatalogCompositionSerializer(many=True, required=False)
+    materials = CatalogMaterialUsageSerializer(many=True, required=False)
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     class Meta:
         model = CatalogItem
@@ -439,37 +491,89 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs.setdefault("branch", getattr(self.instance, "branch", None) or default_branch())
         composition = attrs.get("composition")
+        materials = attrs.get("materials")
         quantity_total = attrs.get("quantity_total", getattr(self.instance, "quantity_total", 1))
+        if self.instance and self.instance.quantity_sold and (composition is not None or materials is not None):
+            raise serializers.ValidationError({"composition": "Sotilgan katalog tarkibini o‘zgartirib bo‘lmaydi"})
         if composition is None and self.instance:
             composition = [{"stock_batch": row.stock_batch, "quantity_stems": row.quantity_stems} for row in self.instance.composition.select_related("stock_batch")]
+        if materials is None and self.instance:
+            materials = [{"packaging": row.packaging, "quantity": row.quantity} for row in self.instance.materials.select_related("packaging")]
         if composition:
+            for row in composition:
+                batch = row["stock_batch"]
+                if batch.branch_id != attrs["branch"].id:
+                    raise serializers.ValidationError({"composition": f"{batch.batch_number} boshqa filialga tegishli"})
+        if materials:
+            for row in materials:
+                packaging = row["packaging"]
+                if packaging.branch_id != attrs["branch"].id:
+                    raise serializers.ValidationError({"materials": f"{packaging.name_uz} boshqa filialga tegishli"})
+        if composition and not self.instance:
             for row in composition:
                 batch = row["stock_batch"]
                 needed = row["quantity_stems"] * quantity_total
                 if batch.remaining_stems < needed:
                     detail = catalog_stock_error(batch, needed)
                     raise serializers.ValidationError({"detail": detail, "composition": detail})
+        if materials and not self.instance:
+            for row in materials:
+                packaging = row["packaging"]
+                needed = row.get("quantity", 1) * quantity_total
+                if packaging.quantity < needed:
+                    detail = catalog_material_error(packaging, needed)
+                    raise serializers.ValidationError({"detail": detail, "materials": detail})
         quantity_sold = getattr(self.instance, "quantity_sold", 0)
         if quantity_total < quantity_sold:
             raise serializers.ValidationError({"quantity_total": "Umumiy son sotilgan sondan kam bo‘lishi mumkin emas"})
         return attrs
 
     def create(self, validated_data):
+        from .inventory_services import deduct_catalog_inventory
         composition = validated_data.pop("composition", [])
+        materials = validated_data.pop("materials", [])
         validated_data = self._sync_social_post_image_data(validated_data)
-        item = CatalogItem.objects.create(**validated_data)
-        CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=item, **row) for row in composition])
-        self._sync_social_post_image(item)
+        user = getattr(self.context.get("request"), "user", None)
+        with transaction.atomic():
+            item = CatalogItem.objects.create(**validated_data)
+            CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=item, **row) for row in composition])
+            CatalogMaterialUsage.objects.bulk_create([CatalogMaterialUsage(catalog_item=item, **row) for row in materials])
+            try:
+                deduct_catalog_inventory(item, user, item.quantity_total)
+            except ValueError as exc:
+                raise serializers.ValidationError({"detail": str(exc)})
+            self._sync_social_post_image(item)
         return item
 
     def update(self, instance, validated_data):
+        from .inventory_services import deduct_catalog_inventory, restore_catalog_inventory
         composition = validated_data.pop("composition", None)
+        materials = validated_data.pop("materials", None)
         validated_data = self._sync_social_post_image_data(validated_data)
-        instance = super().update(instance, validated_data)
-        if composition is not None:
-            instance.composition.all().delete()
-            CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=instance, **row) for row in composition])
-        self._sync_social_post_image(instance)
+        user = getattr(self.context.get("request"), "user", None)
+        old_quantity_total = instance.quantity_total
+        with transaction.atomic():
+            if composition is not None or materials is not None:
+                restore_catalog_inventory(instance, user, instance.quantity_stock_deducted)
+            instance = super().update(instance, validated_data)
+            if composition is not None:
+                instance.composition.all().delete()
+                CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=instance, **row) for row in composition])
+            if materials is not None:
+                instance.materials.all().delete()
+                CatalogMaterialUsage.objects.bulk_create([CatalogMaterialUsage(catalog_item=instance, **row) for row in materials])
+            try:
+                if composition is not None or materials is not None:
+                    deduct_catalog_inventory(instance, user, instance.quantity_total)
+                else:
+                    delta = instance.quantity_total - old_quantity_total
+                    if delta > 0:
+                        deduct_catalog_inventory(instance, user, delta)
+                    elif delta < 0:
+                        restore_catalog_inventory(instance, user, abs(delta))
+            except ValueError as exc:
+                raise serializers.ValidationError({"detail": str(exc)})
+            self._sync_social_post_image(instance)
         return instance
 
     def _sync_social_post_image_data(self, validated_data):

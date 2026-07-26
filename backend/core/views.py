@@ -27,7 +27,7 @@ from .branching import default_branch
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement
 from .permissions import RolePermission, has_page_permission
 from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .inventory_services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_lead_stock
+from .inventory_services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -291,7 +291,7 @@ class FlowerViewSet(ScopedViewSet):
     write_roles = ["admin", "warehouse"]
     queryset = Flower.objects.prefetch_related("variants").all()
     serializer_class = FlowerSerializer
-    search_fields = ["name_uz", "name_ru"]
+    search_fields = ["name_uz"]
 
     def perform_destroy(self, instance):
         before = instance_snapshot(instance)
@@ -315,7 +315,7 @@ class FlowerVariantViewSet(ScopedViewSet):
     queryset = FlowerVariant.objects.select_related("flower").all()
     serializer_class = FlowerVariantSerializer
     filterset_fields = ["flower", "is_active"]
-    search_fields = ["name_uz", "name_ru", "color_uz", "color_ru", "flower__name_uz", "flower__name_ru"]
+    search_fields = ["name_uz", "color_uz", "flower__name_uz"]
 
     def perform_destroy(self, instance):
         before = instance_snapshot(instance)
@@ -335,7 +335,7 @@ class StockBatchViewSet(ScopedViewSet):
     queryset = StockBatch.objects.select_related("branch", "variant__flower").all()
     serializer_class = StockBatchSerializer
     filterset_fields = ["variant", "height_cm", "height_from_cm", "height_to_cm", "is_active"]
-    search_fields = ["batch_number", "variant__flower__name_uz", "variant__flower__name_ru", "variant__name_uz", "variant__color_uz"]
+    search_fields = ["batch_number", "variant__flower__name_uz", "variant__name_uz", "variant__color_uz"]
     ordering_fields = ["received_at", "remaining_stems", "sale_price_per_stem", "height_cm", "height_from_cm", "height_to_cm"]
 
     def perform_create(self, serializer):
@@ -379,7 +379,7 @@ class PackagingViewSet(ScopedViewSet):
     queryset = Packaging.objects.select_related("branch").all()
     serializer_class = PackagingSerializer
     filterset_fields = ["packaging_type", "is_active"]
-    search_fields = ["name_uz", "name_ru"]
+    search_fields = ["name_uz"]
 
     def perform_create(self, serializer):
         packaging = serializer.save()
@@ -419,10 +419,10 @@ class PackagingMovementViewSet(viewsets.ReadOnlyModelViewSet):
 class CatalogItemViewSet(ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
-    queryset = CatalogItem.objects.select_related("branch", "social_post").prefetch_related("composition__stock_batch__variant__flower").all()
+    queryset = CatalogItem.objects.select_related("branch", "social_post").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
     serializer_class = CatalogItemSerializer
     filterset_fields = ["status", "arrangement_type"]
-    search_fields = ["name_uz", "name_ru", "description_uz", "description_ru"]
+    search_fields = ["name_uz", "description_uz", "description_ru"]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -445,6 +445,20 @@ class CatalogItemViewSet(ScopedViewSet):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(item).data)
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            item = CatalogItem.objects.select_for_update().get(pk=instance.pk)
+            before = instance_snapshot(item)
+            restore_catalog_inventory(item, self.request.user)
+            item.refresh_from_db()
+            try:
+                item.delete()
+                write_audit(self.request.user, "catalog_deleted", item, before=before, after={})
+            except ProtectedError:
+                item.status = "archived"
+                item.save(update_fields=["status", "updated_at"])
+                write_audit(self.request.user, "catalog_archived", item, before=before, after=instance_snapshot(item))
 
 
 class CustomerViewSet(ScopedViewSet):
@@ -1050,13 +1064,11 @@ def top_selling_flowers(won_leads):
     stock_rows = LeadStockUsage.objects.filter(lead_id__in=lead_ids).select_related("stock_batch__variant__flower").values(
         "stock_batch__variant__flower_id",
         "stock_batch__variant__flower__name_uz",
-        "stock_batch__variant__flower__name_ru",
         "stock_batch__variant__color_uz",
-        "stock_batch__variant__color_ru",
     ).annotate(stems=Coalesce(Sum("quantity_stems"), 0), bunches=Coalesce(Sum("quantity_bunches"), Decimal("0")))
     for row in stock_rows:
         key = (row["stock_batch__variant__flower_id"], row["stock_batch__variant__color_uz"] or "")
-        rows.setdefault(key, {"flower_id": row["stock_batch__variant__flower_id"], "name_uz": row["stock_batch__variant__flower__name_uz"], "name_ru": row["stock_batch__variant__flower__name_ru"], "color_uz": row["stock_batch__variant__color_uz"], "color_ru": row["stock_batch__variant__color_ru"], "stems": 0, "bunches": Decimal("0")})
+        rows.setdefault(key, {"flower_id": row["stock_batch__variant__flower_id"], "name_uz": row["stock_batch__variant__flower__name_uz"], "color_uz": row["stock_batch__variant__color_uz"], "stems": 0, "bunches": Decimal("0")})
         rows[key]["stems"] += int(row["stems"] or 0)
         rows[key]["bunches"] += row["bunches"] or Decimal("0")
     catalog_usage = LeadCatalogUsage.objects.filter(lead_id__in=lead_ids).select_related("catalog_item").values("catalog_item_id").annotate(quantity=Coalesce(Sum("quantity"), 0))
@@ -1067,18 +1079,18 @@ def top_selling_flowers(won_leads):
         variant = composition.stock_batch.variant
         flower = variant.flower
         key = (flower.id, variant.color_uz or "")
-        rows.setdefault(key, {"flower_id": flower.id, "name_uz": flower.name_uz, "name_ru": flower.name_ru, "color_uz": variant.color_uz, "color_ru": variant.color_ru, "stems": 0, "bunches": Decimal("0")})
+        rows.setdefault(key, {"flower_id": flower.id, "name_uz": flower.name_uz, "color_uz": variant.color_uz, "stems": 0, "bunches": Decimal("0")})
         rows[key]["stems"] += int(composition.quantity_stems * quantity)
         rows[key]["bunches"] += composition.quantity_bunches * quantity
     return sorted([dict(row, bunches=str(row["bunches"])) for row in rows.values()], key=lambda row: row["stems"], reverse=True)[:20]
 
 
 def top_catalog_items(won_leads):
-    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__name_ru", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-quantity", "-last_sold_at")[:20])
+    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-quantity", "-last_sold_at")[:20])
 
 
 def recent_top_catalog_items(won_leads):
-    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__name_ru", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-last_sold_at", "-quantity")[:20])
+    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-last_sold_at", "-quantity")[:20])
 
 
 def conversation_source_breakdown(conversations):
@@ -1231,7 +1243,7 @@ def mini_app_quote_payload(data):
             quantity = item.get("quantity") or 1
             line_total = catalog.price * quantity
             total += line_total
-            lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "name_ru": catalog.name_ru, "quantity": quantity, "unit_price": str(catalog.price), "total": str(line_total)})
+            lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "quantity": quantity, "unit_price": str(catalog.price), "total": str(line_total)})
             continue
         raise ValueError("Mini app katalogda faqat catalog_item ishlatiladi")
     return {"branch": branch, "lines": lines, "packaging": None, "florist_fee": str(Decimal("0")), "estimated_price": str(total), "price_is_estimate": False, "ai_note": ""}

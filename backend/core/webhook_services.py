@@ -180,7 +180,7 @@ def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
         webhook_story_id=(webhook_event.story_id or webhook_event.media_id) if webhook_event and post_type == "story" else "",
         webhook_story_url=webhook_event.story_url if webhook_event and post_type == "story" else "",
         title_uz=item.name_uz,
-        title_ru=item.name_ru,
+        title_ru=item.name_uz,
         description_uz=item.description_uz,
         description_ru=item.description_ru,
         price=item.price,

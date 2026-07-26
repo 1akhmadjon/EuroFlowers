@@ -61,37 +61,37 @@ class Command(BaseCommand):
         PagePermission.objects.filter(user=operator, page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
 
         flowers = [
-            ("atirgul", "Atirgul", "Роза", 1, 12, "https://images.unsplash.com/photo-1518895949257-7621c3c786d7?auto=format&fit=crop&w=900&q=85"),
-            ("buta-atirgul", "Buta atirguli", "Кустовая роза", 1, 12, "https://images.unsplash.com/photo-1526047932273-341f2a7631f9?auto=format&fit=crop&w=900&q=85"),
-            ("gortenziya", "Gortenziya", "Гортензия", 6, 10, "https://flores.uz/wp-content/uploads/2026/03/photo_2_2026-03-11_19-24-38.jpg"),
-            ("pion", "Pion", "Пион", 4, 7, "https://images.unsplash.com/photo-1563241527-3004b7be0ffd?auto=format&fit=crop&w=900&q=85"),
-            ("xrizantema", "Xrizantema", "Хризантема", 8, 11, "https://images.unsplash.com/photo-1572454591674-2739f30d2c6c?auto=format&fit=crop&w=900&q=85"),
-            ("alstromeriya", "Alstromeriya", "Альстромерия", 1, 12, "https://images.unsplash.com/photo-1523438885200-e635ba2c371e?auto=format&fit=crop&w=900&q=85"),
-            ("matthiola", "Matthiola", "Маттиола", 3, 8, "https://images.unsplash.com/photo-1591886960571-74d43a9d4166?auto=format&fit=crop&w=900&q=85"),
-            ("gvozdika", "Gvozdika", "Гвоздика", 1, 12, "https://images.unsplash.com/photo-1495231916356-a86217efff12?auto=format&fit=crop&w=900&q=85"),
+            ("atirgul", "Atirgul", 1, 12, "https://images.unsplash.com/photo-1518895949257-7621c3c786d7?auto=format&fit=crop&w=900&q=85"),
+            ("buta-atirgul", "Buta atirguli", 1, 12, "https://images.unsplash.com/photo-1526047932273-341f2a7631f9?auto=format&fit=crop&w=900&q=85"),
+            ("gortenziya", "Gortenziya", 6, 10, "https://flores.uz/wp-content/uploads/2026/03/photo_2_2026-03-11_19-24-38.jpg"),
+            ("pion", "Pion", 4, 7, "https://images.unsplash.com/photo-1563241527-3004b7be0ffd?auto=format&fit=crop&w=900&q=85"),
+            ("xrizantema", "Xrizantema", 8, 11, "https://images.unsplash.com/photo-1572454591674-2739f30d2c6c?auto=format&fit=crop&w=900&q=85"),
+            ("alstromeriya", "Alstromeriya", 1, 12, "https://images.unsplash.com/photo-1523438885200-e635ba2c371e?auto=format&fit=crop&w=900&q=85"),
+            ("matthiola", "Matthiola", 3, 8, "https://images.unsplash.com/photo-1591886960571-74d43a9d4166?auto=format&fit=crop&w=900&q=85"),
+            ("gvozdika", "Gvozdika", 1, 12, "https://images.unsplash.com/photo-1495231916356-a86217efff12?auto=format&fit=crop&w=900&q=85"),
         ]
         flower_map = {}
-        for slug, uz, ru, start, end, image in flowers:
-            flower, _ = Flower.objects.update_or_create(slug=slug, defaults={"name_uz": uz, "name_ru": ru, "season_start_month": start, "season_end_month": end, "image_url": image, "description_uz": f"Premium {uz.lower()} assortimenti", "description_ru": f"Премиальный ассортимент: {ru.lower()}"})
+        for slug, uz, start, end, image in flowers:
+            flower, _ = Flower.objects.update_or_create(slug=slug, defaults={"name_uz": uz, "season_start_month": start, "season_end_month": end, "image_url": image, "description_uz": f"Premium {uz.lower()} assortimenti", "description_ru": f"Premium {uz.lower()} assortimenti"})
             flower_map[slug] = flower
 
         variants = [
-            ("atirgul", "Mondial", "Mondial", "Oq", "Белый", 20, 11, "Oq rangli premium atirgul, klassik va nafis buketlar uchun yaxshi. Bosh qismi tekisroq ochiladi.", "Белая премиальная роза для классических нежных букетов."),
-            ("atirgul", "Explorer", "Explorer", "Qizil", "Красный", 20, 11, "Qizil rangi to‘q, boshi yirikroq va ko‘rinishi hashamatli. Premium buketlarda kuchli effekt beradi.", "Насыщенно-красная роза с крупным бутоном для премиальных букетов."),
-            ("atirgul", "Hermosa", "Hermosa", "Pushti", "Розовый", 20, 11, "Pushti rangli yumshoq ko‘rinishdagi atirgul. Romantik va nozik buketlar uchun mos.", "Розовая роза с мягким оттенком для романтичных букетов."),
-            ("buta-atirgul", "Bombastic", "Bombastic", "Pushti", "Розовый", 10, 5, "Mayda ko‘p boshli buta atirgul, buketga hajm va noziklik beradi.", "Кустовая роза с несколькими бутонами, добавляет объем и нежность."),
-            ("buta-atirgul", "White O’Hara", "White O’Hara", "Krem", "Кремовый", 10, 5, "Aromati kuchliroq, ochilganda juda nafis ko‘rinadi. Premium kompozitsiyalar uchun tanlanadi.", "Ароматная кустовая роза кремового оттенка для премиальных композиций."),
-            ("gortenziya", "Premium Blue", "Premium Blue", "Moviy", "Голубой", 5, 3, "Import premium gortenziya, boshi yirikroq, rangi to‘qroq va buketda boy ko‘rinadi. Shu sabab oddiy gortenziyadan qimmatroq.", "Импортная премиальная гортензия с крупной шапкой и насыщенным цветом."),
-            ("gortenziya", "Verena", "Verena", "Pushti", "Розовый", 5, 3, "Pushti gortenziya yumshoq rang beradi, romantik savat va buketlarda chiroyli chiqadi.", "Розовая гортензия для нежных романтичных букетов и корзин."),
-            ("pion", "Sarah Bernhardt", "Sarah Bernhardt", "Och pushti", "Нежно-розовый", 5, 5, "Mavsumiy premium pion, ochilganda katta va havodor ko‘rinadi. Sovg‘a buketlarida juda nafis.", "Сезонный премиальный пион с крупным воздушным раскрытием."),
-            ("xrizantema", "Baltica", "Baltica", "Oq", "Белый", 5, 5, "Uzoq saqlanadigan oq xrizantema, buketga hajm va tozalik ko‘rinishini beradi.", "Белая хризантема, долго стоит и добавляет объем букету."),
-            ("alstromeriya", "Virginia", "Virginia", "Oq", "Белый", 10, 5, "Nozik va uzoq turadigan gul, buketda yengil tekstura beradi.", "Нежный стойкий цветок, добавляет легкую текстуру букету."),
-            ("matthiola", "Katz", "Katz", "Lavanda", "Лавандовый", 10, 5, "Xushbo‘y va mavsumiy ko‘rinish beradi, pastel buketlarda yaxshi turadi.", "Ароматный цветок для пастельных сезонных букетов."),
-            ("gvozdika", "Nobio", "Nobio", "Krem", "Кремовый", 20, 10, "Krem rangli chinnigul, chidamli va buketda hajmni yaxshi ushlab turadi.", "Кремовая гвоздика, стойкая и хорошо держит объем."),
+            ("atirgul", "Mondial", "Oq", 20, 11, "Oq rangli premium atirgul, klassik va nafis buketlar uchun yaxshi. Bosh qismi tekisroq ochiladi.", "Oq premium atirgul"),
+            ("atirgul", "Explorer", "Qizil", 20, 11, "Qizil rangi to‘q, boshi yirikroq va ko‘rinishi hashamatli. Premium buketlarda kuchli effekt beradi.", "Qizil premium atirgul"),
+            ("atirgul", "Hermosa", "Pushti", 20, 11, "Pushti rangli yumshoq ko‘rinishdagi atirgul. Romantik va nozik buketlar uchun mos.", "Pushti atirgul"),
+            ("buta-atirgul", "Bombastic", "Pushti", 10, 5, "Mayda ko‘p boshli buta atirgul, buketga hajm va noziklik beradi.", "Pushti buta atirgul"),
+            ("buta-atirgul", "White O’Hara", "Krem", 10, 5, "Aromati kuchliroq, ochilganda juda nafis ko‘rinadi. Premium kompozitsiyalar uchun tanlanadi.", "Krem rang buta atirgul"),
+            ("gortenziya", "Premium Blue", "Moviy", 5, 3, "Import premium gortenziya, boshi yirikroq, rangi to‘qroq va buketda boy ko‘rinadi. Shu sabab oddiy gortenziyadan qimmatroq.", "Moviy premium gortenziya"),
+            ("gortenziya", "Verena", "Pushti", 5, 3, "Pushti gortenziya yumshoq rang beradi, romantik savat va buketlarda chiroyli chiqadi.", "Pushti gortenziya"),
+            ("pion", "Sarah Bernhardt", "Och pushti", 5, 5, "Mavsumiy premium pion, ochilganda katta va havodor ko‘rinadi. Sovg‘a buketlarida juda nafis.", "Och pushti pion"),
+            ("xrizantema", "Baltica", "Oq", 5, 5, "Uzoq saqlanadigan oq xrizantema, buketga hajm va tozalik ko‘rinishini beradi.", "Oq xrizantema"),
+            ("alstromeriya", "Virginia", "Oq", 10, 5, "Nozik va uzoq turadigan gul, buketda yengil tekstura beradi.", "Oq alstromeriya"),
+            ("matthiola", "Katz", "Lavanda", 10, 5, "Xushbo‘y va mavsumiy ko‘rinish beradi, pastel buketlarda yaxshi turadi.", "Lavanda matthiola"),
+            ("gvozdika", "Nobio", "Krem", 20, 10, "Krem rangli chinnigul, chidamli va buketda hajmni yaxshi ushlab turadi.", "Krem gvozdika"),
         ]
         variant_map = {}
-        for slug, uz, ru, color_uz, color_ru, bunch, minimum, description_uz, description_ru in variants:
-            variant, _ = FlowerVariant.objects.update_or_create(flower=flower_map[slug], name_uz=uz, color_uz=color_uz, defaults={"name_ru": ru, "color_ru": color_ru, "description_uz": description_uz, "description_ru": description_ru, "default_stems_per_bunch": bunch, "minimum_sale_stems": minimum, "image_url": flower_map[slug].image_url})
+        for slug, uz, color_uz, bunch, minimum, description_uz, description_ru in variants:
+            variant, _ = FlowerVariant.objects.update_or_create(flower=flower_map[slug], name_uz=uz, color_uz=color_uz, defaults={"description_uz": description_uz, "description_ru": description_ru, "default_stems_per_bunch": bunch, "minimum_sale_stems": minimum, "image_url": flower_map[slug].image_url})
             variant_map[(slug, uz)] = variant
 
         batch_rows = [
@@ -116,28 +116,28 @@ class Command(BaseCommand):
                 StockMovement.objects.create(batch=batch, movement_type="in", quantity_stems=stems, quantity_bunches=Decimal(stems) / per_bunch, reason="Boshlang‘ich seed kirimi", performed_by=admin)
             batch_map[number] = batch
 
-        for kind, uz, ru, size, minimum, maximum, price, qty in [
-            ("basket", "Oq premium savat", "Белая премиальная корзина", "M", 15, 35, 180000, 12),
-            ("basket", "Katta to‘qima savat", "Большая плетёная корзина", "L", 36, 75, 320000, 7),
-            ("box", "Dumaloq premium quti", "Круглая премиальная коробка", "M", 15, 45, 150000, 18),
-            ("wrap", "Koreya o‘rami", "Корейская упаковка", "Universal", 1, 101, 50000, 80),
+        for kind, uz, size, minimum, maximum, price, qty in [
+            ("basket", "Oq premium savat", "M", 15, 35, 180000, 12),
+            ("basket", "Katta to‘qima savat", "L", 36, 75, 320000, 7),
+            ("box", "Dumaloq premium quti", "M", 15, 45, 150000, 18),
+            ("wrap", "Koreya o‘rami", "Universal", 1, 101, 50000, 80),
         ]:
-            Packaging.objects.update_or_create(branch=central, packaging_type=kind, name_uz=uz, defaults={"name_ru": ru, "size": size, "capacity_min_stems": minimum, "capacity_max_stems": maximum, "cost_price": price * Decimal("0.65"), "sale_price": price, "quantity": qty})
+            Packaging.objects.update_or_create(branch=central, packaging_type=kind, name_uz=uz, defaults={"size": size, "capacity_min_stems": minimum, "capacity_max_stems": maximum, "cost_price": price * Decimal("0.65"), "sale_price": price, "quantity": qty})
 
         post, _ = SocialPost.objects.update_or_create(media_id="178900000000001", defaults={"branch": central, "post_type": "ad", "permalink": "https://www.instagram.com/euroflowers.uz/", "title_uz": "Blue Hydrangea Garden", "title_ru": "Blue Hydrangea Garden", "description_uz": "Moviy gortenziya, oq atirgul va xrizantemadan premium buket. 35–40 sm.", "description_ru": "Премиальный букет из голубой гортензии, белой розы и хризантемы. 35–40 см.", "price": 750000, "flower_count": 19, "image_url": flower_map["gortenziya"].image_url, "is_targeted": True})
         post2, _ = SocialPost.objects.update_or_create(media_id="178900000000002", defaults={"branch": central, "post_type": "post", "permalink": "https://www.instagram.com/euroflowers.uz/", "title_uz": "White Rose 15", "title_ru": "White Rose 15", "description_uz": "15 dona 60 sm oq Mondial atirgulidan buket.", "description_ru": "Букет из 15 белых роз Mondial высотой 60 см.", "price": 575000, "flower_count": 15, "image_url": flower_map["atirgul"].image_url})
 
         catalog_rows = [
-            ("Moviy tong", "Голубое утро", "bouquet", 750000, flower_map["gortenziya"].image_url, [("EF-260705", 3), ("EF-260701", 11), ("EF-260708", 5)]),
-            ("Pushti bulut", "Розовое облако", "bouquet", 920000, flower_map["buta-atirgul"].image_url, [("EF-260704", 15), ("EF-260706", 5)]),
-            ("Oq nafislik", "Белая нежность", "basket", 1250000, flower_map["atirgul"].image_url, [("EF-260701", 25), ("EF-260709", 10)]),
-            ("Pion mavsumi", "Сезон пионов", "bouquet", 1100000, flower_map["pion"].image_url, [("EF-260707", 9), ("EF-260704", 5)]),
-            ("Qizil klassika", "Красная классика", "bouquet", 850000, flower_map["atirgul"].image_url, [("EF-260702", 21)]),
-            ("Pastel garden", "Пастельный сад", "box", 980000, flower_map["alstromeriya"].image_url, [("EF-260703", 15), ("EF-260709", 10), ("EF-260708", 7)]),
+            ("Moviy tong", "bouquet", 750000, flower_map["gortenziya"].image_url, [("EF-260705", 3), ("EF-260701", 11), ("EF-260708", 5)]),
+            ("Pushti bulut", "bouquet", 920000, flower_map["buta-atirgul"].image_url, [("EF-260704", 15), ("EF-260706", 5)]),
+            ("Oq nafislik", "basket", 1250000, flower_map["atirgul"].image_url, [("EF-260701", 25), ("EF-260709", 10)]),
+            ("Pion mavsumi", "bouquet", 1100000, flower_map["pion"].image_url, [("EF-260707", 9), ("EF-260704", 5)]),
+            ("Qizil klassika", "bouquet", 850000, flower_map["atirgul"].image_url, [("EF-260702", 21)]),
+            ("Pastel garden", "box", 980000, flower_map["alstromeriya"].image_url, [("EF-260703", 15), ("EF-260709", 10), ("EF-260708", 7)]),
         ]
         catalogs = []
-        for index, (uz, ru, kind, price, image, composition) in enumerate(catalog_rows):
-            item, _ = CatalogItem.objects.update_or_create(branch=central, name_uz=uz, defaults={"name_ru": ru, "description_uz": "Bugun tayyorlangan yangi premium kompozitsiya", "description_ru": "Свежая премиальная композиция, собранная сегодня", "arrangement_type": kind, "height_cm": 40, "diameter_cm": 38, "price": price, "status": "sold" if index == 4 else "available", "image_url": image, "social_post": post if index == 0 else None, "sold_at": timezone.now() if index == 4 else None, "created_by": admin})
+        for index, (uz, kind, price, image, composition) in enumerate(catalog_rows):
+            item, _ = CatalogItem.objects.update_or_create(branch=central, name_uz=uz, defaults={"description_uz": "Bugun tayyorlangan yangi premium kompozitsiya", "description_ru": "Bugun tayyorlangan yangi premium kompozitsiya", "arrangement_type": kind, "height_cm": 40, "diameter_cm": 38, "price": price, "status": "sold" if index == 4 else "available", "image_url": image, "social_post": post if index == 0 else None, "sold_at": timezone.now() if index == 4 else None, "created_by": admin})
             item.composition.all().delete()
             for batch_number, quantity in composition:
                 CatalogComposition.objects.create(catalog_item=item, stock_batch=batch_map[batch_number], quantity_stems=quantity, quantity_bunches=Decimal(quantity) / batch_map[batch_number].stems_per_bunch)
