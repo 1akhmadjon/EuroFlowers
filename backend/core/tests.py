@@ -1141,7 +1141,7 @@ class ApiTests(TestCase):
         admin_permissions = {row["page"]: row for row in permission_matrix(self.user)}
         self.assertNotIn("ai_settings", admin_permissions)
         self.assertNotIn("integrations", admin_permissions)
-        self.assertNotIn("audit", admin_permissions)
+        self.assertIn("audit", admin_permissions)
 
     def test_admin_cannot_grant_developer_only_permissions(self):
         UserProfile.objects.create(user=self.user, role="admin")
@@ -1149,10 +1149,10 @@ class ApiTests(TestCase):
         UserProfile.objects.create(user=operator, role="operator")
         response = self.client.post("/api/permissions/", {"user": operator.id, "page": "ai_settings", "can_view": True, "can_control": True}, format="json")
         self.assertEqual(response.status_code, 400)
-        response = self.client.post("/api/users/", {"username": "bad-user", "password": "password", "role": "operator", "permissions": [{"page": "audit", "can_view": True, "can_control": True}]}, format="json")
+        response = self.client.post("/api/users/", {"username": "bad-user", "password": "password", "role": "operator", "permissions": [{"page": "integrations", "can_view": True, "can_control": True}]}, format="json")
         self.assertEqual(response.status_code, 400)
         response = self.client.get("/api/audit/")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_single_branch_mode_hides_branch_fields_and_defaults_branch(self):
         UserProfile.objects.create(user=self.user, role="admin")
@@ -1521,12 +1521,17 @@ class ApiTests(TestCase):
 
     def test_audit_hides_developer_logs_from_non_developer(self):
         UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="audit", can_view=True, can_control=False)
         developer = User.objects.create_user("developer-audit", password="password")
         UserProfile.objects.create(user=developer, role="developer")
         AuditLog.objects.create(user=developer, action="secret", entity_type="AISettings", entity_id="1")
         AuditLog.objects.create(user=self.user, action="visible", entity_type="Lead", entity_id="1")
         response = self.client.get("/api/audit/")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        actions = [row["action"] for row in response.json()["results"]]
+        self.assertIn("visible", actions)
+        self.assertNotIn("secret", actions)
+        self.assertEqual(response.json()["results"][0]["action_label"], "Visible")
 
     def test_analytics_and_dashboard_include_top_selling_flowers(self):
         item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")

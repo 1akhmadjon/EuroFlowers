@@ -42,7 +42,7 @@ class UserProfile(TimeStampedModel):
 
 
 class PagePermission(TimeStampedModel):
-    DEVELOPER_ONLY_PAGES = ("ai_settings", "integrations", "audit")
+    DEVELOPER_ONLY_PAGES = ("ai_settings", "integrations")
     PAGE_CHOICES = [
         ("dashboard", "Dashboard"),
         ("inventory", "Sklad"),

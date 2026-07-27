@@ -1200,6 +1200,7 @@ class LeadStatusSerializer(serializers.ModelSerializer):
 class AuditLogSerializer(serializers.ModelSerializer):
     user_detail = UserSerializer(source="user", read_only=True)
     actor_name = serializers.SerializerMethodField()
+    action_label = serializers.SerializerMethodField()
 
     class Meta:
         model = AuditLog
@@ -1210,6 +1211,46 @@ class AuditLogSerializer(serializers.ModelSerializer):
         if not obj.user_id:
             return "System"
         return obj.user.get_full_name() or obj.user.username
+
+    @extend_schema_field(serializers.CharField())
+    def get_action_label(self, obj):
+        labels = {
+            "attendance_check_in": "Ishga keldi",
+            "attendance_check_out": "Ishdan ketdi",
+            "apprentice_daily_salary_recorded": "Shogird kunlik ish haqi yozildi",
+            "catalog_archived": "Katalog arxivlandi",
+            "catalog_deleted": "Katalog o‘chirildi",
+            "catalog_inventory_deducted": "Katalog uchun sklad kamaytirildi",
+            "catalog_inventory_restored": "Katalog qoldig‘i qaytarildi",
+            "catalog_sold": "Katalog sotildi",
+            "customer_archived": "Mijoz arxivlandi",
+            "flower_archived": "Gul turi arxivlandi",
+            "flower_deleted": "Gul turi o‘chirildi",
+            "florist_salary_created": "Florist ish haqi qo‘shildi",
+            "florist_salary_updated": "Florist ish haqi o‘zgartirildi",
+            "flowervariant_archived": "Gul navi arxivlandi",
+            "flowervariant_deleted": "Gul navi o‘chirildi",
+            "lead_created": "Lead yaratildi",
+            "lead_deleted": "Lead o‘chirildi",
+            "lead_moved": "Lead statusi o‘zgartirildi",
+            "lead_reordered": "Lead tartibi o‘zgartirildi",
+            "lead_stock_deducted": "Lead uchun sklad kamaytirildi",
+            "lead_stock_restored": "Lead sklad qoldig‘i qaytarildi",
+            "lead_updated": "Lead tahrirlandi",
+            "packaging_adjusted": "Material qoldig‘i o‘zgartirildi",
+            "packaging_movement": "Material harakati",
+            "packaging_received": "Material kirim qilindi",
+            "pagepermission_created": "Permission yaratildi",
+            "pagepermission_deleted": "Permission o‘chirildi",
+            "pagepermission_updated": "Permission o‘zgartirildi",
+            "password_changed": "Password o‘zgartirildi",
+            "stock_movement": "Sklad harakati",
+            "stock_received": "Sklad kirim qilindi",
+            "user_created": "User yaratildi",
+            "user_deactivated": "User deaktiv qilindi",
+            "user_updated": "User tahrirlandi",
+        }
+        return labels.get(obj.action, obj.action.replace("_", " ").title())
 
 
 class BusinessSettingsSerializer(serializers.ModelSerializer):
