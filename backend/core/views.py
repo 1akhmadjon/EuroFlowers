@@ -13,6 +13,7 @@ from decimal import Decimal
 import hashlib
 import hmac
 import json
+import requests
 import django_filters
 from urllib.parse import parse_qsl
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
@@ -858,15 +859,23 @@ class ConversationViewSet(ScopedViewSet):
         text = request.data.get("text", "").strip()
         if not text:
             return Response({"detail": "Xabar bo‘sh"}, status=status.HTTP_400_BAD_REQUEST)
-        message = conversation.messages.create(sender="operator", text=text)
         external_id = conversation.customer.instagram_user_id
-        if external_id.startswith("telegram:"):
-            telegram_message = conversation.messages.filter(instagram_message_id__startswith="telegram:").order_by("-created_at", "-id").first()
-            parts = telegram_message.instagram_message_id.split(":") if telegram_message else []
-            chat_id = parts[1] if len(parts) >= 3 else external_id.removeprefix("telegram:")
-            telegram_send(chat_id, text)
-        else:
-            instagram_send(external_id, text)
+        try:
+            if external_id.startswith("telegram:"):
+                telegram_message = conversation.messages.filter(instagram_message_id__startswith="telegram:").order_by("-created_at", "-id").first()
+                parts = telegram_message.instagram_message_id.split(":") if telegram_message else []
+                chat_id = parts[1] if len(parts) >= 3 else external_id.removeprefix("telegram:")
+                telegram_send(chat_id, text)
+            else:
+                instagram_send(external_id, text)
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            platform_status = getattr(response, "status_code", None)
+            platform_body = getattr(response, "text", "")
+            return Response({"detail": "Instagramga xabar yuborilmadi. Instagram token yoki sahifa ruxsatlarini tekshiring.", "platform_status": platform_status, "platform_response": platform_body[:500]}, status=status.HTTP_502_BAD_GATEWAY)
+        except requests.RequestException as exc:
+            return Response({"detail": "Platformaga xabar yuborishda tarmoq xatosi yuz berdi.", "error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        message = conversation.messages.create(sender="operator", text=text)
         conversation.last_message_at = timezone.now()
         conversation.ai_paused_until = timezone.now() + timedelta(minutes=15)
         conversation.ai_pause_reason = "operator_message"

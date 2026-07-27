@@ -7,6 +7,7 @@ from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
+import requests
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
@@ -1019,6 +1020,20 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         telegram_mock.assert_called_once_with("555", "Javob")
         instagram_mock.assert_not_called()
+
+    def test_operator_send_returns_gateway_error_when_instagram_rejects(self):
+        customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        response_obj = requests.Response()
+        response_obj.status_code = 403
+        response_obj._content = b'{"error":{"message":"Forbidden"}}'
+        error = requests.HTTPError("403 Client Error", response=response_obj)
+        from unittest.mock import patch
+        with patch("core.views.instagram_send", side_effect=error):
+            response = self.client.post(f"/api/conversations/{conversation.id}/send/", {"text": "Javob"}, format="json")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["platform_status"], 403)
+        self.assertFalse(conversation.messages.filter(sender="operator", text="Javob").exists())
 
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
