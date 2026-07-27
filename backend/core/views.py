@@ -77,6 +77,30 @@ def lead_sort_order_between(before, after, branch, status_value):
     return next_lead_sort_order(branch, status_value)
 
 
+def create_user_notification(user, notification_type, title, body, reference_type="", reference_id=None, branch=None):
+    if not user:
+        return None
+    return Notification.objects.create(
+        branch=branch or default_branch(),
+        target_user=user,
+        notification_type=notification_type,
+        title_uz=title,
+        title_ru=title,
+        body_uz=body,
+        body_ru=body,
+        reference_type=reference_type,
+        reference_id=reference_id,
+    )
+
+
+def notification_queryset_for_user(user):
+    queryset = Notification.objects.all()
+    role = getattr(getattr(user, "profile", None), "role", None)
+    if role in ["florist", "apprentice"]:
+        return queryset.filter(target_user=user)
+    return queryset.filter(Q(target_user__isnull=True) | Q(target_user=user))
+
+
 class StockMovementFilter(CreatedAtRangeFilter):
     supplier = django_filters.ModelChoiceFilter(field_name="batch__supplier", queryset=Supplier.objects.all())
 
@@ -462,6 +486,7 @@ class FloristAttendanceViewSet(ScopedViewSet):
             checked_at = timezone.make_aware(checked_at)
         work_date = timezone.localtime(checked_at).date()
         row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": request.data.get("source") or "mobile"})
+        first_check_in = not row.check_in_at
         row.check_in_at = row.check_in_at or checked_at
         row.check_in_latitude = request.data.get("latitude") or row.check_in_latitude
         row.check_in_longitude = request.data.get("longitude") or row.check_in_longitude
@@ -469,6 +494,8 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row.note = request.data.get("note") or row.note
         row.save(update_fields=["check_in_at", "check_in_latitude", "check_in_longitude", "source", "note", "updated_at"])
         write_audit(request.user, "attendance_check_in", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishga keldi")
+        if first_check_in:
+            create_user_notification(profile.user, "attendance", "Ishga keldingiz", f"{timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga kelganingiz belgilandi.", "attendance", row.id, profile.branch)
         return Response(self.get_serializer(row).data)
 
     @action(detail=False, methods=["post"], url_path="check-out")
@@ -479,6 +506,7 @@ class FloristAttendanceViewSet(ScopedViewSet):
             checked_at = timezone.make_aware(checked_at)
         work_date = timezone.localtime(checked_at).date()
         row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": request.data.get("source") or "mobile"})
+        first_check_out = not row.check_out_at
         row.check_out_at = checked_at
         row.check_out_latitude = request.data.get("latitude") or row.check_out_latitude
         row.check_out_longitude = request.data.get("longitude") or row.check_out_longitude
@@ -486,9 +514,15 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row.note = request.data.get("note") or row.note
         row.save(update_fields=["check_out_at", "check_out_latitude", "check_out_longitude", "source", "note", "updated_at"])
         if profile.staff_type == "apprentice" and profile.daily_pay:
+            existing_salary = FloristSalaryEntry.objects.filter(florist=profile, source="daily", attendance=row).first()
+            old_amount = existing_salary.amount if existing_salary else None
             salary, _ = FloristSalaryEntry.objects.update_or_create(florist=profile, source="daily", attendance=row, defaults={"amount": profile.daily_pay, "work_date": work_date, "note": "Shogird kunlik ish haqi", "created_by": request.user})
             write_audit(request.user, "apprentice_daily_salary_recorded", salary, before={}, after=instance_snapshot(salary), request=request, summary=f"{profile} uchun kunlik ish haqi yozildi")
+            if old_amount != salary.amount:
+                create_user_notification(profile.user, "florist_salary", "Kunlik ish haqi yozildi", f"{work_date} uchun {salary.amount} so‘m kunlik ish haqi yozildi.", "florist_salary", salary.id, profile.branch)
         write_audit(request.user, "attendance_check_out", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishdan ketdi")
+        if first_check_out:
+            create_user_notification(profile.user, "attendance", "Ishdan ketdingiz", f"{timezone.localtime(row.check_out_at).strftime('%Y-%m-%d %H:%M')} da ishdan ketganingiz belgilandi.", "attendance", row.id, profile.branch)
         return Response(self.get_serializer(row).data)
 
 
@@ -502,6 +536,7 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
     def perform_create(self, serializer):
         entry = serializer.save(created_by=self.request.user)
         write_audit(self.request.user, "florist_salary_created", entry, before={}, after=instance_snapshot(entry), request=self.request, summary=f"{entry.florist} uchun ish haqi qo‘shildi")
+        create_user_notification(entry.florist.user, "florist_salary", "Ish haqi qo‘shildi", f"{entry.work_date} uchun {entry.amount} so‘m ish haqi qo‘shildi.", "florist_salary", entry.id, entry.florist.branch)
 
     def perform_update(self, serializer):
         before = instance_snapshot(serializer.instance)
@@ -509,6 +544,7 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
         before_changed, after_changed = changed_snapshot(before, instance_snapshot(entry))
         if before_changed or after_changed:
             write_audit(self.request.user, "florist_salary_updated", entry, before=before_changed, after=after_changed, request=self.request, summary=f"{entry.florist} ish haqi o‘zgartirildi")
+            create_user_notification(entry.florist.user, "florist_salary", "Ish haqi o‘zgartirildi", f"{entry.work_date} uchun ish haqi {entry.amount} so‘m qilib yangilandi.", "florist_salary", entry.id, entry.florist.branch)
 
 
 class StockBatchViewSet(ScopedViewSet):
@@ -956,6 +992,10 @@ class NotificationViewSet(ScopedViewSet):
     write_roles = ["admin", "operator", "florist", "warehouse", "content"]
     http_method_names = ["get", "post", "head", "options"]
 
+    def get_queryset(self):
+        scoped_ids = notification_queryset_for_user(self.request.user).values("id")
+        return super().get_queryset().filter(id__in=scoped_ids)
+
     @action(detail=True, methods=["post"])
     def read(self, request, pk=None):
         notification = self.get_object()
@@ -1104,7 +1144,7 @@ def dashboard(request):
     leads = Lead.objects.all()
     customers = Customer.objects.all()
     catalog = CatalogItem.objects.all()
-    notifications = Notification.objects.all()
+    notifications = notification_queryset_for_user(request.user)
     conversations = Conversation.objects.all()
     won_leads = leads.filter(status="won")
     period_leads = apply_created_range(leads, period_start, period_end)

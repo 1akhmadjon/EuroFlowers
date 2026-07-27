@@ -2,7 +2,7 @@ from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from .models import Conversation, Lead, Message, Notification
-from .realtime import broadcast_to_page
+from .realtime import broadcast_to_page, broadcast_to_user
 from .serializers import ConversationSerializer, LeadSerializer, MessageSerializer, NotificationSerializer
 
 
@@ -14,7 +14,10 @@ def broadcast_notification(sender, instance, created, **kwargs):
         "type": "notification.created",
         "notification": NotificationSerializer(instance).data,
     }
-    transaction.on_commit(lambda: broadcast_to_page("notifications", payload, instance.branch_id))
+    if instance.target_user_id:
+        transaction.on_commit(lambda: broadcast_to_user(instance.target_user_id, payload))
+    else:
+        transaction.on_commit(lambda: broadcast_to_page("notifications", payload, instance.branch_id))
 
 
 @receiver(post_save, sender=Conversation)

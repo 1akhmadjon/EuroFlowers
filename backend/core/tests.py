@@ -1182,6 +1182,26 @@ class ApiTests(TestCase):
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password("NewPassword123!"))
 
+    def test_florist_notifications_are_targeted(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        florist_user = User.objects.create_user("target-florist", password="password", first_name="Ali")
+        UserProfile.objects.create(user=florist_user, role="florist")
+        FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        PagePermission.objects.create(user=florist_user, page="notifications", can_view=True, can_control=False)
+        Notification.objects.create(branch=self.branch, notification_type="lead", title_uz="Global", title_ru="Global", body_uz="Global", body_ru="Global")
+        target = Notification.objects.create(branch=self.branch, target_user=florist_user, notification_type="florist_salary", title_uz="Target", title_ru="Target", body_uz="Target", body_ru="Target")
+        self.client.force_authenticate(florist_user)
+        response = self.client.get("/api/notifications/")
+        self.assertEqual(response.status_code, 200)
+        ids = [row["id"] for row in response.json()["results"]]
+        self.assertEqual(ids, [target.id])
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/notifications/")
+        self.assertEqual(response.status_code, 200)
+        titles = [row["title_uz"] for row in response.json()["results"]]
+        self.assertIn("Global", titles)
+        self.assertNotIn("Target", titles)
+
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)

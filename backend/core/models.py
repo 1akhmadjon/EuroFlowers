@@ -497,8 +497,9 @@ class LeadCatalogUsage(TimeStampedModel):
 
 
 class Notification(TimeStampedModel):
-    TYPE_CHOICES = [("stock_pending", "Sklad kamaytirilmagan"), ("low_stock", "Kam qoldiq"), ("lead", "Yangi lead"), ("handoff", "Operator kerak"), ("supplier_stock", "Postavshik kirimi")]
+    TYPE_CHOICES = [("stock_pending", "Sklad kamaytirilmagan"), ("low_stock", "Kam qoldiq"), ("lead", "Yangi lead"), ("handoff", "Operator kerak"), ("supplier_stock", "Postavshik kirimi"), ("florist_catalog", "Florist ishi"), ("florist_salary", "Florist ish haqi"), ("attendance", "Keldi-ketdi")]
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="notifications")
+    target_user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE, related_name="notifications")
     notification_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
     title_uz = models.CharField(max_length=180)
     title_ru = models.CharField(max_length=180)

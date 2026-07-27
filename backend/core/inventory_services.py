@@ -109,6 +109,8 @@ def sync_catalog_florist_salary(item, user):
     source = "custom_catalog" if item.catalog_kind == "custom" else "catalog"
     FloristSalaryEntry.objects.filter(catalog_item=item).exclude(florist=item.florist, source=source).delete()
     amount = Decimal(item.florist_salary_amount) * Decimal(item.quantity_total or 1)
+    existing = FloristSalaryEntry.objects.filter(florist=item.florist, source=source, catalog_item=item).first()
+    old_amount = existing.amount if existing else None
     entry, _ = FloristSalaryEntry.objects.update_or_create(
         florist=item.florist,
         source=source,
@@ -120,6 +122,18 @@ def sync_catalog_florist_salary(item, user):
             "created_by": user if getattr(user, "is_authenticated", False) else None,
         },
     )
+    if old_amount != entry.amount:
+        Notification.objects.create(
+            branch=item.branch,
+            target_user=item.florist.user,
+            notification_type="florist_salary",
+            title_uz="Ish haqi qo‘shildi",
+            title_ru="Ish haqi qo‘shildi",
+            body_uz=f"{item.name_uz} uchun {entry.amount} so‘m ish haqi yozildi.",
+            body_ru=f"{item.name_uz} uchun {entry.amount} so‘m ish haqi yozildi.",
+            reference_type="florist_salary",
+            reference_id=entry.id,
+        )
     return entry
 
 

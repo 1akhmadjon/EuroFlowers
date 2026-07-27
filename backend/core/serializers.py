@@ -1172,6 +1172,8 @@ class LeadSerializer(serializers.ModelSerializer):
 
 
 class NotificationSerializer(serializers.ModelSerializer):
+    target_user_detail = UserSerializer(source="target_user", read_only=True)
+
     class Meta:
         model = Notification
         exclude = ["branch"]
