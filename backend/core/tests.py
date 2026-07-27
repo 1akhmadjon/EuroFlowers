@@ -1202,6 +1202,21 @@ class ApiTests(TestCase):
         self.assertIn("Global", titles)
         self.assertNotIn("Target", titles)
 
+    def test_admin_gets_notification_when_florist_checks_in(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="notifications", can_view=True, can_control=False)
+        florist_user = User.objects.create_user("checkin-florist", password="password", first_name="Ali")
+        UserProfile.objects.create(user=florist_user, role="florist")
+        FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        PagePermission.objects.create(user=florist_user, page="attendance", can_view=True, can_control=True)
+        self.client.force_authenticate(florist_user)
+        response = self.client.post("/api/florist-attendance/check-in/", {"checked_at": "2026-07-27T09:00:00+05:00"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/notifications/?notification_type=attendance")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any("ishga keldi" in row["title_uz"] for row in response.json()["results"]))
+
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)

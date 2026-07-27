@@ -496,6 +496,7 @@ class FloristAttendanceViewSet(ScopedViewSet):
         write_audit(request.user, "attendance_check_in", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishga keldi")
         if first_check_in:
             create_user_notification(profile.user, "attendance", "Ishga keldingiz", f"{timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga kelganingiz belgilandi.", "attendance", row.id, profile.branch)
+            Notification.objects.create(branch=profile.branch, notification_type="attendance", title_uz=f"{profile} ishga keldi", title_ru=f"{profile} ishga keldi", body_uz=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", body_ru=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", reference_type="attendance", reference_id=row.id)
         return Response(self.get_serializer(row).data)
 
     @action(detail=False, methods=["post"], url_path="check-out")
