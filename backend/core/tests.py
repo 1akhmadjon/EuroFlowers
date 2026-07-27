@@ -1533,6 +1533,29 @@ class ApiTests(TestCase):
         self.assertNotIn("secret", actions)
         self.assertEqual(response.json()["results"][0]["action_label"], "Visible")
 
+    def test_audit_can_filter_by_user_without_exposing_developer_logs(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="audit", can_view=True, can_control=False)
+        operator = User.objects.create_user("operator-audit", password="password", first_name="Operator")
+        UserProfile.objects.create(user=operator, role="operator")
+        developer = User.objects.create_user("developer-filter-audit", password="password")
+        UserProfile.objects.create(user=developer, role="developer")
+        AuditLog.objects.create(user=self.user, action="admin_action", entity_type="Lead", entity_id="1")
+        AuditLog.objects.create(user=operator, action="operator_action", entity_type="Lead", entity_id="2")
+        AuditLog.objects.create(user=developer, action="developer_action", entity_type="AISettings", entity_id="3")
+        response = self.client.get(f"/api/audit/?user={operator.id}")
+        self.assertEqual(response.status_code, 200)
+        actions = [row["action"] for row in response.json()["results"]]
+        self.assertEqual(actions, ["operator_action"])
+        self.assertEqual(response.json()["results"][0]["actor_name"], "Operator")
+        response = self.client.get(f"/api/audit/?user_id={self.user.id}")
+        self.assertEqual(response.status_code, 200)
+        actions = [row["action"] for row in response.json()["results"]]
+        self.assertEqual(actions, ["admin_action"])
+        response = self.client.get(f"/api/audit/?user={developer.id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"], [])
+
     def test_analytics_and_dashboard_include_top_selling_flowers(self):
         item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=4)

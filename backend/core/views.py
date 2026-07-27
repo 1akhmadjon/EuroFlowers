@@ -140,9 +140,12 @@ class ConversationFilter(CreatedAtRangeFilter):
 
 
 class AuditLogFilter(CreatedAtRangeFilter):
+    user = django_filters.ModelChoiceFilter(queryset=User.objects.all())
+    user_id = django_filters.NumberFilter(field_name="user_id")
+
     class Meta:
         model = AuditLog
-        fields = ["action", "entity_type", "user", "created_at"]
+        fields = ["action", "entity_type", "user", "user_id", "created_at"]
 
 
 class PagePermissionFilter(django_filters.FilterSet):
@@ -1025,6 +1028,19 @@ class AuditLogViewSet(ScopedViewSet):
         if role != "developer":
             queryset = queryset.exclude(user__profile__role="developer")
         return queryset
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("user", int, OpenApiParameter.QUERY, description="Audit loglarni bitta user bo‘yicha filterlash"),
+            OpenApiParameter("user_id", int, OpenApiParameter.QUERY, description="Audit loglarni bitta user ID bo‘yicha filterlash"),
+            OpenApiParameter("action", str, OpenApiParameter.QUERY, description="Action kodi bo‘yicha filter"),
+            OpenApiParameter("entity_type", str, OpenApiParameter.QUERY, description="Entity turi bo‘yicha filter"),
+            OpenApiParameter("created_at_after", str, OpenApiParameter.QUERY, description="Boshlanish sanasi yoki vaqti"),
+            OpenApiParameter("created_at_before", str, OpenApiParameter.QUERY, description="Tugash sanasi yoki vaqti"),
+        ]
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
 
 class PagePermissionViewSet(viewsets.ModelViewSet):
