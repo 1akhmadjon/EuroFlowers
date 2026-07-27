@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
@@ -54,6 +54,20 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(item.quantity_stock_deducted, 3)
         self.assertEqual(item.status, "available")
 
+    def test_catalog_discounted_sale_requires_reason_and_creates_history(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="Skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
+        with self.assertRaises(ValueError):
+            mark_catalog_sold(item, self.user, quantity=1, sale_price=450000)
+        mark_catalog_sold(item, self.user, quantity=1, sale_price=450000, discount_reason="Doimiy mijoz")
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 1)
+        history = CatalogHistory.objects.get(catalog_item=item, action="sold")
+        self.assertEqual(history.listed_unit_price, Decimal("500000.00"))
+        self.assertEqual(history.sold_unit_price, Decimal("450000.00"))
+        self.assertEqual(history.discount_amount, Decimal("50000.00"))
+        self.assertEqual(history.discount_percent, Decimal("10.00"))
+        self.assertEqual(history.discount_reason, "Doimiy mijoz")
+
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
         florist = FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
@@ -66,6 +80,7 @@ class BusinessRulesTests(TestCase):
             "volume": "small",
             "florist": florist.id,
             "price": "250000.00",
+            "discount_reason": "Doimiy mijozga chegirma",
             "quantity_total": 1,
             "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10, "quantity_bunches": "0.50"}],
             "materials": [{"packaging": packaging.id, "quantity": 1}],
@@ -84,9 +99,13 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(item.calculated_component_price, Decimal("370000.00"))
         self.assertEqual(item.calculated_cost_price, Decimal("260000.00"))
         self.assertEqual(item.discount_amount, Decimal("120000.00"))
+        self.assertEqual(item.discount_percent, Decimal("32.43"))
         salary = FloristSalaryEntry.objects.get(catalog_item=item)
         self.assertEqual(salary.amount, Decimal("70000.00"))
         self.assertEqual(salary.florist, florist)
+        sold_history = CatalogHistory.objects.get(catalog_item=item, action="sold")
+        self.assertEqual(sold_history.discount_amount, Decimal("120000.00"))
+        self.assertEqual(sold_history.discount_reason, "Doimiy mijozga chegirma")
 
     def test_custom_catalog_accepts_custom_volume_and_manual_salary_amount(self):
         florist_user = User.objects.create_user("custom-florist", password="password", first_name="Ali")
@@ -940,6 +959,7 @@ class ApiTests(TestCase):
                     "catalog_kind": "custom",
                     "price": "120000.00",
                     "florist_salary_amount": "40000.00",
+                    "discount_reason": "Custom jamlangan skidka",
                     "quantity_total": 1,
                     "composition": [{"stock_batch": self.batch.id, "quantity_stems": 4, "quantity_bunches": "0.20"}],
                 },
@@ -949,6 +969,7 @@ class ApiTests(TestCase):
                     "catalog_kind": "custom",
                     "price": "240000.00",
                     "florist_salary_amount": "60000.00",
+                    "discount_reason": "Custom jamlangan skidka",
                     "quantity_total": 1,
                     "composition": [{"stock_batch": second_batch.id, "quantity_stems": 3, "quantity_bunches": "0.30"}],
                 },
@@ -1030,6 +1051,18 @@ class ApiTests(TestCase):
         material.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 90)
         self.assertEqual(material.quantity, 14)
+
+    def test_catalog_sell_api_accepts_discounted_price_with_reason(self):
+        item = CatalogItem.objects.create(branch=self.branch, name_uz="API skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00", "discount_reason": "VIP mijoz"}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 1)
+        history = item.history.get(action="sold")
+        self.assertEqual(history.discount_amount, Decimal("50000.00"))
+        self.assertEqual(history.discount_reason, "VIP mijoz")
 
     def test_conversation_response_includes_source(self):
         instagram_customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
@@ -1427,6 +1460,7 @@ class ApiTests(TestCase):
         customer = Customer.objects.create(branch=self.branch, name="Analytics", phone="+998901234501", instagram_user_id="analytics")
         lead = Lead.objects.create(customer=customer, branch=self.branch, status="won", request_uz="Analytics lead", arrangement_type="catalog", estimated_price=600000, source="instagram")
         LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=2)
+        mark_catalog_sold(item, self.user, quantity=1, sale_price=250000, discount_reason="Analytics skidka")
         response = self.client.get("/api/analytics/")
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -1438,9 +1472,13 @@ class ApiTests(TestCase):
         self.assertEqual(data["top_catalog_items"][0]["quantity"], 2)
         self.assertEqual(data["recent_top_catalog_items"][0]["catalog_item__name_uz"], "Analytics buket")
         self.assertEqual(data["recent_top_catalog_items"][0]["orders"], 1)
+        self.assertEqual(data["summary"]["discounted_catalog_sales_count"], 1)
+        self.assertEqual(data["summary"]["discounted_catalog_quantity"], 1)
+        self.assertEqual(Decimal(str(data["summary"]["discounted_catalog_amount"])), Decimal("50000.00"))
         response = self.client.get("/api/dashboard/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["top_selling_flowers"][0]["stems"], 8)
+        self.assertEqual(Decimal(str(response.json()["discounted_catalog_amount"])), Decimal("50000.00"))
 
     def test_lead_move_keeps_kanban_position_between_two_leads(self):
         customer = Customer.objects.create(branch=self.branch, name="Kanban", phone="+998901234567", instagram_user_id="kanban")

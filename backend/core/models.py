@@ -358,6 +358,8 @@ class CatalogItem(TimeStampedModel):
     calculated_cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     calculated_component_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_percent = models.DecimalField(max_digits=7, decimal_places=2, default=0)
+    discount_reason = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
     image_url = models.URLField(blank=True)
     instagram_story_url = models.URLField(blank=True)
@@ -384,6 +386,24 @@ class CatalogMaterialUsage(TimeStampedModel):
     catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="materials")
     packaging = models.ForeignKey(Packaging, on_delete=models.PROTECT, related_name="catalog_usages")
     quantity = models.PositiveIntegerField(default=1)
+
+
+class CatalogHistory(TimeStampedModel):
+    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi")]
+    catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="history")
+    action = models.CharField(max_length=30, choices=ACTION_CHOICES)
+    quantity = models.PositiveIntegerField(default=0)
+    listed_unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sold_unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_percent = models.DecimalField(max_digits=7, decimal_places=2, default=0)
+    discount_reason = models.TextField(blank=True)
+    note = models.TextField(blank=True)
+    snapshot = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_history")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
 
 
 class Conversation(TimeStampedModel):

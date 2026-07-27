@@ -1,7 +1,53 @@
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, CatalogItem, FloristSalaryEntry, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+from .models import AuditLog, CatalogHistory, CatalogItem, FloristSalaryEntry, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+
+
+def money(value):
+    return Decimal(value or 0)
+
+
+def discount_percent(amount, base):
+    base = money(base)
+    if base <= 0:
+        return Decimal("0")
+    return ((money(amount) / base) * Decimal("100")).quantize(Decimal("0.01"))
+
+
+def catalog_snapshot(item):
+    return {
+        "catalog": item.name_uz,
+        "catalog_kind": item.catalog_kind,
+        "arrangement_type": item.arrangement_type,
+        "volume": item.volume,
+        "price": str(item.price),
+        "florist_fee": str(item.florist_fee),
+        "florist_salary_amount": str(item.florist_salary_amount),
+        "calculated_component_price": str(item.calculated_component_price),
+        "composition": [{"batch": row.stock_batch.batch_number, "flower": str(row.stock_batch.variant), "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)} for row in item.composition.select_related("stock_batch__variant__flower")],
+        "materials": [{"material": row.packaging.name_uz, "type": row.packaging.packaging_type, "quantity": row.quantity} for row in item.materials.select_related("packaging")],
+    }
+
+
+def create_catalog_history(item, action, user=None, quantity=0, listed_unit_price=None, sold_unit_price=None, discount_reason="", note="", snapshot=None):
+    listed = money(listed_unit_price if listed_unit_price is not None else item.price)
+    sold = money(sold_unit_price if sold_unit_price is not None else listed)
+    quantity = int(quantity or 0)
+    discount = max((listed - sold) * Decimal(quantity), Decimal("0"))
+    return CatalogHistory.objects.create(
+        catalog_item=item,
+        action=action,
+        quantity=quantity,
+        listed_unit_price=listed,
+        sold_unit_price=sold,
+        discount_amount=discount,
+        discount_percent=discount_percent(discount, listed * Decimal(quantity)),
+        discount_reason=discount_reason,
+        note=note,
+        snapshot=snapshot if snapshot is not None else catalog_snapshot(item),
+        created_by=user if getattr(user, "is_authenticated", False) else None,
+    )
 
 
 def catalog_component_total(item):
@@ -50,7 +96,8 @@ def sync_catalog_financials(item):
     item.calculated_cost_price = cost_total
     item.calculated_component_price = total
     item.discount_amount = max(total - sale_total, Decimal("0"))
-    item.save(update_fields=["florist_salary_amount", "calculated_cost_price", "calculated_component_price", "discount_amount", "updated_at"])
+    item.discount_percent = discount_percent(item.discount_amount, total)
+    item.save(update_fields=["florist_salary_amount", "calculated_cost_price", "calculated_component_price", "discount_amount", "discount_percent", "updated_at"])
     return item
 
 
@@ -199,7 +246,7 @@ def restore_catalog_inventory(item, user, quantity=None):
     return item
 
 
-def mark_catalog_sold(item, user, quantity=1):
+def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason=""):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
         quantity = int(quantity or 1)
@@ -207,6 +254,12 @@ def mark_catalog_sold(item, user, quantity=1):
             raise ValueError("Sotilgan son 1 dan kam bo‘lmasligi kerak")
         if item.quantity_sold + quantity > item.quantity_total:
             raise ValueError("Sotilgan son katalogdagi umumiy sondan oshib ketdi")
+        listed_price = Decimal(item.price or 0)
+        sold_price = Decimal(str(sale_price)) if sale_price not in [None, ""] else listed_price
+        if sold_price < 0:
+            raise ValueError("Sotuv narxi 0 dan kam bo‘lishi mumkin emas")
+        if sold_price < listed_price and not (discount_reason or "").strip():
+            raise ValueError("Skidka bilan sotilganda izoh kiritish majburiy")
         item.quantity_sold += quantity
         if item.quantity_sold >= item.quantity_total:
             item.status = "sold"
@@ -214,7 +267,8 @@ def mark_catalog_sold(item, user, quantity=1):
         elif item.status == "draft":
             item.status = "available"
         item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold})
+        history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason)
+        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason})
     return item
 
 

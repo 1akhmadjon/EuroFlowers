@@ -25,9 +25,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .branching import default_branch
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .inventory_services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -621,11 +621,19 @@ class CatalogItemViewSet(ScopedViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
-    @extend_schema(request=None, responses=CatalogItemSerializer)
+    @extend_schema(request=CatalogSellRequestSerializer, responses=CatalogItemSerializer)
     @action(detail=True, methods=["post"])
     def sell(self, request, pk=None):
+        serializer = CatalogSellRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         try:
-            item = mark_catalog_sold(self.get_object(), request.user, request.data.get("quantity", 1))
+            item = mark_catalog_sold(
+                self.get_object(),
+                request.user,
+                serializer.validated_data.get("quantity", 1),
+                serializer.validated_data.get("sale_price"),
+                serializer.validated_data.get("discount_reason", ""),
+            )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(item).data)
@@ -1060,7 +1068,17 @@ dashboard_date_parameters = [
         "daily_stats": serializers.ListField(child=serializers.DictField()),
         "top_selling_flowers": serializers.ListField(child=serializers.DictField()),
         "florist_revenue": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "florist_salary_total": serializers.DecimalField(max_digits=14, decimal_places=2),
         "flowers_sold_stems": serializers.IntegerField(),
+        "catalog_revenue": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "catalog_cost": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "catalog_discount": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "discounted_catalog_sales_count": serializers.IntegerField(),
+        "discounted_catalog_quantity": serializers.IntegerField(),
+        "discounted_catalog_amount": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "net_profit": serializers.DecimalField(max_digits=14, decimal_places=2),
+        "batch_inventory_stats": serializers.ListField(child=serializers.DictField()),
+        "florist_production_stats": serializers.ListField(child=serializers.DictField()),
     },
 ))
 @api_view(["GET"])
@@ -1086,6 +1104,7 @@ def dashboard(request):
     flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
     period_catalog_sold = apply_updated_range(catalog.filter(quantity_sold__gt=0), period_start, period_end)
     catalog_financials = catalog_sale_financials(period_catalog_sold)
+    catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end)
     leads_total = leads.count()
     conversations_total = conversations.count()
     conversion_base = conversations_total or leads_total
@@ -1109,6 +1128,9 @@ def dashboard(request):
         "catalog_revenue": catalog_financials["revenue"],
         "catalog_cost": catalog_financials["cost"],
         "catalog_discount": catalog_financials["discount"],
+        "discounted_catalog_sales_count": catalog_discount_stats["discounted_sales_count"],
+        "discounted_catalog_quantity": catalog_discount_stats["discounted_quantity"],
+        "discounted_catalog_amount": catalog_discount_stats["discounted_amount"],
         "net_profit": catalog_financials["profit"],
         "batch_inventory_stats": batch_inventory_stats(period_start, period_end)[:10],
         "florist_production_stats": florist_production_stats(period_start, period_end)[:10],
@@ -1160,6 +1182,7 @@ def analytics(request):
     flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
     period_catalog_sold = apply_updated_range(CatalogItem.objects.filter(quantity_sold__gt=0), period_start, period_end)
     catalog_financials = catalog_sale_financials(period_catalog_sold)
+    catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end)
     data = {
         "period": {"from": period_start, "to": period_end},
         "summary": {
@@ -1174,6 +1197,9 @@ def analytics(request):
             "catalog_revenue": catalog_financials["revenue"],
             "catalog_cost": catalog_financials["cost"],
             "catalog_discount": catalog_financials["discount"],
+            "discounted_catalog_sales_count": catalog_discount_stats["discounted_sales_count"],
+            "discounted_catalog_quantity": catalog_discount_stats["discounted_quantity"],
+            "discounted_catalog_amount": catalog_discount_stats["discounted_amount"],
             "net_profit": catalog_financials["profit"],
             "conversion_rate": round((period_won_leads.count() / (period_conversations.count() or period_leads.count())) * 100, 2) if (period_conversations.count() or period_leads.count()) else 0,
         },
@@ -1360,11 +1386,26 @@ def catalog_sale_financials(queryset):
         sold = Decimal(item.quantity_sold or 0)
         total = Decimal(item.quantity_total or 1)
         ratio = sold / total if total else Decimal("0")
-        revenue += Decimal(item.price or 0) * sold
+        sale_rows = list(item.history.filter(action="sold"))
+        if sale_rows:
+            revenue += sum(Decimal(row.sold_unit_price or 0) * Decimal(row.quantity or 0) for row in sale_rows)
+            discount += sum(Decimal(row.discount_amount or 0) for row in sale_rows)
+        else:
+            revenue += Decimal(item.price or 0) * sold
+            discount += Decimal(item.discount_amount or 0) * ratio
         cost += Decimal(item.calculated_cost_price or 0) * ratio
         florist_salary += Decimal(item.florist_fee or 0) * sold
-        discount += Decimal(item.discount_amount or 0) * ratio
     return {"revenue": revenue, "cost": cost, "florist_salary": florist_salary, "discount": discount, "profit": revenue - cost}
+
+
+def catalog_sale_discount_stats(start, end):
+    rows = apply_created_range(CatalogHistory.objects.filter(action="sold", discount_amount__gt=0), start, end)
+    totals = rows.aggregate(
+        discounted_sales_count=Count("id"),
+        discounted_quantity=Coalesce(Sum("quantity"), 0),
+        discounted_amount=Coalesce(Sum("discount_amount"), Decimal("0")),
+    )
+    return totals
 
 
 def batch_inventory_stats(start, end):
