@@ -10,7 +10,7 @@ from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
-from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
+from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
@@ -143,7 +143,6 @@ class BusinessRulesTests(TestCase):
         florist_user = User.objects.create_user("precise-florist", password="password", first_name="Ali")
         serializer = FloristProfileSerializer(data={
             "user": florist_user.id,
-            "branch": self.branch.id,
             "staff_type": "florist",
             "daily_pay": "150000.00",
             "shop_latitude": "41.31108123",
@@ -155,9 +154,13 @@ class BusinessRulesTests(TestCase):
         })
         self.assertTrue(serializer.is_valid(), serializer.errors)
         profile = serializer.save()
+        self.assertEqual(profile.branch, self.branch)
         self.assertEqual(profile.daily_pay, Decimal("0"))
         self.assertEqual(profile.volume_rates.count(), 2)
         self.assertTrue(profile.volume_rates.filter(arrangement_type="basket", volume="large", florist_fee=Decimal("120000.00")).exists())
+        self.assertNotIn("branch", FloristProfileSerializer(profile).data)
+        rate = profile.volume_rates.first()
+        self.assertNotIn("branch", FloristVolumeRateSerializer(rate).data)
 
     def test_apprentice_daily_salary_update_requires_reason(self):
         apprentice_user = User.objects.create_user("apprentice", password="password", first_name="Vali")

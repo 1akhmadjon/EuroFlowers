@@ -390,7 +390,7 @@ class FloristVolumeRateViewSet(ScopedViewSet):
     write_roles = ["admin"]
     queryset = FloristVolumeRate.objects.select_related("branch").all()
     serializer_class = FloristVolumeRateSerializer
-    filterset_fields = ["branch", "arrangement_type", "volume", "is_active"]
+    filterset_fields = ["arrangement_type", "volume", "is_active"]
 
 
 class FloristProfileViewSet(ScopedViewSet):
@@ -398,7 +398,7 @@ class FloristProfileViewSet(ScopedViewSet):
     write_roles = ["admin", "supervisor"]
     queryset = FloristProfile.objects.select_related("user", "branch").annotate(salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")), catalog_count=Count("catalog_items", distinct=True)).all()
     serializer_class = FloristProfileSerializer
-    filterset_fields = ["staff_type", "branch", "is_active"]
+    filterset_fields = ["staff_type", "is_active"]
     search_fields = ["user__first_name", "user__last_name", "user__username", "phone"]
 
     @action(detail=False, methods=["get"], url_path="me")

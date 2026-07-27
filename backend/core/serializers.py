@@ -206,7 +206,7 @@ class FloristProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FloristProfile
-        fields = "__all__"
+        exclude = ["branch"]
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -300,7 +300,7 @@ class FloristVolumeRateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FloristVolumeRate
-        fields = "__all__"
+        exclude = ["branch"]
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
