@@ -31,7 +31,11 @@ def catalog_cost_total(item):
 def apply_volume_rate(item):
     if not item.volume or not item.arrangement_type or item.florist_fee:
         return item
-    rate = FloristVolumeRate.objects.filter(branch=item.branch, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
+    rate = None
+    if item.florist_id:
+        rate = FloristVolumeRate.objects.filter(branch=item.branch, florist=item.florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
+    if not rate:
+        rate = FloristVolumeRate.objects.filter(branch=item.branch, florist__isnull=True, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
     if rate:
         item.florist_fee = rate.florist_fee
     return item
@@ -144,7 +148,7 @@ def deduct_catalog_inventory(item, user, quantity=None):
         item.quantity_stock_deducted += quantity
         item.stock_deducted_at = timezone.now()
         item.save(update_fields=["quantity_stock_deducted", "stock_deducted_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="catalog_inventory_deducted", entity_type="CatalogItem", entity_id=str(item.id), after={"stock_rows": len(rows), "material_rows": len(material_rows), "quantity": quantity, "quantity_stock_deducted": item.quantity_stock_deducted})
+        AuditLog.objects.create(user=user, action="catalog_inventory_deducted", summary=f"{item.name_uz} katalog uchun sklad kamaytirildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "stock_rows": [{"batch": row.stock_batch.batch_number, "flower": str(row.stock_batch.variant), "quantity_stems": row.quantity_stems * quantity, "quantity_bunches": str(row.quantity_bunches * quantity)} for row in rows], "material_rows": [{"material": row.packaging.name_uz, "type": row.packaging.packaging_type, "quantity": row.quantity * quantity} for row in material_rows], "quantity": quantity, "quantity_stock_deducted": item.quantity_stock_deducted})
     return item
 
 
@@ -191,7 +195,7 @@ def restore_catalog_inventory(item, user, quantity=None):
         item.quantity_stock_deducted = max(item.quantity_stock_deducted - quantity, item.quantity_sold)
         item.stock_deducted_at = timezone.now() if item.quantity_stock_deducted else None
         item.save(update_fields=["quantity_stock_deducted", "stock_deducted_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="catalog_inventory_restored", entity_type="CatalogItem", entity_id=str(item.id), after={"stock_rows": len(rows), "material_rows": len(material_rows), "quantity": quantity, "quantity_stock_deducted": item.quantity_stock_deducted})
+        AuditLog.objects.create(user=user, action="catalog_inventory_restored", summary=f"{item.name_uz} katalog qoldig‘i skladga qaytarildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "stock_rows": [{"batch": row.stock_batch.batch_number, "flower": str(row.stock_batch.variant), "quantity_stems": row.quantity_stems * quantity, "quantity_bunches": str(row.quantity_bunches * quantity)} for row in rows], "material_rows": [{"material": row.packaging.name_uz, "type": row.packaging.packaging_type, "quantity": row.quantity * quantity} for row in material_rows], "quantity": quantity, "quantity_stock_deducted": item.quantity_stock_deducted})
     return item
 
 
@@ -210,7 +214,7 @@ def mark_catalog_sold(item, user, quantity=1):
         elif item.status == "draft":
             item.status = "available"
         item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
-        AuditLog.objects.create(user=user, action="catalog_sold", entity_type="CatalogItem", entity_id=str(item.id), after={"status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold})
+        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold})
     return item
 
 
@@ -359,7 +363,7 @@ def apply_stock_movement(batch, movement_type, quantity_stems=None, reason="", u
             reason=reason,
             performed_by=user,
         )
-        AuditLog.objects.create(user=user, action="stock_movement", entity_type="StockBatch", entity_id=str(batch.id), before={"remaining_stems": before}, after={"remaining_stems": batch.remaining_stems, "movement": movement.id})
+        AuditLog.objects.create(user=user, action="stock_movement", summary=f"{batch.batch_number} partiyada {movement_type} harakati", entity_type="StockBatch", entity_id=str(batch.id), before={"remaining_stems": before, "remaining_bunches": str(Decimal(before) / Decimal(batch.stems_per_bunch))}, after={"batch": batch.batch_number, "flower": str(batch.variant), "supplier": batch.supplier.name if batch.supplier_id else "", "movement": movement.id, "movement_type": movement_type, "quantity_stems": delta, "quantity_bunches": str(movement_bunches), "remaining_stems": batch.remaining_stems, "remaining_bunches": str(batch.remaining_bunches), "reason": reason})
         if batch.remaining_stems <= batch.minimum_sale_stems:
             Notification.objects.create(
                 branch=batch.branch,
@@ -390,5 +394,5 @@ def apply_packaging_movement(packaging, movement_type, quantity, reason, user):
             reason=reason,
             performed_by=user,
         )
-        AuditLog.objects.create(user=user, action="packaging_movement", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"quantity": packaging.quantity, "movement": movement.id})
+        AuditLog.objects.create(user=user, action="packaging_movement", summary=f"{packaging.name_uz} materialida {movement_type} harakati", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"material": packaging.name_uz, "type": packaging.packaging_type, "movement": movement.id, "movement_type": movement_type, "quantity_delta": delta, "quantity": packaging.quantity, "reason": reason})
     return movement

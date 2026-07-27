@@ -15,11 +15,11 @@ import hmac
 import json
 import django_filters
 from urllib.parse import parse_qsl
-from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, parser_classes, permission_classes
 from rest_framework import serializers
-from rest_framework.parsers import MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -154,6 +154,19 @@ def instance_snapshot(instance):
         profile = getattr(instance, "profile", None)
         data["profile"] = {"role": profile.role, "language": profile.language} if profile else None
         data["permissions"] = [{"page": row.page, "can_view": row.can_view, "can_control": row.can_control} for row in instance.page_permissions.order_by("page")]
+    if isinstance(instance, StockBatch):
+        data["batch_number"] = instance.batch_number
+        data["flower"] = str(instance.variant)
+        data["supplier"] = instance.supplier.name if instance.supplier_id else ""
+        data["remaining_bunches"] = instance.remaining_bunches
+        data["stock_value"] = instance.stock_value
+    if isinstance(instance, Packaging):
+        data["material"] = instance.name_uz
+        data["type_label"] = instance.get_packaging_type_display()
+        data["quantity_label"] = instance.quantity_label
+    if isinstance(instance, FloristProfile):
+        data["full_name"] = str(instance)
+        data["volume_rates"] = [{"arrangement_type": row.arrangement_type, "volume": row.volume, "default_stems": row.default_stems, "florist_fee": row.florist_fee, "is_active": row.is_active} for row in instance.volume_rates.order_by("arrangement_type", "volume")]
     return json_safe(data)
 
 
@@ -168,16 +181,29 @@ def changed_snapshot(before, after):
     return before_changed, after_changed
 
 
-def write_audit(user, action, instance, before=None, after=None):
+def request_ip(request):
+    if not request:
+        return None
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR")
+
+
+def write_audit(user, action, instance, before=None, after=None, request=None, summary=""):
     if isinstance(instance, AuditLog):
         return None
     return AuditLog.objects.create(
         user=user if getattr(user, "is_authenticated", False) else None,
         action=action,
+        summary=summary or f"{instance.__class__.__name__}: {action}",
         entity_type=instance.__class__.__name__,
         entity_id=str(getattr(instance, "id", "")),
         before=json_safe(before or {}),
         after=json_safe(after or {}),
+        ip_address=request_ip(request),
+        request_method=getattr(request, "method", "") if request else "",
+        request_path=getattr(request, "path", "")[:255] if request else "",
     )
 
 
@@ -203,7 +229,7 @@ class ScopedViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         instance = serializer.save()
-        write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_created", instance, before={}, after=instance_snapshot(instance))
+        write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_created", instance, before={}, after=instance_snapshot(instance), request=self.request)
 
     def perform_update(self, serializer):
         before = instance_snapshot(serializer.instance)
@@ -211,13 +237,13 @@ class ScopedViewSet(viewsets.ModelViewSet):
         after = instance_snapshot(instance)
         before_changed, after_changed = changed_snapshot(before, after)
         if before_changed or after_changed:
-            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_updated", instance, before=before_changed, after=after_changed)
+            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_updated", instance, before=before_changed, after=after_changed, request=self.request)
 
     def perform_destroy(self, instance):
         before = instance_snapshot(instance)
         try:
             instance.delete()
-            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_deleted", instance, before=before, after={})
+            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_deleted", instance, before=before, after={}, request=self.request)
         except ProtectedError:
             field_names = {field.name for field in instance._meta.fields}
             if "is_active" not in field_names:
@@ -225,7 +251,7 @@ class ScopedViewSet(viewsets.ModelViewSet):
             instance.is_active = False
             instance.save(update_fields=["is_active", "updated_at"])
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(instance))
-            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_archived", instance, before=before_changed, after=after_changed)
+            write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_archived", instance, before=before_changed, after=after_changed, request=self.request)
 
 
 class BranchViewSet(ScopedViewSet):
@@ -259,7 +285,7 @@ class UserViewSet(viewsets.ModelViewSet):
         if response.status_code < 400:
             user = User.objects.filter(id=response.data.get("id")).first()
             if user:
-                write_audit(request.user, "user_created", user, before={}, after=instance_snapshot(user))
+                write_audit(request.user, "user_created", user, before={}, after=instance_snapshot(user), request=request)
         return response
 
     def update(self, request, *args, **kwargs):
@@ -272,7 +298,7 @@ class UserViewSet(viewsets.ModelViewSet):
             user.refresh_from_db()
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(user))
             if before_changed or after_changed:
-                write_audit(request.user, "user_updated", user, before=before_changed, after=after_changed)
+                write_audit(request.user, "user_updated", user, before=before_changed, after=after_changed, request=request)
         return response
 
     def partial_update(self, request, *args, **kwargs):
@@ -285,7 +311,7 @@ class UserViewSet(viewsets.ModelViewSet):
             user.refresh_from_db()
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(user))
             if before_changed or after_changed:
-                write_audit(request.user, "user_updated", user, before=before_changed, after=after_changed)
+                write_audit(request.user, "user_updated", user, before=before_changed, after=after_changed, request=request)
         return response
 
     def get_queryset(self):
@@ -302,7 +328,7 @@ class UserViewSet(viewsets.ModelViewSet):
         user.is_active = False
         user.save(update_fields=["is_active"])
         before_changed, after_changed = changed_snapshot(before, instance_snapshot(user))
-        write_audit(request.user, "user_deactivated", user, before=before_changed, after=after_changed)
+        write_audit(request.user, "user_deactivated", user, before=before_changed, after=after_changed, request=request)
         return Response(UserSerializer(user).data)
 
 
@@ -317,7 +343,7 @@ class FlowerViewSet(ScopedViewSet):
         before = instance_snapshot(instance)
         try:
             instance.delete()
-            write_audit(self.request.user, "flower_deleted", instance, before=before, after={})
+            write_audit(self.request.user, "flower_deleted", instance, before=before, after={}, request=self.request)
         except ProtectedError:
             instance.is_active = False
             instance.save(update_fields=["is_active", "updated_at"])
@@ -326,7 +352,7 @@ class FlowerViewSet(ScopedViewSet):
             after = instance_snapshot(instance)
             after["archived_variants"] = archived_variants
             before_changed, after_changed = changed_snapshot(before, after)
-            write_audit(self.request.user, "flower_archived", instance, before=before_changed, after=after_changed)
+            write_audit(self.request.user, "flower_archived", instance, before=before_changed, after=after_changed, request=self.request)
 
 
 class FlowerVariantViewSet(ScopedViewSet):
@@ -341,12 +367,12 @@ class FlowerVariantViewSet(ScopedViewSet):
         before = instance_snapshot(instance)
         try:
             instance.delete()
-            write_audit(self.request.user, "flowervariant_deleted", instance, before=before, after={})
+            write_audit(self.request.user, "flowervariant_deleted", instance, before=before, after={}, request=self.request)
         except ProtectedError:
             instance.is_active = False
             instance.save(update_fields=["is_active", "updated_at"])
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(instance))
-            write_audit(self.request.user, "flowervariant_archived", instance, before=before_changed, after=after_changed)
+            write_audit(self.request.user, "flowervariant_archived", instance, before=before_changed, after=after_changed, request=self.request)
 
 
 class SupplierViewSet(ScopedViewSet):
@@ -441,8 +467,7 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row.source = request.data.get("source") or row.source
         row.note = request.data.get("note") or row.note
         row.save(update_fields=["check_in_at", "check_in_latitude", "check_in_longitude", "source", "note", "updated_at"])
-        if profile.staff_type == "apprentice" and profile.daily_pay:
-            FloristSalaryEntry.objects.update_or_create(florist=profile, source="daily", attendance=row, defaults={"amount": profile.daily_pay, "work_date": work_date, "note": "Shogird kunlik ish haqi", "created_by": request.user})
+        write_audit(request.user, "attendance_check_in", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishga keldi")
         return Response(self.get_serializer(row).data)
 
     @action(detail=False, methods=["post"], url_path="check-out")
@@ -459,6 +484,10 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row.source = request.data.get("source") or row.source
         row.note = request.data.get("note") or row.note
         row.save(update_fields=["check_out_at", "check_out_latitude", "check_out_longitude", "source", "note", "updated_at"])
+        if profile.staff_type == "apprentice" and profile.daily_pay:
+            salary, _ = FloristSalaryEntry.objects.update_or_create(florist=profile, source="daily", attendance=row, defaults={"amount": profile.daily_pay, "work_date": work_date, "note": "Shogird kunlik ish haqi", "created_by": request.user})
+            write_audit(request.user, "apprentice_daily_salary_recorded", salary, before={}, after=instance_snapshot(salary), request=request, summary=f"{profile} uchun kunlik ish haqi yozildi")
+        write_audit(request.user, "attendance_check_out", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishdan ketdi")
         return Response(self.get_serializer(row).data)
 
 
@@ -470,7 +499,15 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
     filterset_class = FloristSalaryEntryFilter
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        entry = serializer.save(created_by=self.request.user)
+        write_audit(self.request.user, "florist_salary_created", entry, before={}, after=instance_snapshot(entry), request=self.request, summary=f"{entry.florist} uchun ish haqi qo‘shildi")
+
+    def perform_update(self, serializer):
+        before = instance_snapshot(serializer.instance)
+        entry = serializer.save()
+        before_changed, after_changed = changed_snapshot(before, instance_snapshot(entry))
+        if before_changed or after_changed:
+            write_audit(self.request.user, "florist_salary_updated", entry, before=before_changed, after=after_changed, request=self.request, summary=f"{entry.florist} ish haqi o‘zgartirildi")
 
 
 class StockBatchViewSet(ScopedViewSet):
@@ -485,7 +522,7 @@ class StockBatchViewSet(ScopedViewSet):
     def perform_create(self, serializer):
         batch = serializer.save()
         StockMovement.objects.create(batch=batch, movement_type="in", quantity_stems=batch.received_stems, quantity_bunches=batch.received_stems / batch.stems_per_bunch, reason="Partiya kirimi", performed_by=self.request.user)
-        AuditLog.objects.create(user=self.request.user, action="stock_received", entity_type="StockBatch", entity_id=str(batch.id), after={"received_stems": batch.received_stems})
+        write_audit(self.request.user, "stock_received", batch, before={}, after=instance_snapshot(batch), request=self.request, summary=f"{batch.batch_number} partiya kirim qilindi")
         if batch.supplier_id:
             title = "Yangi gul kirimi"
             body = f"{batch.supplier.name} postavshikdan {batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz} keldi. Partiya: {batch.batch_number}. Miqdor: {batch.received_stems} dona."
@@ -533,6 +570,7 @@ class PackagingViewSet(ScopedViewSet):
     write_roles = ["admin", "warehouse"]
     queryset = Packaging.objects.select_related("branch").all()
     serializer_class = PackagingSerializer
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
     filterset_fields = ["packaging_type", "is_active"]
     search_fields = ["name_uz"]
 
@@ -540,7 +578,7 @@ class PackagingViewSet(ScopedViewSet):
         packaging = serializer.save()
         if packaging.quantity:
             movement = PackagingMovement.objects.create(packaging=packaging, movement_type="in", quantity=packaging.quantity, reason="Qadoq/savat kirimi", performed_by=self.request.user)
-            AuditLog.objects.create(user=self.request.user, action="packaging_received", entity_type="Packaging", entity_id=str(packaging.id), after={"quantity": packaging.quantity, "movement": movement.id})
+            write_audit(self.request.user, "packaging_received", packaging, before={}, after={**instance_snapshot(packaging), "movement": movement.id}, request=self.request, summary=f"{packaging.name_uz} material kirim qilindi")
 
     def perform_update(self, serializer):
         before = serializer.instance.quantity
@@ -548,7 +586,7 @@ class PackagingViewSet(ScopedViewSet):
         if "quantity" in serializer.validated_data and packaging.quantity != before:
             delta = packaging.quantity - before
             movement = PackagingMovement.objects.create(packaging=packaging, movement_type="adjustment", quantity=delta, reason="Qadoq/savat qoldig‘i tahrirlandi", performed_by=self.request.user)
-            AuditLog.objects.create(user=self.request.user, action="packaging_adjusted", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"quantity": packaging.quantity, "movement": movement.id})
+            write_audit(self.request.user, "packaging_adjusted", packaging, before={"quantity": before}, after={**instance_snapshot(packaging), "movement": movement.id}, request=self.request, summary=f"{packaging.name_uz} material qoldig‘i o‘zgartirildi")
 
     @extend_schema(request=PackagingMovementRequestSerializer, responses=PackagingMovementSerializer)
     @action(detail=True, methods=["post"])
@@ -609,11 +647,11 @@ class CatalogItemViewSet(ScopedViewSet):
             item.refresh_from_db()
             try:
                 item.delete()
-                write_audit(self.request.user, "catalog_deleted", item, before=before, after={})
+                write_audit(self.request.user, "catalog_deleted", item, before=before, after={}, request=self.request)
             except ProtectedError:
                 item.status = "archived"
                 item.save(update_fields=["status", "updated_at"])
-                write_audit(self.request.user, "catalog_archived", item, before=before, after=instance_snapshot(item))
+                write_audit(self.request.user, "catalog_archived", item, before=before, after=instance_snapshot(item), request=self.request)
 
 
 class CustomerViewSet(ScopedViewSet):
@@ -644,7 +682,7 @@ class CustomerViewSet(ScopedViewSet):
             customer.is_blocked = True
             customer.save(update_fields=["name", "phone", "instagram_username", "instagram_user_id", "notes", "is_blocked", "updated_at"])
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(customer))
-            write_audit(self.request.user, "customer_archived", customer, before=before_changed, after=after_changed)
+            write_audit(self.request.user, "customer_archived", customer, before=before_changed, after=after_changed, request=self.request)
             return Response({"detail": "Client arxivlandi. Lead tarixi saqlandi.", "id": customer.id, "archived": True})
 
 
@@ -676,7 +714,7 @@ class LeadViewSet(ScopedViewSet):
                 status_value = serializer.validated_data.get("status", "new")
                 extra["sort_order"] = next_lead_sort_order(branch, status_value)
             lead = serializer.save(**extra)
-            write_audit(self.request.user, "lead_created", lead, before={}, after=instance_snapshot(lead))
+            write_audit(self.request.user, "lead_created", lead, before={}, after=instance_snapshot(lead), request=self.request)
             if lead.status == "won":
                 try:
                     deduct_lead_stock(lead, self.request.user)
@@ -718,7 +756,7 @@ class LeadViewSet(ScopedViewSet):
             after_snapshot = instance_snapshot(lead)
             before_changed, after_changed = changed_snapshot(before_snapshot, after_snapshot)
             if before_changed or after_changed:
-                write_audit(self.request.user, "lead_moved", lead, before=before_changed, after=after_changed)
+                write_audit(self.request.user, "lead_moved", lead, before=before_changed, after=after_changed, request=self.request)
         return Response(LeadSerializer(lead, context={"request": request}).data)
 
     @extend_schema(request=LeadColumnReorderSerializer, responses=inline_serializer(name="LeadColumnReorderResponse", fields={"updated": serializers.IntegerField()}))
@@ -760,7 +798,7 @@ class LeadViewSet(ScopedViewSet):
                 after_snapshot = instance_snapshot(lead)
                 before_changed, after_changed = changed_snapshot(before_snapshot, after_snapshot)
                 if before_changed or after_changed:
-                    write_audit(self.request.user, "lead_reordered", lead, before=before_changed, after=after_changed)
+                    write_audit(self.request.user, "lead_reordered", lead, before=before_changed, after=after_changed, request=self.request)
         return Response({"updated": len(lead_ids)})
 
     def perform_update(self, serializer):
@@ -781,7 +819,7 @@ class LeadViewSet(ScopedViewSet):
             after_snapshot = instance_snapshot(lead)
             before_changed, after_changed = changed_snapshot(before_snapshot, after_snapshot)
             if before_changed or after_changed:
-                write_audit(self.request.user, "lead_updated", lead, before=before_changed, after=after_changed)
+                write_audit(self.request.user, "lead_updated", lead, before=before_changed, after=after_changed, request=self.request)
             transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
 
     def perform_destroy(self, instance):
@@ -792,7 +830,7 @@ class LeadViewSet(ScopedViewSet):
                 restore_lead_stock(lead, self.request.user)
                 lead.refresh_from_db()
             after_restore_snapshot = instance_snapshot(lead)
-            write_audit(self.request.user, "lead_deleted", lead, before=before_snapshot, after={"restored_before_delete": after_restore_snapshot})
+            write_audit(self.request.user, "lead_deleted", lead, before=before_snapshot, after={"restored_before_delete": after_restore_snapshot}, request=self.request)
             lead.delete()
 
 
@@ -935,18 +973,18 @@ class PagePermissionViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         permission = serializer.save()
-        write_audit(self.request.user, "pagepermission_created", permission, before={}, after=instance_snapshot(permission))
+        write_audit(self.request.user, "pagepermission_created", permission, before={}, after=instance_snapshot(permission), request=self.request)
 
     def perform_update(self, serializer):
         before = instance_snapshot(serializer.instance)
         permission = serializer.save()
         before_changed, after_changed = changed_snapshot(before, instance_snapshot(permission))
         if before_changed or after_changed:
-            write_audit(self.request.user, "pagepermission_updated", permission, before=before_changed, after=after_changed)
+            write_audit(self.request.user, "pagepermission_updated", permission, before=before_changed, after=after_changed, request=self.request)
 
     def perform_destroy(self, instance):
         before = instance_snapshot(instance)
-        write_audit(self.request.user, "pagepermission_deleted", instance, before=before, after={})
+        write_audit(self.request.user, "pagepermission_deleted", instance, before=before, after={}, request=self.request)
         instance.delete()
 
 
@@ -965,7 +1003,15 @@ def me(request):
     return Response(UserSerializer(request.user).data)
 
 
-@extend_schema(responses=inline_serializer(
+dashboard_date_parameters = [
+    OpenApiParameter("date_from", str, OpenApiParameter.QUERY, required=False, description="Boshlanish sanasi: YYYY-MM-DD yoki ISO datetime"),
+    OpenApiParameter("date_to", str, OpenApiParameter.QUERY, required=False, description="Tugash sanasi: YYYY-MM-DD yoki ISO datetime"),
+    OpenApiParameter("from", str, OpenApiParameter.QUERY, required=False, description="date_from alias"),
+    OpenApiParameter("to", str, OpenApiParameter.QUERY, required=False, description="date_to alias"),
+]
+
+
+@extend_schema(parameters=dashboard_date_parameters, responses=inline_serializer(
     name="Dashboard",
     fields={
         "active_leads": serializers.IntegerField(),
@@ -1060,7 +1106,7 @@ def dashboard(request):
     return Response(data)
 
 
-@extend_schema(responses=inline_serializer(
+@extend_schema(parameters=dashboard_date_parameters, responses=inline_serializer(
     name="Analytics",
     fields={
         "period": serializers.DictField(),
@@ -1561,10 +1607,18 @@ def mini_app_quote(request):
     return Response(quote)
 
 
-@extend_schema(request=MiniAppLeadSerializer, responses=LeadSerializer)
-@api_view(["POST"])
+@extend_schema(methods=["GET"], parameters=[MiniAppInitSerializer], responses=inline_serializer(name="MiniAppOrders", fields={"orders": serializers.ListField(child=serializers.DictField()), "customer": CustomerSerializer(allow_null=True)}))
+@extend_schema(methods=["POST"], request=MiniAppLeadSerializer, responses=LeadSerializer)
+@api_view(["GET", "POST"])
 @permission_classes([AllowAny])
 def mini_app_lead(request):
+    if request.method == "GET":
+        try:
+            identity = mini_app_identity(request.query_params.get("init_data", ""), require_user=True)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        customer = mini_app_customer(identity)
+        return Response({"customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
     serializer = MiniAppLeadSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
     try:

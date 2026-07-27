@@ -145,7 +145,9 @@ class StockBatch(TimeStampedModel):
 
     @property
     def remaining_bunches(self):
-        return self.remaining_stems // self.stems_per_bunch
+        if not self.stems_per_bunch:
+            return Decimal("0.00")
+        return (Decimal(self.remaining_stems) / Decimal(self.stems_per_bunch)).quantize(Decimal("0.01"))
 
     @property
     def height_label(self):
@@ -198,6 +200,10 @@ class Packaging(TimeStampedModel):
     image_url = models.URLField(blank=True)
     is_active = models.BooleanField(default=True)
 
+    @property
+    def quantity_label(self):
+        return f"{self.quantity} dona"
+
 
 class PackagingMovement(TimeStampedModel):
     TYPE_CHOICES = [
@@ -229,8 +235,8 @@ class FloristProfile(TimeStampedModel):
     daily_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     work_start_time = models.TimeField(null=True, blank=True)
     work_end_time = models.TimeField(null=True, blank=True)
-    shop_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
-    shop_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    shop_latitude = models.DecimalField(max_digits=12, decimal_places=8, null=True, blank=True)
+    shop_longitude = models.DecimalField(max_digits=12, decimal_places=8, null=True, blank=True)
     arrival_radius_meters = models.PositiveIntegerField(default=50)
     departure_radius_meters = models.PositiveIntegerField(default=80)
     is_active = models.BooleanField(default=True)
@@ -280,6 +286,7 @@ class FloristVolumeRate(TimeStampedModel):
     ARRANGEMENT_CHOICES = [("bouquet", "Buket"), ("basket", "Savat")]
     VOLUME_CHOICES = [("small", "Small"), ("medium", "Medium"), ("large", "Large")]
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="florist_volume_rates")
+    florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.CASCADE, related_name="volume_rates")
     arrangement_type = models.CharField(max_length=20, choices=ARRANGEMENT_CHOICES)
     volume = models.CharField(max_length=20, choices=VOLUME_CHOICES)
     default_stems = models.PositiveIntegerField(default=0)
@@ -287,7 +294,7 @@ class FloristVolumeRate(TimeStampedModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["branch", "arrangement_type", "volume"], name="unique_branch_arrangement_volume_rate")]
+        constraints = [models.UniqueConstraint(fields=["branch", "florist", "arrangement_type", "volume"], name="unique_branch_florist_arrangement_volume_rate")]
         ordering = ["arrangement_type", "volume"]
 
 
@@ -489,10 +496,14 @@ class Notification(TimeStampedModel):
 class AuditLog(models.Model):
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL)
     action = models.CharField(max_length=80)
+    summary = models.CharField(max_length=255, blank=True)
     entity_type = models.CharField(max_length=80)
     entity_id = models.CharField(max_length=80, blank=True)
     before = models.JSONField(default=dict, blank=True)
     after = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    request_method = models.CharField(max_length=12, blank=True)
+    request_path = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

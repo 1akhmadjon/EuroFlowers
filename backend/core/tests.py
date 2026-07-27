@@ -1,13 +1,15 @@
 from decimal import Decimal
 from datetime import timedelta
 import json
+import tempfile
 from types import SimpleNamespace
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
-from .serializers import CatalogItemSerializer, ConversationSerializer, permission_matrix
+from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
@@ -83,6 +85,62 @@ class BusinessRulesTests(TestCase):
         salary = FloristSalaryEntry.objects.get(catalog_item=item)
         self.assertEqual(salary.amount, Decimal("70000.00"))
         self.assertEqual(salary.florist, florist)
+
+    def test_stock_batch_serializer_returns_fractional_remaining_bunches(self):
+        self.batch.remaining_stems = 85
+        self.batch.save(update_fields=["remaining_stems", "updated_at"])
+        data = StockBatchSerializer(self.batch).data
+        self.assertEqual(data["remaining_bunches"], "4.25")
+        self.assertEqual(data["remaining_bunches_label"], "4.25 pochka")
+
+    def test_florist_profile_accepts_precise_coordinates_and_nested_volume_rates(self):
+        florist_user = User.objects.create_user("precise-florist", password="password", first_name="Ali")
+        serializer = FloristProfileSerializer(data={
+            "user": florist_user.id,
+            "branch": self.branch.id,
+            "staff_type": "florist",
+            "daily_pay": "150000.00",
+            "shop_latitude": "41.31108123",
+            "shop_longitude": "69.24056234",
+            "volume_rates": [
+                {"arrangement_type": "bouquet", "volume": "small", "default_stems": 15, "florist_fee": "50000.00"},
+                {"arrangement_type": "basket", "volume": "large", "default_stems": 45, "florist_fee": "120000.00"},
+            ],
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        profile = serializer.save()
+        self.assertEqual(profile.daily_pay, Decimal("0"))
+        self.assertEqual(profile.volume_rates.count(), 2)
+        self.assertTrue(profile.volume_rates.filter(arrangement_type="basket", volume="large", florist_fee=Decimal("120000.00")).exists())
+
+    def test_apprentice_daily_salary_update_requires_reason(self):
+        apprentice_user = User.objects.create_user("apprentice", password="password", first_name="Vali")
+        apprentice = FloristProfile.objects.create(user=apprentice_user, branch=self.branch, staff_type="apprentice", daily_pay=100000)
+        entry = FloristSalaryEntry.objects.create(florist=apprentice, source="daily", amount=100000, work_date=timezone.localdate(), note="Kunlik")
+        serializer = FloristSalaryEntrySerializer(entry, data={"amount": "120000.00"}, partial=True)
+        self.assertFalse(serializer.is_valid())
+        serializer = FloristSalaryEntrySerializer(entry, data={"amount": "120000.00", "reason": "Qo‘shimcha smena"}, partial=True)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        updated = serializer.save()
+        self.assertEqual(updated.amount, Decimal("120000.00"))
+        self.assertIn("Qo‘shimcha smena", updated.note)
+
+    def test_packaging_serializer_accepts_image_and_returns_quantity_label(self):
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                serializer = PackagingSerializer(data={
+                    "packaging_type": "other",
+                    "name_uz": "Shokolad",
+                    "cost_price": "10000.00",
+                    "sale_price": "20000.00",
+                    "quantity": 12,
+                    "image": SimpleUploadedFile("shokolad.jpg", b"image-bytes", content_type="image/jpeg"),
+                })
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+                packaging = serializer.save(branch=self.branch)
+                data = PackagingSerializer(packaging).data
+                self.assertEqual(data["quantity_label"], "12 dona")
+                self.assertTrue(data["image_url"].endswith("shokolad.jpg"))
 
     def test_phone_normalization(self):
         self.assertEqual(normalize_phone("90 123-45-67"), "+998901234567")
@@ -830,6 +888,48 @@ class ApiTests(TestCase):
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 88)
 
+    def test_social_post_custom_catalog_merges_multiple_flower_payloads_into_one_item(self):
+        flower = Flower.objects.create(name_uz="Pion API", slug="pion-api")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Sarah", color_uz="Pushti")
+        second_batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="API-2", height_cm=55, stems_per_bunch=10, received_stems=80, remaining_stems=80, cost_per_stem=50000, sale_price_per_stem=80000, sale_price_per_bunch=800000)
+        response = self.client.post("/api/social-posts/", {
+            "branch": self.branch.id,
+            "post_type": "post",
+            "media_id": "api-post-custom-merge",
+            "title_uz": "Custom",
+            "title_ru": "Custom",
+            "price": "0.00",
+            "is_active": True,
+            "catalog_items": [
+                {
+                    "name_uz": "Atirgul custom",
+                    "arrangement_type": "bouquet",
+                    "catalog_kind": "custom",
+                    "price": "120000.00",
+                    "quantity_total": 1,
+                    "composition": [{"stock_batch": self.batch.id, "quantity_stems": 4, "quantity_bunches": "0.20"}],
+                },
+                {
+                    "name_uz": "Pion custom",
+                    "arrangement_type": "bouquet",
+                    "catalog_kind": "custom",
+                    "price": "240000.00",
+                    "quantity_total": 1,
+                    "composition": [{"stock_batch": second_batch.id, "quantity_stems": 3, "quantity_bunches": "0.30"}],
+                },
+            ],
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        post = SocialPost.objects.get(media_id="api-post-custom-merge")
+        self.assertEqual(post.catalog_items.count(), 1)
+        item = post.catalog_items.get()
+        self.assertEqual(item.catalog_kind, "custom")
+        self.assertEqual(item.status, "sold")
+        self.assertEqual(item.price, Decimal("360000.00"))
+        self.assertEqual(item.composition.count(), 2)
+        self.assertTrue(item.composition.filter(stock_batch=self.batch, quantity_stems=4).exists())
+        self.assertTrue(item.composition.filter(stock_batch=second_batch, quantity_stems=3).exists())
+
     def test_catalog_create_deducts_flowers_and_materials_then_delete_restores_unsold(self):
         material = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Koreya qogoz", quantity=10, sale_price=50000)
         payload = {
@@ -865,6 +965,35 @@ class ApiTests(TestCase):
         material.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 100)
         self.assertEqual(material.quantity, 10)
+
+    def test_catalog_create_merges_duplicate_composition_and_material_rows(self):
+        material = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Dubl qogoz", quantity=20, sale_price=50000)
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Dubl rows buket",
+            "arrangement_type": "bouquet",
+            "price": "450000.00",
+            "quantity_total": 2,
+            "status": "available",
+            "composition": [
+                {"stock_batch": self.batch.id, "quantity_stems": 2, "quantity_bunches": "0.10"},
+                {"stock_batch": self.batch.id, "quantity_stems": 3, "quantity_bunches": "0.15"},
+            ],
+            "materials": [
+                {"packaging": material.id, "quantity": 1},
+                {"packaging": material.id, "quantity": 2},
+            ],
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        item = CatalogItem.objects.get(id=response.json()["id"])
+        self.assertEqual(item.composition.count(), 1)
+        self.assertEqual(item.materials.count(), 1)
+        self.assertEqual(item.composition.get().quantity_stems, 5)
+        self.assertEqual(item.composition.get().quantity_bunches, Decimal("0.25"))
+        self.assertEqual(item.materials.get().quantity, 3)
+        self.batch.refresh_from_db()
+        material.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(material.quantity, 14)
 
     def test_conversation_response_includes_source(self):
         instagram_customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
@@ -939,6 +1068,9 @@ class ApiTests(TestCase):
         self.assertNotIn("branch", response.json())
         response = self.client.get("/api/dashboard/")
         self.assertEqual(response.status_code, 200)
+        self.assertIn("net_profit", response.json())
+        self.assertIn("batch_inventory_stats", response.json())
+        self.assertIn("florist_production_stats", response.json())
         self.assertNotIn("branch_stock", response.json())
 
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
@@ -981,6 +1113,24 @@ class ApiTests(TestCase):
         response = self.client.post(f"/api/packaging/{packaging.id}/movement/", {"movement_type": "out", "quantity": 99}, format="json")
         self.assertEqual(response.status_code, 400)
 
+    def test_stock_batch_create_calculates_received_stems_from_bunches(self):
+        flower = Flower.objects.create(name_uz="Gortenziya API", slug="gortenziya-api")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Golland", color_uz="Moviy")
+        response = self.client.post("/api/stock-batches/", {
+            "variant": variant.id,
+            "batch_number": "BUNCH-1",
+            "height_cm": 50,
+            "stems_per_bunch": 5,
+            "received_bunches": "3.00",
+            "cost_per_stem": "50000.00",
+            "sale_price_per_stem": "80000.00",
+            "sale_price_per_bunch": "400000.00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(response.json()["received_stems"], 15)
+        self.assertEqual(response.json()["remaining_stems"], 15)
+        self.assertEqual(response.json()["remaining_bunches"], "3.00")
+
     def test_mini_app_lead_history_returns_customer_orders(self):
         branch = Branch.objects.create(name="Mini", code="MINI")
         CatalogItem.objects.create(branch=branch, name_uz="Mini katalog", arrangement_type="bouquet", price=250000, status="available")
@@ -1002,6 +1152,12 @@ class ApiTests(TestCase):
         self.assertEqual(data["customer"]["name"], "Ali")
         self.assertEqual(len(data["orders"]), 1)
         self.assertEqual(data["orders"][0]["details"]["lines"][0]["type"], "custom_text")
+        response = APIClient().get("/api/mini-app/leads/", {"init_data": init_data})
+        self.assertEqual(response.status_code, 200)
+        leads_data = response.json()
+        self.assertEqual(leads_data["customer"]["name"], "Ali")
+        self.assertEqual(len(leads_data["orders"]), 1)
+        self.assertEqual(leads_data["orders"][0]["status"], "new")
         response = APIClient().get("/api/mini-app/catalog/", {"init_data": init_data, "branch": branch.id})
         self.assertEqual(response.status_code, 200)
         catalog_data = response.json()
@@ -1023,11 +1179,12 @@ class ApiTests(TestCase):
         response = self.client.post("/api/catalog/", payload, format="json")
         self.assertEqual(response.status_code, 400)
         data = response.json()
-        self.assertIn("Katalogni saqlash uchun sklad qoldig'i yetarli emas.", data["detail"][0])
-        self.assertIn("Gul: Atirgul API Freedom Qizil", data["detail"][0])
-        self.assertIn("Kerak: 120 dona", data["detail"][0])
-        self.assertIn("Bor: 100 dona", data["detail"][0])
-        self.assertIn("Yetmayapti: 20 dona", data["detail"][0])
+        self.assertIsInstance(data["detail"], str)
+        self.assertIn("Katalogni saqlash uchun sklad qoldig'i yetarli emas.", data["detail"])
+        self.assertIn("Gul: Atirgul API Freedom Qizil", data["detail"])
+        self.assertIn("Kerak: 120 dona", data["detail"])
+        self.assertIn("Bor: 100 dona", data["detail"])
+        self.assertIn("Yetmayapti: 20 dona", data["detail"])
 
     def test_flower_delete_archives_when_variants_exist(self):
         flower = Flower.objects.create(name_uz="Liliya", slug="lily-delete")
