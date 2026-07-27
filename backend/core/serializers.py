@@ -736,7 +736,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
         return attrs
 
     def _sync_catalog_items(self, post, catalog_items):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
         user = getattr(self.context.get("request"), "user", None)
         for item_data in merge_catalog_item_payloads(catalog_items):
             has_composition = "composition" in item_data
@@ -744,12 +744,14 @@ class SocialPostSerializer(serializers.ModelSerializer):
             has_materials = "materials" in item_data
             materials = item_data.pop("materials", None)
             item_id = item_data.pop("id", None)
+            old_florist_id = None
             if not item_data.get("image_url") and post.image_url:
                 item_data["image_url"] = post.image_url
             if not item_data.get("instagram_story_url") and post.post_type == "story" and post.permalink:
                 item_data["instagram_story_url"] = post.permalink
             if item_id:
                 item = post.catalog_items.get(id=item_id)
+                old_florist_id = item.florist_id
                 old_quantity_total = item.quantity_total
                 if item.quantity_sold and (has_composition or has_materials):
                     raise serializers.ValidationError({"catalog_items": "Sotilgan katalog tarkibini o‘zgartirib bo‘lmaydi"})
@@ -790,11 +792,14 @@ class SocialPostSerializer(serializers.ModelSerializer):
             item = sync_catalog_financials(item)
             validate_catalog_discount_reason(item)
             sync_catalog_florist_salary(item, user)
+            if item.florist_id and (not item_id or item.florist_id != old_florist_id):
+                notify_florist_catalog(item, "Yangi ish biriktirildi", f"{item.name_uz} katalogi sizga biriktirildi.")
             if item.catalog_kind == "custom":
                 if not item.history.filter(action="created").exists():
                     create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi")
                 if not item.history.filter(action="sold").exists():
                     create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason)
+                    notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             elif not item.history.filter(action="created").exists():
                 create_catalog_history(item, "created", user=user, note="Katalog qo‘shildi")
 
@@ -880,7 +885,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, sync_catalog_financials, sync_catalog_florist_salary
         composition = normalize_catalog_composition_rows(validated_data.pop("composition", []))
         materials = normalize_catalog_material_rows(validated_data.pop("materials", []))
         validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
@@ -902,13 +907,16 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             validate_catalog_discount_reason(item)
             sync_catalog_florist_salary(item, user)
             create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi" if item.catalog_kind == "custom" else "Katalog qo‘shildi")
+            notify_florist_catalog(item, "Yangi ish biriktirildi", f"{item.name_uz} katalogi sizga biriktirildi.")
             if item.catalog_kind == "custom":
                 create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason)
+                notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             self._sync_social_post_image(item)
         return item
 
     def update(self, instance, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        old_florist_id = instance.florist_id
         composition = validated_data.pop("composition", None)
         materials = validated_data.pop("materials", None)
         if composition is not None:
@@ -948,9 +956,12 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             instance = sync_catalog_financials(instance)
             validate_catalog_discount_reason(instance)
             sync_catalog_florist_salary(instance, user)
+            if instance.florist_id and instance.florist_id != old_florist_id:
+                notify_florist_catalog(instance, "Yangi ish biriktirildi", f"{instance.name_uz} katalogi sizga biriktirildi.")
             create_catalog_history(instance, "updated", user=user, note="Katalog o‘zgartirildi")
             if instance.catalog_kind == "custom" and not instance.history.filter(action="sold").exists():
                 create_catalog_history(instance, "sold", user=user, quantity=instance.quantity_sold, listed_unit_price=custom_component_unit_price(instance), sold_unit_price=instance.price, discount_reason=instance.discount_reason)
+                notify_florist_catalog(instance, "Katalog sotildi", f"{instance.name_uz} katalogidan {instance.quantity_sold} ta sotildi.")
             self._sync_social_post_image(instance)
         return instance
 

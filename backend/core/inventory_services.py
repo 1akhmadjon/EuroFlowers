@@ -137,6 +137,23 @@ def sync_catalog_florist_salary(item, user):
     return entry
 
 
+def notify_florist_catalog(item, title, body, reference_id=None):
+    item = CatalogItem.objects.select_related("florist__user", "branch").filter(pk=item.pk).first()
+    if not item or not item.florist_id:
+        return None
+    return Notification.objects.create(
+        branch=item.branch,
+        target_user=item.florist.user,
+        notification_type="florist_catalog",
+        title_uz=title,
+        title_ru=title,
+        body_uz=body,
+        body_ru=body,
+        reference_type="catalog_item",
+        reference_id=reference_id or item.id,
+    )
+
+
 def ensure_catalog_stock_available(item, quantity=None):
     qty = quantity if quantity is not None else item.quantity_total
     rows = list(item.composition.select_related("stock_batch"))
@@ -282,6 +299,7 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
             item.status = "available"
         item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
         history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason)
+        notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
         AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason})
     return item
 
@@ -325,6 +343,7 @@ def deduct_lead_stock(lead, user):
                 item.status = "sold"
                 item.sold_at = timezone.now()
             item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
+            notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
         for row in stock_rows:
             batch = row.stock_batch
             batch.remaining_stems -= row.quantity_stems
