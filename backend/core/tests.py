@@ -1165,6 +1165,23 @@ class ApiTests(TestCase):
         self.assertIn("florist_production_stats", response.json())
         self.assertNotIn("branch_stock", response.json())
 
+    def test_user_can_change_own_password(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        response = self.client.post("/api/me/change-password/", {
+            "old_password": "wrong",
+            "new_password": "NewPassword123!",
+            "new_password_confirm": "NewPassword123!",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post("/api/me/change-password/", {
+            "old_password": "password",
+            "new_password": "NewPassword123!",
+            "new_password_confirm": "NewPassword123!",
+        }, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("NewPassword123!"))
+
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
