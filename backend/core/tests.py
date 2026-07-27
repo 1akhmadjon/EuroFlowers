@@ -54,7 +54,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(item.quantity_stock_deducted, 3)
         self.assertEqual(item.status, "available")
 
-    def test_custom_catalog_deducts_inventory_and_creates_florist_salary(self):
+    def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
         florist = FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
         FloristVolumeRate.objects.create(branch=self.branch, arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
@@ -79,13 +79,39 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(item.quantity_sold, 1)
         self.assertEqual(self.batch.remaining_stems, 90)
         self.assertEqual(packaging.quantity, 4)
-        self.assertEqual(item.florist_fee, Decimal("70000.00"))
-        self.assertEqual(item.calculated_component_price, Decimal("390000.00"))
-        self.assertEqual(item.calculated_cost_price, Decimal("280000.00"))
-        self.assertEqual(item.discount_amount, Decimal("140000.00"))
+        self.assertEqual(item.florist_fee, Decimal("50000.00"))
+        self.assertEqual(item.florist_salary_amount, Decimal("70000.00"))
+        self.assertEqual(item.calculated_component_price, Decimal("370000.00"))
+        self.assertEqual(item.calculated_cost_price, Decimal("260000.00"))
+        self.assertEqual(item.discount_amount, Decimal("120000.00"))
         salary = FloristSalaryEntry.objects.get(catalog_item=item)
         self.assertEqual(salary.amount, Decimal("70000.00"))
         self.assertEqual(salary.florist, florist)
+
+    def test_custom_catalog_accepts_custom_volume_and_manual_salary_amount(self):
+        florist_user = User.objects.create_user("custom-florist", password="password", first_name="Ali")
+        florist = FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        serializer = CatalogItemSerializer(data={
+            "name_uz": "Juda katta custom buket",
+            "arrangement_type": "bouquet",
+            "catalog_kind": "custom",
+            "volume": "extra katta 120 dona",
+            "florist": florist.id,
+            "price": "450000.00",
+            "florist_fee": "80000.00",
+            "florist_salary_amount": "125000.00",
+            "quantity_total": 1,
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10, "quantity_bunches": "0.50"}],
+        }, context={"request": SimpleNamespace(user=self.user)})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        item = serializer.save()
+        item.refresh_from_db()
+        self.assertEqual(item.volume, "extra katta 120 dona")
+        self.assertEqual(item.florist_fee, Decimal("80000.00"))
+        self.assertEqual(item.florist_salary_amount, Decimal("125000.00"))
+        self.assertEqual(item.calculated_component_price, Decimal("380000.00"))
+        salary = FloristSalaryEntry.objects.get(catalog_item=item)
+        self.assertEqual(salary.amount, Decimal("125000.00"))
 
     def test_stock_batch_serializer_returns_fractional_remaining_bunches(self):
         self.batch.remaining_stems = 85
@@ -913,6 +939,7 @@ class ApiTests(TestCase):
                     "arrangement_type": "bouquet",
                     "catalog_kind": "custom",
                     "price": "120000.00",
+                    "florist_salary_amount": "40000.00",
                     "quantity_total": 1,
                     "composition": [{"stock_batch": self.batch.id, "quantity_stems": 4, "quantity_bunches": "0.20"}],
                 },
@@ -921,6 +948,7 @@ class ApiTests(TestCase):
                     "arrangement_type": "bouquet",
                     "catalog_kind": "custom",
                     "price": "240000.00",
+                    "florist_salary_amount": "60000.00",
                     "quantity_total": 1,
                     "composition": [{"stock_batch": second_batch.id, "quantity_stems": 3, "quantity_bunches": "0.30"}],
                 },
@@ -933,6 +961,7 @@ class ApiTests(TestCase):
         self.assertEqual(item.catalog_kind, "custom")
         self.assertEqual(item.status, "sold")
         self.assertEqual(item.price, Decimal("360000.00"))
+        self.assertEqual(item.florist_salary_amount, Decimal("100000.00"))
         self.assertEqual(item.composition.count(), 2)
         self.assertTrue(item.composition.filter(stock_batch=self.batch, quantity_stems=4).exists())
         self.assertTrue(item.composition.filter(stock_batch=second_batch, quantity_stems=3).exists())

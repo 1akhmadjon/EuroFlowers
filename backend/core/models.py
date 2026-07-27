@@ -284,11 +284,10 @@ class FloristSalaryEntry(TimeStampedModel):
 
 class FloristVolumeRate(TimeStampedModel):
     ARRANGEMENT_CHOICES = [("bouquet", "Buket"), ("basket", "Savat")]
-    VOLUME_CHOICES = [("small", "Small"), ("medium", "Medium"), ("large", "Large")]
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="florist_volume_rates")
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.CASCADE, related_name="volume_rates")
     arrangement_type = models.CharField(max_length=20, choices=ARRANGEMENT_CHOICES)
-    volume = models.CharField(max_length=20, choices=VOLUME_CHOICES)
+    volume = models.CharField(max_length=80)
     default_stems = models.PositiveIntegerField(default=0)
     florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     is_active = models.BooleanField(default=True)
@@ -343,19 +342,19 @@ class SocialPost(TimeStampedModel):
 class CatalogItem(TimeStampedModel):
     STATUS_CHOICES = [("draft", "Qoralama"), ("available", "Sotuvda"), ("reserved", "Band"), ("sold", "Sotildi"), ("archived", "Arxiv")]
     CATALOG_KIND_CHOICES = [("standard", "Standart"), ("custom", "Custom")]
-    VOLUME_CHOICES = [("small", "Small"), ("medium", "Medium"), ("large", "Large")]
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="catalog_items")
     name_uz = models.CharField(max_length=180)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti")])
     catalog_kind = models.CharField(max_length=20, choices=CATALOG_KIND_CHOICES, default="standard")
-    volume = models.CharField(max_length=20, choices=VOLUME_CHOICES, blank=True)
+    volume = models.CharField(max_length=80, blank=True)
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     height_cm = models.PositiveIntegerField(null=True, blank=True)
     diameter_cm = models.PositiveIntegerField(null=True, blank=True)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("50000"))
+    florist_salary_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     calculated_cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     calculated_component_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)

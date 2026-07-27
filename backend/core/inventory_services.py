@@ -29,7 +29,7 @@ def catalog_cost_total(item):
 
 
 def apply_volume_rate(item):
-    if not item.volume or not item.arrangement_type or item.florist_fee:
+    if not item.volume or not item.arrangement_type or item.florist_salary_amount:
         return item
     rate = None
     if item.florist_id:
@@ -37,7 +37,7 @@ def apply_volume_rate(item):
     if not rate:
         rate = FloristVolumeRate.objects.filter(branch=item.branch, florist__isnull=True, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
     if rate:
-        item.florist_fee = rate.florist_fee
+        item.florist_salary_amount = rate.florist_fee
     return item
 
 
@@ -50,18 +50,18 @@ def sync_catalog_financials(item):
     item.calculated_cost_price = cost_total
     item.calculated_component_price = total
     item.discount_amount = max(total - sale_total, Decimal("0"))
-    item.save(update_fields=["florist_fee", "calculated_cost_price", "calculated_component_price", "discount_amount", "updated_at"])
+    item.save(update_fields=["florist_salary_amount", "calculated_cost_price", "calculated_component_price", "discount_amount", "updated_at"])
     return item
 
 
 def sync_catalog_florist_salary(item, user):
     item = CatalogItem.objects.select_related("florist").get(pk=item.pk)
-    if not item.florist_id or not item.florist_fee:
+    if not item.florist_id or not item.florist_salary_amount:
         FloristSalaryEntry.objects.filter(catalog_item=item).delete()
         return None
     source = "custom_catalog" if item.catalog_kind == "custom" else "catalog"
     FloristSalaryEntry.objects.filter(catalog_item=item).exclude(florist=item.florist, source=source).delete()
-    amount = Decimal(item.florist_fee) * Decimal(item.quantity_total or 1)
+    amount = Decimal(item.florist_salary_amount) * Decimal(item.quantity_total or 1)
     entry, _ = FloristSalaryEntry.objects.update_or_create(
         florist=item.florist,
         source=source,

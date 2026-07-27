@@ -449,7 +449,7 @@ class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CatalogItem
-        fields = ["id", "name_uz", "description_uz", "description_ru", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "height_cm", "diameter_cm", "price", "florist_fee", "calculated_component_price", "discount_amount", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials"]
+        fields = ["id", "name_uz", "description_uz", "description_ru", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "height_cm", "diameter_cm", "price", "florist_fee", "florist_salary_amount", "calculated_component_price", "discount_amount", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials"]
         read_only_fields = ["quantity_sold", "quantity_stock_deducted", "calculated_component_price", "discount_amount"]
 
 
@@ -543,8 +543,10 @@ def merge_catalog_item_payloads(items):
             current["description_ru"] = "\n".join(part for part in [current.get("description_ru"), item.get("description_ru")] if part)
         if item.get("price") is not None and current.get("catalog_kind") == "custom":
             current["price"] = Decimal(str(current.get("price") or 0)) + Decimal(str(item.get("price") or 0))
+        if item.get("florist_salary_amount") is not None and current.get("catalog_kind") == "custom":
+            current["florist_salary_amount"] = Decimal(str(current.get("florist_salary_amount") or 0)) + Decimal(str(item.get("florist_salary_amount") or 0))
         current["quantity_total"] = max(current.get("quantity_total") or 1, item.get("quantity_total") or 1)
-        for field in ["image_url", "instagram_story_url", "volume", "florist", "height_cm", "diameter_cm"]:
+        for field in ["image_url", "instagram_story_url", "volume", "florist", "height_cm", "diameter_cm", "florist_salary_amount"]:
             if not current.get(field) and item.get(field):
                 current[field] = item[field]
         current["composition"] = normalize_catalog_composition_rows((current.get("composition") or []) + (item.get("composition") or []))
@@ -554,7 +556,7 @@ def merge_catalog_item_payloads(items):
 
 def apply_volume_rate_to_attrs(attrs, initial_data=None):
     data = initial_data or {}
-    if "florist_fee" in attrs or "florist_fee" in data:
+    if "florist_salary_amount" in attrs or "florist_salary_amount" in data:
         return attrs
     branch = attrs.get("branch") or default_branch()
     arrangement_type = attrs.get("arrangement_type")
@@ -567,7 +569,7 @@ def apply_volume_rate_to_attrs(attrs, initial_data=None):
         if not rate:
             rate = FloristVolumeRate.objects.filter(branch=branch, florist__isnull=True, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
         if rate:
-            attrs["florist_fee"] = rate.florist_fee
+            attrs["florist_salary_amount"] = rate.florist_fee
     return attrs
 
 
