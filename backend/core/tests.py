@@ -360,6 +360,12 @@ class BusinessRulesTests(TestCase):
         self.assertIn(basket.name_uz, names)
         self.assertNotIn(self.item.name_uz, names)
 
+    def test_get_stock_tool_does_not_return_baskets_when_flower_is_missing(self):
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:13")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        result = execute_ai_tool("get_stock", {"query": "gortenziya"}, conversation)
+        self.assertEqual(result, {"stock": []})
+
     def test_client_lead_create_tool_creates_customer_lead_and_usage(self):
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])

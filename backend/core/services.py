@@ -544,7 +544,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_stock",
-            "description": "Skladdagi bor, oz qolgan va qolmagan gul variantlari, narxlari va mavjud savat/qadoq variantlarini olish.",
+            "description": "Skladdagi gul variantlari va narxlarini olish. Bu tool faqat gullar uchun, savat/qadoq/materiallarni qaytarmaydi.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -616,7 +616,7 @@ def execute_ai_tool(name, arguments, conversation):
     if name == "get_catalog":
         return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "")}
     if name == "get_stock":
-        return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100), "baskets": ai_basket_rows(limit=30)}
+        return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100)}
     if name == "get_flower_variant_info":
         return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
     if name == "send_catalog_images":
