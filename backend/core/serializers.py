@@ -1209,6 +1209,9 @@ class AIPauseRequestSerializer(serializers.Serializer):
 class SendResponseSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     text = serializers.CharField()
+    delivery_status = serializers.ChoiceField(choices=["sent", "failed"], required=False)
+    platform_status = serializers.IntegerField(required=False, allow_null=True)
+    platform_response = serializers.CharField(required=False, allow_blank=True)
 
 
 class SimulateResponseSerializer(serializers.Serializer):

@@ -860,6 +860,9 @@ class ConversationViewSet(ScopedViewSet):
         if not text:
             return Response({"detail": "Xabar bo‘sh"}, status=status.HTTP_400_BAD_REQUEST)
         external_id = conversation.customer.instagram_user_id
+        delivery_status = "sent"
+        platform_status = None
+        platform_response = ""
         try:
             if external_id.startswith("telegram:"):
                 telegram_message = conversation.messages.filter(instagram_message_id__startswith="telegram:").order_by("-created_at", "-id").first()
@@ -872,16 +875,25 @@ class ConversationViewSet(ScopedViewSet):
             response = getattr(exc, "response", None)
             platform_status = getattr(response, "status_code", None)
             platform_body = getattr(response, "text", "")
-            return Response({"detail": "Instagramga xabar yuborilmadi. Instagram token yoki sahifa ruxsatlarini tekshiring.", "platform_status": platform_status, "platform_response": platform_body[:500]}, status=status.HTTP_502_BAD_GATEWAY)
+            platform_response = platform_body[:500]
+            delivery_status = "failed"
         except requests.RequestException as exc:
-            return Response({"detail": "Platformaga xabar yuborishda tarmoq xatosi yuz berdi.", "error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-        message = conversation.messages.create(sender="operator", text=text)
+            platform_response = str(exc)
+            delivery_status = "failed"
+        metadata = {}
+        if delivery_status != "sent":
+            metadata = {
+                "delivery_status": delivery_status,
+                "platform_status": platform_status,
+                "platform_response": platform_response,
+            }
+        message = conversation.messages.create(sender="operator", text=text, metadata=metadata)
         conversation.last_message_at = timezone.now()
         conversation.ai_paused_until = timezone.now() + timedelta(minutes=15)
         conversation.ai_pause_reason = "operator_message"
         conversation.assigned_to = request.user
         conversation.save(update_fields=["last_message_at", "ai_paused_until", "ai_pause_reason", "assigned_to", "updated_at"])
-        return Response({"id": message.id, "text": message.text})
+        return Response({"id": message.id, "text": message.text, "delivery_status": delivery_status, "platform_status": platform_status, "platform_response": platform_response})
 
     @extend_schema(request=None, responses=ConversationSerializer)
     @action(detail=True, methods=["post"])

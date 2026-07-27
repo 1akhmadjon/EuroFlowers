@@ -1027,7 +1027,7 @@ class ApiTests(TestCase):
         telegram_mock.assert_called_once_with("555", "Javob")
         instagram_mock.assert_not_called()
 
-    def test_operator_send_returns_gateway_error_when_instagram_rejects(self):
+    def test_operator_send_records_failed_delivery_when_instagram_rejects(self):
         customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         response_obj = requests.Response()
@@ -1037,9 +1037,15 @@ class ApiTests(TestCase):
         from unittest.mock import patch
         with patch("core.views.instagram_send", side_effect=error):
             response = self.client.post(f"/api/conversations/{conversation.id}/send/", {"text": "Javob"}, format="json")
-        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["delivery_status"], "failed")
         self.assertEqual(response.json()["platform_status"], 403)
-        self.assertFalse(conversation.messages.filter(sender="operator", text="Javob").exists())
+        message = conversation.messages.get(sender="operator", text="Javob")
+        self.assertEqual(message.metadata["delivery_status"], "failed")
+
+    def test_branches_endpoint_is_registered(self):
+        response = self.client.get("/api/branches/")
+        self.assertEqual(response.status_code, 200)
 
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
