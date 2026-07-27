@@ -355,7 +355,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
@@ -395,7 +395,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(result["detected_language"], "uz")
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = CatalogItem.objects.create(branch=self.branch, name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
@@ -413,6 +413,18 @@ class BusinessRulesTests(TestCase):
         conversation = Conversation.objects.create(customer=customer, branch=self.branch)
         result = execute_ai_tool("get_stock", {"query": "gortenziya"}, conversation)
         self.assertEqual(result, {"stock": []})
+
+    def test_send_stock_image_tool_sends_flower_image(self):
+        self.batch.image_url = "https://example.com/freedom.jpg"
+        self.batch.save(update_fields=["image_url", "updated_at"])
+        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:13")
+        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        from unittest.mock import patch
+        with patch("core.services.telegram_send_image", return_value={"ok": True}) as image_mock:
+            result = execute_ai_tool("send_stock_image", {"query": "Mondial", "batch_id": None}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["image_url"], "https://example.com/freedom.jpg")
+        image_mock.assert_called_once_with("13", "https://example.com/freedom.jpg")
 
     def test_client_lead_create_tool_creates_customer_lead_and_usage(self):
         self.item.status = "available"
@@ -1387,6 +1399,13 @@ class ApiTests(TestCase):
         self.assertEqual(rows[0]["height_label"], "50-60 sm")
         self.assertEqual(rows[0]["height_from_cm"], 50)
         self.assertEqual(rows[0]["height_to_cm"], 60)
+
+    def test_ai_stock_rows_include_image_url(self):
+        self.batch.image_url = "https://example.com/freedom.jpg"
+        self.batch.save(update_fields=["image_url", "updated_at"])
+        rows = ai_stock_rows("Freedom")
+        self.assertTrue(rows[0]["has_image"])
+        self.assertEqual(rows[0]["image_url"], "https://example.com/freedom.jpg")
 
     def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
         packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", quantity=2, sale_price=50000)

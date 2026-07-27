@@ -146,7 +146,12 @@ def flower_variant_display_name(variant, language):
     return " ".join(part for part in parts if part).strip()
 
 
+def stock_image_url(batch):
+    return batch.image_url or batch.variant.image_url or batch.variant.flower.image_url or ""
+
+
 def stock_batch_ai_row(batch):
+    image_url = stock_image_url(batch)
     return {
         "batch_id": batch.id,
         "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
@@ -164,10 +169,13 @@ def stock_batch_ai_row(batch):
         "stems_per_bunch": batch.stems_per_bunch,
         "price_per_stem": str(batch.sale_price_per_stem),
         "price_per_bunch": str(batch.sale_price_per_bunch),
+        "has_image": bool(image_url),
+        "image_url": image_url,
     }
 
 
 def variant_without_stock_ai_row(variant):
+    image_url = variant.image_url or variant.flower.image_url or ""
     return {
         "batch_id": None,
         "display_name_uz": flower_variant_display_name(variant, "uz"),
@@ -185,6 +193,8 @@ def variant_without_stock_ai_row(variant):
         "stems_per_bunch": variant.default_stems_per_bunch,
         "price_per_stem": "",
         "price_per_bunch": "",
+        "has_image": bool(image_url),
+        "image_url": image_url,
     }
 
 
@@ -591,6 +601,35 @@ def ai_tool_definitions():
             },
             "strict": True,
         },
+        {
+            "type": "function",
+            "name": "send_stock_image",
+            "description": "Skladdagi aniq gul turi/navi/rangi rasmini mijozga yuborish.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "batch_id": {"type": ["integer", "null"]},
+                },
+                "required": ["query", "batch_id"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "send_stock_images",
+            "description": "Skladdagi bir nechta gul turi/navi/rangi rasmlarini mijozga yuborish.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "queries": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["queries"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
     ]
 
 
@@ -606,6 +645,46 @@ def send_catalog_item_image(conversation, item):
         sent = instagram_send_image(customer.instagram_user_id, image_url)
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
     return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url}
+
+
+def _stock_batch_for_ai(query="", batch_id=None):
+    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("-remaining_stems", "sale_price_per_stem", "id")
+    if batch_id:
+        return queryset.filter(id=batch_id).first()
+    query = (query or "").strip()
+    if not query:
+        return queryset.first()
+    rows = ai_stock_rows(query, limit=20)
+    ids = [row["batch_id"] for row in rows if row.get("batch_id") and row.get("has_image")]
+    if ids:
+        return queryset.filter(id=ids[0]).first()
+    ids = [row["batch_id"] for row in rows if row.get("batch_id")]
+    if ids:
+        return queryset.filter(id=ids[0]).first()
+    terms = ai_search_terms(query)
+    ranked = []
+    for batch in queryset:
+        haystack = flower_variant_search_haystack(batch.variant)
+        score = sum(1 for term in terms if term in haystack)
+        if score:
+            ranked.append((score, batch))
+    if ranked:
+        return sorted(ranked, key=lambda row: (-row[0], not bool(stock_image_url(row[1])), -row[1].remaining_stems, row[1].sale_price_per_stem, row[1].id))[0][1]
+    return None
+
+
+def send_stock_batch_image(conversation, batch):
+    customer = conversation.customer
+    image_url = stock_image_url(batch)
+    if not image_url:
+        return {"ok": False, "detail": "image_not_found", "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}
+    sent = None
+    if customer.instagram_user_id.startswith("telegram:"):
+        sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
+    elif customer.instagram_user_id:
+        sent = instagram_send_image(customer.instagram_user_id, image_url)
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"stock_batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz"), "image_url": image_url, "sent": sent}})
+    return {"ok": True, "image_sent": True, "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz"), "image_url": image_url}
 
 
 def execute_ai_tool(name, arguments, conversation):
@@ -637,6 +716,21 @@ def execute_ai_tool(name, arguments, conversation):
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
+    if name == "send_stock_images":
+        results = []
+        seen = set()
+        for query in arguments.get("queries") or []:
+            batch = _stock_batch_for_ai(query=query)
+            if not batch or batch.id in seen:
+                continue
+            seen.add(batch.id)
+            results.append(send_stock_batch_image(conversation, batch))
+        return {"ok": bool(results), "images": results}
+    if name == "send_stock_image":
+        batch = _stock_batch_for_ai(query=arguments.get("query") or "", batch_id=arguments.get("batch_id"))
+        if not batch:
+            return {"ok": False, "detail": "stock_not_found"}
+        return send_stock_batch_image(conversation, batch)
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}
     name_value = (arguments.get("customer_name") or "").strip()
