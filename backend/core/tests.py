@@ -406,6 +406,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
         self.assertTrue(kwargs["input"][0]["content"].startswith("REAL_CONTEXT_JSON:"))
+        self.assertIn("shop_phone", kwargs["input"][0]["content"])
         self.assertTrue(kwargs["input"][1]["content"].startswith("LANGUAGE_CONTROL:"))
         self.assertIn("qanaqa gullar bor", kwargs["input"][2]["content"])
         self.assertIn("105000.00", kwargs["input"][-1]["content"])
@@ -774,6 +775,17 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Sizga qachonga kerak edi?", rule)
         self.assertIn("Yetkazib berish kerakmi yoki kelib olib ketasizmi", rule)
         self.assertIn("Tushunarli", rule)
+
+    def test_clean_ai_prompt_replacement_contains_core_rules(self):
+        migration = importlib.import_module("core.migrations.0046_replace_ai_prompt_clean_version")
+        prompt = migration.CLEAN_EUROFLOWERS_AI_PROMPT
+        self.assertIn("EUROFLOWERS PREMIUM gul do'konining Instagram va Telegramdagi AI sotuv menejerisan", prompt)
+        self.assertIn("Custom narxni hech qachon o'zing hisoblama", prompt)
+        self.assertIn("calculate_custom_arrangement_price", prompt)
+        self.assertIn("lead_ready doim false", prompt)
+        self.assertIn("REAL_CONTEXT_JSON.business", prompt)
+        self.assertIn("shop_phone", prompt)
+        self.assertNotIn("# EUROFLOWERS PREMIUM", prompt)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

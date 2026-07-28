@@ -15,6 +15,7 @@ SHOP_ADDRESS = "Bobur ko‘chasi 10"
 SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTfQ6TMD"
 SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
 SHOP_WORKING_HOURS = "24/7"
+SHOP_PHONE = "+998 88 009 33 30"
 AI_REPLY_WAIT_SECONDS = 7
 AI_FOLLOW_UP_DELAY_SECONDS = 30 * 60
 
@@ -983,6 +984,7 @@ def ai_reply(conversation):
             "shop_address": SHOP_ADDRESS,
             "shop_location_link": SHOP_LOCATION_LINK,
             "shop_orientir": SHOP_ORIENTIR,
+            "shop_phone": SHOP_PHONE,
         },
     }
     api_key = openai_api_key()
