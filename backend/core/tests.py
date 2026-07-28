@@ -787,6 +787,15 @@ class BusinessRulesTests(TestCase):
         self.assertIn("shop_phone", prompt)
         self.assertNotIn("# EUROFLOWERS PREMIUM", prompt)
 
+    def test_legacy_ai_prompt_restore_reverts_clean_prompt(self):
+        migration = importlib.import_module("core.migrations.0047_restore_legacy_ai_prompt")
+        prompt = migration.LEGACY_EUROFLOWERS_AI_PROMPT
+        self.assertIn("Sen EuroFlowers Premium gul do‘konining Instagram va Telegramdagi AI sotuvchisian", prompt)
+        self.assertIn("Deterministik custom narx hisoblash qoidasi", prompt)
+        self.assertIn("Tabiiy sotuv muloqoti qoidasi", prompt)
+        self.assertIn("calculate_custom_arrangement_price", prompt)
+        self.assertNotIn("EUROFLOWERS PREMIUM gul do'konining Instagram va Telegramdagi AI sotuv menejerisan", prompt)
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
