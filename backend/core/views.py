@@ -94,6 +94,12 @@ def create_user_notification(user, notification_type, title, body, reference_typ
     )
 
 
+def normalize_coordinate(value):
+    if value in [None, ""]:
+        return value
+    return Decimal(str(value)).quantize(Decimal("0.0000000001"))
+
+
 def notification_references_developer(queryset):
     developer_user_ids = list(User.objects.filter(profile__role="developer").values_list("id", flat=True))
     developer_florist_ids = list(FloristProfile.objects.filter(user_id__in=developer_user_ids).values_list("id", flat=True))
@@ -705,8 +711,8 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": request.data.get("source") or "mobile"})
         first_check_in = not row.check_in_at
         row.check_in_at = row.check_in_at or checked_at
-        row.check_in_latitude = request.data.get("latitude") or row.check_in_latitude
-        row.check_in_longitude = request.data.get("longitude") or row.check_in_longitude
+        row.check_in_latitude = normalize_coordinate(request.data.get("latitude")) or row.check_in_latitude
+        row.check_in_longitude = normalize_coordinate(request.data.get("longitude")) or row.check_in_longitude
         row.source = request.data.get("source") or row.source
         row.note = request.data.get("note") or row.note
         row.save(update_fields=["check_in_at", "check_in_latitude", "check_in_longitude", "source", "note", "updated_at"])
@@ -727,8 +733,8 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": request.data.get("source") or "mobile"})
         first_check_out = not row.check_out_at
         row.check_out_at = checked_at
-        row.check_out_latitude = request.data.get("latitude") or row.check_out_latitude
-        row.check_out_longitude = request.data.get("longitude") or row.check_out_longitude
+        row.check_out_latitude = normalize_coordinate(request.data.get("latitude")) or row.check_out_latitude
+        row.check_out_longitude = normalize_coordinate(request.data.get("longitude")) or row.check_out_longitude
         row.source = request.data.get("source") or row.source
         row.note = request.data.get("note") or row.note
         row.save(update_fields=["check_out_at", "check_out_latitude", "check_out_longitude", "source", "note", "updated_at"])

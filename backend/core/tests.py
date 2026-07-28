@@ -155,8 +155,8 @@ class BusinessRulesTests(TestCase):
             "user": florist_user.id,
             "staff_type": "florist",
             "daily_pay": "150000.00",
-            "shop_latitude": "41.3110812345",
-            "shop_longitude": "69.2405623456",
+            "shop_latitude": "41.31108123456789",
+            "shop_longitude": "69.24056234567891",
             "volume_rates": [
                 {"arrangement_type": "bouquet", "volume": "small", "default_stems": 15, "florist_fee": "50000.00"},
                 {"arrangement_type": "basket", "volume": "large", "default_stems": 45, "florist_fee": "120000.00"},
@@ -165,8 +165,8 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
         profile = serializer.save()
         self.assertEqual(profile.daily_pay, Decimal("0"))
-        self.assertEqual(profile.shop_latitude, Decimal("41.3110812345"))
-        self.assertEqual(profile.shop_longitude, Decimal("69.2405623456"))
+        self.assertEqual(profile.shop_latitude, Decimal("41.3110812346"))
+        self.assertEqual(profile.shop_longitude, Decimal("69.2405623457"))
         self.assertEqual(profile.volume_rates.count(), 2)
         self.assertTrue(profile.volume_rates.filter(arrangement_type="basket", volume="large", florist_fee=Decimal("120000.00")).exists())
         self.assertNotIn("branch", FloristProfileSerializer(profile).data)
@@ -1340,12 +1340,12 @@ class ApiTests(TestCase):
         self.client.force_authenticate(florist_user)
         response = self.client.post("/api/florist-attendance/check-in/", {
             "checked_at": "2026-07-27T09:00:00+05:00",
-            "latitude": "41.2954351234",
-            "longitude": "69.2503551234",
+            "latitude": "41.29543512345678",
+            "longitude": "69.25035512345678",
         }, format="json")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["check_in_latitude"], "41.2954351234")
-        self.assertEqual(response.json()["check_in_longitude"], "69.2503551234")
+        self.assertEqual(response.json()["check_in_latitude"], "41.2954351235")
+        self.assertEqual(response.json()["check_in_longitude"], "69.2503551235")
 
     def test_admin_does_not_see_developer_notifications(self):
         UserProfile.objects.create(user=self.user, role="admin")

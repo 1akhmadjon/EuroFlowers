@@ -216,6 +216,15 @@ class FloristProfileSerializer(serializers.ModelSerializer):
         model = FloristProfile
         fields = "__all__"
 
+    def to_internal_value(self, data):
+        if hasattr(data, "copy"):
+            data = data.copy()
+            for field in ["shop_latitude", "shop_longitude"]:
+                value = data.get(field)
+                if value not in [None, ""]:
+                    data[field] = str(Decimal(str(value)).quantize(Decimal("0.0000000001")))
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         staff_type = attrs.get("staff_type") or getattr(self.instance, "staff_type", "florist")
@@ -266,6 +275,15 @@ class FloristAttendanceSerializer(serializers.ModelSerializer):
     class Meta:
         model = FloristAttendance
         fields = "__all__"
+
+    def to_internal_value(self, data):
+        if hasattr(data, "copy"):
+            data = data.copy()
+            for field in ["check_in_latitude", "check_in_longitude", "check_out_latitude", "check_out_longitude"]:
+                value = data.get(field)
+                if value not in [None, ""]:
+                    data[field] = str(Decimal(str(value)).quantize(Decimal("0.0000000001")))
+        return super().to_internal_value(data)
 
 
 class FloristSalaryEntrySerializer(serializers.ModelSerializer):
