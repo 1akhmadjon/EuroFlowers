@@ -1,6 +1,7 @@
 from decimal import Decimal
 from datetime import timedelta
 import json
+import importlib
 from pathlib import Path
 import tempfile
 import zipfile
@@ -684,6 +685,13 @@ class BusinessRulesTests(TestCase):
             result = process_conversation_follow_up(conversation.id, ai_message.id)
         self.assertIsNotNone(result)
         send_mock.assert_called_once_with("ig-follow-up-send", "Budjetingiz qancha edi?")
+
+    def test_discount_negotiation_prompt_rule_requires_lead_creation(self):
+        migration = importlib.import_module("core.migrations.0038_ai_prompt_discount_negotiation")
+        rule = migration.DISCOUNT_NEGOTIATION_PROMPT_RULE
+        self.assertIn("Arzonlashtirish va budjetga mos variant qoidasi", rule)
+        self.assertIn("client_lead_create", rule)
+        self.assertIn("Mijoz 200 000 so'mlik katalog buketni 150 000 so'mga so'radi", rule)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
