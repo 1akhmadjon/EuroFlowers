@@ -704,6 +704,16 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Gullarimiz hamyonbop narxlarda", rule)
         self.assertIn("client_lead_create", rule)
 
+    def test_stock_list_and_calculation_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0042_ai_prompt_stock_list_and_calculation_flow")
+        rule = migration.STOCK_LIST_AND_CALCULATION_FLOW_RULE
+        self.assertIn("Qaysi turini ko'rgingiz keladi", rule)
+        self.assertIn("Qaysi biridan buket yoki savat yasaymiz", rule)
+        self.assertIn("javob juda qisqa bo'lsin", rule)
+        self.assertIn("quantity_stems x sale_price_per_stem", rule)
+        self.assertIn("150 000 + 150 000 + 50 000 = 350 000", rule)
+        self.assertIn("Hech qachon shu holatni 550 000", rule)
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
