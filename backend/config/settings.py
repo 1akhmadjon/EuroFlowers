@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import dj_database_url
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY", "local-development-key-for-euroflowers-development-only")
@@ -93,9 +94,18 @@ INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0")
 TELEGRAM_GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "")
 CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+CELERY_TIMEZONE = TIME_ZONE
+BACKUP_BOT_TOKEN = os.getenv("BACKUP_BOT_TOKEN", "")
+BACKUP_TELEGRAM_GROUP_ID = os.getenv("BACKUP_TELEGRAM_GROUP_ID", "")
+BACKUP_TELEGRAM_THREAD_ID = os.getenv("BACKUP_TELEGRAM_THREAD_ID", "")
+BACKUP_TELEGRAM_COMMAND = os.getenv("BACKUP_TELEGRAM_COMMAND", "/cims_backup_bervor")
 CELERY_BEAT_SCHEDULE = {
     "lead-recalls-every-minute": {
         "task": "core.tasks.process_due_lead_recalls",
         "schedule": 60.0,
+    },
+    "daily-telegram-backup": {
+        "task": "core.tasks.send_telegram_backup",
+        "schedule": crontab(hour=3, minute=0),
     }
 }

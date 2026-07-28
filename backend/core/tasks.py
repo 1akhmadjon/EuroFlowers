@@ -5,6 +5,7 @@ import time
 from .platform_services import instagram_send, instagram_sender_action, send_due_lead_recalls, send_lead_recall, telegram_send, telegram_sender_action
 from .services import SHOP_LOCATION_LINK, ai_reply_wait_seconds_remaining, process_pending_customer_reply, should_start_ai_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
+from .backup_services import send_backup_to_telegram
 
 
 LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
@@ -131,3 +132,8 @@ def process_lead_recall(lead_id):
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def process_due_lead_recalls():
     return send_due_lead_recalls()
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def send_telegram_backup(triggered_by="auto"):
+    return send_backup_to_telegram(triggered_by)

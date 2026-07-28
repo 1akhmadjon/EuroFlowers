@@ -2282,3 +2282,18 @@ def telegram_webhook(request):
     from .tasks import process_telegram_webhook
     process_telegram_webhook.delay(request.data)
     return Response({"status": "EVENT_RECEIVED"})
+
+
+@extend_schema(request=inline_serializer(name="BackupTelegramWebhookPayload", fields={}), responses={200: OpenApiResponse(description="Backup bot event received")})
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def backup_telegram_webhook(request):
+    from .backup_services import backup_command_matches
+    if backup_command_matches(request.data):
+        from .tasks import send_telegram_backup
+        message = request.data.get("message") or {}
+        sender = message.get("from") or {}
+        triggered_by = sender.get("username") or sender.get("first_name") or "telegram_command"
+        send_telegram_backup.delay(f"manual:{triggered_by}")
+        return Response({"status": "BACKUP_QUEUED"})
+    return Response({"status": "IGNORED"})

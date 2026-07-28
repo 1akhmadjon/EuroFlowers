@@ -15,6 +15,7 @@ from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
+from .backup_services import backup_command_matches
 
 
 class BusinessRulesTests(TestCase):
@@ -227,6 +228,13 @@ class BusinessRulesTests(TestCase):
         sold = CatalogItem.objects.create(name_uz="Eski katalog", arrangement_type="bouquet", price=500000, status="available", quantity_total=1, quantity_sold=1)
         conversation.messages.create(sender="ai", text="Eski rasm", metadata={"catalog_items": [{"catalog_id": sold.id, "quantity": 1}]})
         self.assertIsNone(recent_catalog_item_for_conversation(conversation))
+
+    @override_settings(BACKUP_TELEGRAM_GROUP_ID="-1003718639311", BACKUP_TELEGRAM_THREAD_ID="1542", BACKUP_TELEGRAM_COMMAND="/cims_backup_bervor")
+    def test_backup_command_matches_only_configured_group_thread(self):
+        payload = {"message": {"text": "/cims_backup_bervor", "chat": {"id": -1003718639311}, "message_thread_id": 1542}}
+        self.assertTrue(backup_command_matches(payload))
+        self.assertFalse(backup_command_matches({"message": {"text": "/cims_backup_bervor", "chat": {"id": -1003718639311}, "message_thread_id": 999}}))
+        self.assertFalse(backup_command_matches({"message": {"text": "/start", "chat": {"id": -1003718639311}, "message_thread_id": 1542}}))
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(instagram_user_id="ig-test")
