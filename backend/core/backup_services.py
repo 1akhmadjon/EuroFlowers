@@ -92,7 +92,7 @@ def backup_command_matches(payload):
     text = (message.get("text") or "").strip()
     if not text:
         return False
-    command = settings.BACKUP_TELEGRAM_COMMAND or "/cims_backup_bervor"
+    command = settings.BACKUP_TELEGRAM_COMMAND or "/eurodan_backup_tashachi"
     first = text.split()[0].split("@")[0]
     if first != command:
         return False

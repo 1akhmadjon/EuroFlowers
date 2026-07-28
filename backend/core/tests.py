@@ -229,11 +229,11 @@ class BusinessRulesTests(TestCase):
         conversation.messages.create(sender="ai", text="Eski rasm", metadata={"catalog_items": [{"catalog_id": sold.id, "quantity": 1}]})
         self.assertIsNone(recent_catalog_item_for_conversation(conversation))
 
-    @override_settings(BACKUP_TELEGRAM_GROUP_ID="-1003718639311", BACKUP_TELEGRAM_THREAD_ID="1542", BACKUP_TELEGRAM_COMMAND="/cims_backup_bervor")
+    @override_settings(BACKUP_TELEGRAM_GROUP_ID="-1003718639311", BACKUP_TELEGRAM_THREAD_ID="1542", BACKUP_TELEGRAM_COMMAND="/eurodan_backup_tashachi")
     def test_backup_command_matches_only_configured_group_thread(self):
-        payload = {"message": {"text": "/cims_backup_bervor", "chat": {"id": -1003718639311}, "message_thread_id": 1542}}
+        payload = {"message": {"text": "/eurodan_backup_tashachi", "chat": {"id": -1003718639311}, "message_thread_id": 1542}}
         self.assertTrue(backup_command_matches(payload))
-        self.assertFalse(backup_command_matches({"message": {"text": "/cims_backup_bervor", "chat": {"id": -1003718639311}, "message_thread_id": 999}}))
+        self.assertFalse(backup_command_matches({"message": {"text": "/eurodan_backup_tashachi", "chat": {"id": -1003718639311}, "message_thread_id": 999}}))
         self.assertFalse(backup_command_matches({"message": {"text": "/start", "chat": {"id": -1003718639311}, "message_thread_id": 1542}}))
 
     def test_ai_lead_requires_valid_customer_phone(self):

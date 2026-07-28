@@ -98,7 +98,7 @@ CELERY_TIMEZONE = TIME_ZONE
 BACKUP_BOT_TOKEN = os.getenv("BACKUP_BOT_TOKEN", "")
 BACKUP_TELEGRAM_GROUP_ID = os.getenv("BACKUP_TELEGRAM_GROUP_ID", "")
 BACKUP_TELEGRAM_THREAD_ID = os.getenv("BACKUP_TELEGRAM_THREAD_ID", "")
-BACKUP_TELEGRAM_COMMAND = os.getenv("BACKUP_TELEGRAM_COMMAND", "/cims_backup_bervor")
+BACKUP_TELEGRAM_COMMAND = os.getenv("BACKUP_TELEGRAM_COMMAND", "/eurodan_backup_tashachi")
 CELERY_BEAT_SCHEDULE = {
     "lead-recalls-every-minute": {
         "task": "core.tasks.process_due_lead_recalls",
