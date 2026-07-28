@@ -7,6 +7,13 @@ from django.conf import settings
 import requests
 
 
+MARKDOWN_V2_RESERVED = "\\_*[]()~`>#+-=|{}.!"
+
+
+def markdown_escape(value):
+    return "".join(f"\\{char}" if char in MARKDOWN_V2_RESERVED else char for char in str(value))
+
+
 def database_env():
     config = settings.DATABASES["default"]
     env = os.environ.copy()
@@ -48,21 +55,39 @@ def create_media_backup(temp_dir):
     files = [path for path in media_root.rglob("*") if path.is_file()]
     if not files:
         return None
-    zip_path = Path(temp_dir) / "euroflowers_media.zip"
+    zip_path = Path(temp_dir) / "euroflowers_media_images.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in files:
             archive.write(path, path.relative_to(media_root))
     return zip_path
 
 
-def send_telegram_document(path, caption):
+def backup_telegram_payload(extra=None):
     token = settings.BACKUP_BOT_TOKEN
     chat_id = settings.BACKUP_TELEGRAM_GROUP_ID
     if not token or not chat_id:
         raise RuntimeError("Backup bot token yoki group id sozlanmagan")
-    data = {"chat_id": chat_id, "caption": caption}
+    data = {"chat_id": chat_id}
     if settings.BACKUP_TELEGRAM_THREAD_ID:
         data["message_thread_id"] = settings.BACKUP_TELEGRAM_THREAD_ID
+    if extra:
+        data.update(extra)
+    return token, data
+
+
+def send_telegram_message(text):
+    token, data = backup_telegram_payload({"text": text, "parse_mode": "MarkdownV2"})
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=data,
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def send_telegram_document(path, caption):
+    token, data = backup_telegram_payload({"caption": caption, "parse_mode": "MarkdownV2"})
     with open(path, "rb") as file:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendDocument",
@@ -74,16 +99,52 @@ def send_telegram_document(path, caption):
     return response.json()
 
 
+def backup_file_label(path):
+    suffix = path.suffix.lower()
+    if suffix == ".dump":
+        return "PostgreSQL custom dump"
+    if suffix == ".sql":
+        return "SQL backup"
+    if suffix == ".zip":
+        return "Media rasmlar ZIP"
+    return "Backup file"
+
+
+def backup_caption(path, triggered_by, index, total):
+    return (
+        "📦 *EuroFlowers backup*\n"
+        f"🧩 Turi: {markdown_escape(backup_file_label(path))}\n"
+        f"📁 Fayl: {markdown_escape(path.name)}\n"
+        f"🔢 Tartib: {markdown_escape(index)}/{markdown_escape(total)}\n"
+        f"⚙️ Trigger: {markdown_escape(triggered_by)}"
+    )
+
+
 def send_backup_to_telegram(triggered_by="auto"):
     with TemporaryDirectory(prefix="euroflowers-backup-") as temp_dir:
+        send_telegram_message(
+            "📦 *EuroFlowers backup boshlandi*\n"
+            f"⚙️ Trigger: {markdown_escape(triggered_by)}\n"
+            "🗄 Database va media fayllar tayyorlanmoqda"
+        )
         paths = create_database_backups(temp_dir)
         media = create_media_backup(temp_dir)
         if media:
             paths.append(media)
+        else:
+            send_telegram_message(
+                "🖼 *Media rasmlar topilmadi*\n"
+                "ZIP fayl yuborilmadi"
+            )
         results = []
-        for path in paths:
-            caption = f"EuroFlowers backup\nTrigger: {triggered_by}\nFile: {path.name}"
-            results.append(send_telegram_document(path, caption))
+        total = len(paths)
+        for index, path in enumerate(paths, start=1):
+            results.append(send_telegram_document(path, backup_caption(path, triggered_by, index, total)))
+        send_telegram_message(
+            "✅ *Backup yakunlandi*\n"
+            f"📄 Yuborilgan fayllar: {markdown_escape(len(results))}\n"
+            f"📁 Fayllar: {markdown_escape(', '.join(path.name for path in paths))}"
+        )
         return {"sent": len(results), "files": [path.name for path in paths], "triggered_by": triggered_by}
 
 

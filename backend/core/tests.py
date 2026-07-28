@@ -1,7 +1,9 @@
 from decimal import Decimal
 from datetime import timedelta
 import json
+from pathlib import Path
 import tempfile
+import zipfile
 from types import SimpleNamespace
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -15,7 +17,7 @@ from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
 from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
-from .backup_services import backup_command_matches
+from .backup_services import backup_command_matches, backup_caption, create_media_backup
 
 
 class BusinessRulesTests(TestCase):
@@ -235,6 +237,24 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(backup_command_matches(payload))
         self.assertFalse(backup_command_matches({"message": {"text": "/eurodan_backup_tashachi", "chat": {"id": -1003718639311}, "message_thread_id": 999}}))
         self.assertFalse(backup_command_matches({"message": {"text": "/start", "chat": {"id": -1003718639311}, "message_thread_id": 1542}}))
+
+    def test_backup_media_zip_is_created_separately(self):
+        with tempfile.TemporaryDirectory() as media_root, tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(media_root) / "catalog" / "test.jpg"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"image-bytes")
+            with override_settings(MEDIA_ROOT=media_root):
+                zip_path = create_media_backup(temp_dir)
+            self.assertEqual(zip_path.name, "euroflowers_media_images.zip")
+            with zipfile.ZipFile(zip_path) as archive:
+                self.assertEqual(archive.namelist(), ["catalog/test.jpg"])
+
+    def test_backup_caption_uses_markdown_and_escapes_filename(self):
+        caption = backup_caption(Path("euroflowers_media_images.zip"), "manual:test_user", 3, 3)
+        self.assertIn("📦 *EuroFlowers backup*", caption)
+        self.assertIn("Media rasmlar ZIP", caption)
+        self.assertIn("euroflowers\\_media\\_images\\.zip", caption)
+        self.assertIn("manual:test\\_user", caption)
 
     def test_ai_lead_requires_valid_customer_phone(self):
         customer = Customer.objects.create(instagram_user_id="ig-test")
