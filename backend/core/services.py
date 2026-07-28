@@ -308,6 +308,8 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
 
 def ai_stock_rows(query="", limit=24):
     query = (query or "").strip()
+    if generic_stock_query(query):
+        query = ""
     stock_batches = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("received_at", "id")
     queryset = (
         FlowerVariant.objects
@@ -1177,6 +1179,39 @@ def recent_catalog_item_for_conversation(conversation):
 
 def compact_match_text(value):
     return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower()).strip()
+
+
+def generic_stock_query(query):
+    normalized = compact_match_text(query)
+    if not normalized:
+        return True
+    generic_terms = {
+        "bor",
+        "borlar",
+        "current",
+        "есть",
+        "gulla",
+        "gullar",
+        "gul",
+        "имеющиеся",
+        "mavjud",
+        "qanaqa",
+        "qanday",
+        "склад",
+        "складе",
+        "sklad",
+        "skladda",
+        "skladimizda",
+        "текущие",
+        "цвет",
+        "цветы",
+        "yasash",
+        "yasatish",
+        "yegdirish",
+        "yigdirish",
+        "yigish",
+    }
+    return set(normalized.split()).issubset(generic_terms)
 
 
 def _catalog_text_aliases(text):

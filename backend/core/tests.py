@@ -83,6 +83,11 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows[0]["batch_id"], self.batch.id)
 
+    def test_ai_stock_rows_treats_generic_query_as_all_stock(self):
+        rows = ai_stock_rows("текущие цветы", limit=10)
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["batch_id"], self.batch.id)
+
     def test_ai_catalog_rows_treats_whitespace_query_as_all_catalog(self):
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
@@ -807,6 +812,14 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Tabiiy sotuv muloqoti qoidasi", prompt)
         self.assertIn("calculate_custom_arrangement_price", prompt)
         self.assertNotIn("EUROFLOWERS PREMIUM gul do'konining Instagram va Telegramdagi AI sotuv menejerisan", prompt)
+
+    def test_quality_reassurance_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0048_ai_prompt_quality_reassurance")
+        rule = migration.QUALITY_REASSURANCE_PROMPT_RULE
+        self.assertIn("Sifat, yangi gul va obyom bo'yicha aniq javob qoidasi", rule)
+        self.assertIn("Ko'nglingiz xotirjam bo'lsin", rule)
+        self.assertIn("so'lib qolgan gullar bilan hech qachon buket yoki savat yasalmaydi", rule)
+        self.assertIn("o'zingdan generate qilma", rule)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
