@@ -12,10 +12,10 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -401,7 +401,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
@@ -441,7 +441,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(result["detected_language"], "uz")
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = CatalogItem.objects.create(name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
@@ -459,6 +459,37 @@ class BusinessRulesTests(TestCase):
         conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("get_stock", {"query": "gortenziya"}, conversation)
         self.assertEqual(result, {"stock": []})
+
+    def test_calculate_custom_arrangement_price_is_deterministic(self):
+        BusinessSettings.objects.update_or_create(pk=1, defaults={"default_florist_fee": Decimal("50000")})
+        self.batch.sale_price_per_stem = Decimal("15000")
+        self.batch.remaining_stems = 100
+        self.batch.save(update_fields=["sale_price_per_stem", "remaining_stems", "updated_at"])
+        result = calculate_custom_arrangement_price([{"batch_id": self.batch.id, "quantity_stems": 50, "quantity_bunches": 0}])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["flower_subtotal"], "750000")
+        self.assertEqual(result["florist_fee"], "50000")
+        self.assertEqual(result["total"], "800000")
+        self.assertIn("Jami taxminan 800 000 so'm", result["display_summary_uz"]["total"])
+
+    def test_calculate_custom_arrangement_price_handles_multiple_flowers(self):
+        BusinessSettings.objects.update_or_create(pk=1, defaults={"default_florist_fee": Decimal("50000")})
+        self.batch.sale_price_per_stem = Decimal("15000")
+        self.batch.remaining_stems = 100
+        self.batch.save(update_fields=["sale_price_per_stem", "remaining_stems", "updated_at"])
+        second = StockBatch.objects.create(variant=self.batch.variant, batch_number="T-PRUT", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=15000, sale_price_per_bunch=300000)
+        customer = Customer.objects.create(instagram_user_id="telegram:calc")
+        conversation = Conversation.objects.create(customer=customer)
+        result = execute_ai_tool("calculate_custom_arrangement_price", {
+            "stock_items": [
+                {"batch_id": self.batch.id, "quantity_stems": 10, "quantity_bunches": 0},
+                {"batch_id": second.id, "quantity_stems": 10, "quantity_bunches": 0},
+            ],
+        }, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["flower_subtotal"], "300000")
+        self.assertEqual(result["total"], "350000")
+        self.assertEqual(len(result["lines"]), 2)
 
     def test_send_stock_image_tool_sends_flower_image(self):
         self.batch.image_url = "https://example.com/freedom.jpg"
@@ -723,6 +754,15 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Rahmat, tez orada operatorlarimiz", rule)
         self.assertIn("Ko'pi bilan 3-5 qator", rule)
         self.assertIn("Jami taxminan 350 000 so'm", rule)
+
+    def test_deterministic_price_tool_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0044_ai_prompt_deterministic_price_tool")
+        rule = migration.DETERMINISTIC_PRICE_TOOL_RULE
+        self.assertIn("Custom buket yoki savat narxini hech qachon o'zing hisoblama", rule)
+        self.assertIn("calculate_custom_arrangement_price", rule)
+        self.assertIn("quantity_stems 50", rule)
+        self.assertIn("775 000", rule)
+        self.assertIn("errors qaytarsa, narx aytma", rule)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

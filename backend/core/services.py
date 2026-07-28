@@ -465,6 +465,57 @@ def mini_app_custom_quote_ai(request_text, arrangement_type):
     }
 
 
+def calculate_custom_arrangement_price(stock_items):
+    business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
+    florist_fee = Decimal(str(business_settings.default_florist_fee or 0))
+    lines = []
+    flower_subtotal = Decimal("0")
+    errors = []
+    for row in stock_items or []:
+        batch = StockBatch.objects.filter(id=row.get("batch_id"), is_active=True).select_related("variant__flower").first()
+        quantity_stems = int(row.get("quantity_stems") or 0)
+        if not batch:
+            errors.append({"batch_id": row.get("batch_id"), "detail": "stock_not_found"})
+            continue
+        if quantity_stems <= 0:
+            errors.append({"batch_id": batch.id, "detail": "quantity_stems_required"})
+            continue
+        if quantity_stems > batch.remaining_stems:
+            errors.append({
+                "batch_id": batch.id,
+                "stock_name": flower_variant_display_name(batch.variant, "uz"),
+                "detail": "not_enough_stock",
+                "requested_stems": quantity_stems,
+                "remaining_stems": batch.remaining_stems,
+            })
+            continue
+        unit_price = Decimal(str(batch.sale_price_per_stem or 0))
+        subtotal = (Decimal(quantity_stems) * unit_price).quantize(Decimal("1"))
+        flower_subtotal += subtotal
+        lines.append({
+            "batch_id": batch.id,
+            "stock_name": flower_variant_display_name(batch.variant, "uz"),
+            "quantity_stems": quantity_stems,
+            "price_per_stem": str(unit_price.quantize(Decimal("1"))),
+            "subtotal": str(subtotal),
+            "display_line_uz": f"{quantity_stems} ta {flower_variant_display_name(batch.variant, 'uz')} {money_uz(subtotal)} so'm",
+        })
+    total = (flower_subtotal + florist_fee).quantize(Decimal("1"))
+    return {
+        "ok": not errors and bool(lines),
+        "lines": lines,
+        "errors": errors,
+        "flower_subtotal": str(flower_subtotal.quantize(Decimal("1"))),
+        "florist_fee": str(florist_fee.quantize(Decimal("1"))),
+        "total": str(total),
+        "display_summary_uz": {
+            "flower_subtotal": f"Gullar jami {money_uz(flower_subtotal)} so'm",
+            "florist_fee": f"Florist haqi taxminan {money_uz(florist_fee)} so'm",
+            "total": f"Jami taxminan {money_uz(total)} so'm",
+        },
+    }
+
+
 def ai_tool_definitions():
     lead_catalog_item_schema = {
         "type": "object",
@@ -577,6 +628,20 @@ def ai_tool_definitions():
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
                 "required": ["query"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "calculate_custom_arrangement_price",
+            "description": "Custom buket yoki savat narxini aniq hisoblash. AI narxni o'zi hisoblamaydi, shu tool qaytargan total va display_summary_uz dan foydalanadi.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "stock_items": {"type": "array", "items": lead_stock_item_schema},
+                },
+                "required": ["stock_items"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -704,6 +769,8 @@ def execute_ai_tool(name, arguments, conversation):
         return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100)}
     if name == "get_flower_variant_info":
         return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
+    if name == "calculate_custom_arrangement_price":
+        return calculate_custom_arrangement_price(arguments.get("stock_items") or [])
     if name == "send_catalog_images":
         results = []
         seen = set()
