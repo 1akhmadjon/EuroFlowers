@@ -695,6 +695,15 @@ class BusinessRulesTests(TestCase):
         self.assertIn("client_lead_create", rule)
         self.assertIn("Mijoz 200 000 so'mlik katalog buketni 150 000 so'mga so'radi", rule)
 
+    def test_stock_image_prompt_rule_asks_quantity_before_date(self):
+        migration = importlib.import_module("core.migrations.0041_ai_prompt_stock_image_and_discount_flow")
+        rule = migration.STOCK_IMAGE_AND_DISCOUNT_FLOW_RULE
+        self.assertIn("send_stock_image", rule)
+        self.assertIn("sizga qachonga kerak edi", rule)
+        self.assertIn("Shu guldan nechta dona qilib buket yoki savat yasaymiz", rule)
+        self.assertIn("Gullarimiz hamyonbop narxlarda", rule)
+        self.assertIn("client_lead_create", rule)
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
