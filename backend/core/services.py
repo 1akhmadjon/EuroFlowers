@@ -16,6 +16,7 @@ SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTfQ6TMD"
 SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
 SHOP_WORKING_HOURS = "24/7"
 AI_REPLY_WAIT_SECONDS = 7
+AI_FOLLOW_UP_DELAY_SECONDS = 30 * 60
 
 
 def normalize_phone(value):
@@ -856,6 +857,19 @@ def ai_response_schema():
     }
 
 
+def ai_follow_up_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "send_follow_up": {"type": "boolean"},
+            "message": {"type": ["string", "null"]},
+            "reason": {"type": "string"},
+        },
+        "required": ["send_follow_up", "message", "reason"],
+        "additionalProperties": False,
+    }
+
+
 def ai_reply(conversation):
     customer = conversation.customer
     history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
@@ -978,6 +992,78 @@ def ai_reply(conversation):
         result["lead_created_id"] = created_leads[-1]
         result["lead_ready"] = False
     return result
+
+
+def ai_follow_up_decision(conversation, expected_ai_message):
+    customer = conversation.customer
+    history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
+    latest_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
+    reply_script = detect_customer_reply_script(latest_customer_message)
+    history = []
+    for message in history_messages:
+        content = message.text
+        if message.metadata:
+            content = json.dumps({"text": message.text, "metadata": message.metadata}, ensure_ascii=False, default=str)
+        history.append({"role": "user" if message.sender == "customer" else "assistant", "content": content})
+    context = {
+        "customer": {
+            "name": customer.name if valid_customer_name(customer.name) else "",
+            "phone": customer.masked_phone,
+            "has_phone": bool(customer.phone),
+            "language": customer.language,
+        },
+        "conversation": {
+            "id": conversation.id,
+            "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
+            "latest_customer_message": latest_customer_message,
+            "latest_reply_script": reply_script,
+            "language_control": language_control_message(reply_script),
+            "expected_ai_message_id": expected_ai_message.id,
+            "expected_ai_message": expected_ai_message.text,
+            "expected_ai_metadata": expected_ai_message.metadata or {},
+            "leads_count": conversation.leads.count(),
+        },
+    }
+    api_key = openai_api_key()
+    if not api_key:
+        return {"send_follow_up": False, "message": None, "reason": "openai_api_key_missing"}
+    ai_settings, _ = AISettings.objects.get_or_create(pk=1)
+    instructions = (
+        "Sen EUROFLOWERS PREMIUM uchun follow up qarorini chiqarasan.\n"
+        "Chat oxirgi AI javobidan keyin 30 minut jim turgan bo‘lsa, faqat kerakli holatda bitta tabiiy follow up yoz.\n"
+        "Shablon yozma, conversationni to‘liq tahlil qil.\n"
+        "Agar lead yaratilgan bo‘lsa, ism va raqam olingan bo‘lsa, mijoz rad etsa, boshqa joydan olaman desa, yoqmadi desa, hop yaxshi rahmat yoki shunga o‘xshash yopuvchi gap yozgan bo‘lsa send_follow_up false qil.\n"
+        "Agar AI katalog, rasm, narx yoki custom buket hisobini ko‘rsatganidan keyin mijoz jim qolgan bo‘lsa, budjetiga mos variantni operatorlar ko‘rsatishi mumkinligini tabiiy aytib ism va raqamini so‘ra.\n"
+        "Agar mijoz faqat salom yoki bitta noaniq xabar yozib jim qolgan bo‘lsa, qanday gul kerakligini, vitrinadan ko‘rishini yoki o‘zi yig‘dirmoqchiligini qisqa so‘ra.\n"
+        "Mijoz qaysi tilda va qaysi yozuvda yozgan bo‘lsa, message ham aynan o‘sha tilda va yozuvda bo‘lsin.\n"
+        "Savollarni ko‘paytirma, bitta qisqa premium ohangdagi follow up yoz.\n"
+        "Javob faqat JSON schema bo‘yicha bo‘lsin."
+    )
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        model=ai_settings.openai_model or settings.OPENAI_MODEL,
+        instructions=instructions,
+        input=[
+            {"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False, default=str)},
+            {"role": "user", "content": language_control_message(reply_script)},
+            *history,
+        ],
+        max_output_tokens=700,
+        reasoning={"effort": "minimal"},
+        text={"format": {"type": "json_schema", "name": "follow_up_decision", "strict": True, "schema": ai_follow_up_schema()}},
+    )
+    try:
+        data = json.loads(response.output_text)
+    except json.JSONDecodeError:
+        print(f"OPENAI_FOLLOW_UP_JSON_DECODE_FAILED conversation={conversation.id} output={response.output_text!r}", flush=True)
+        return {"send_follow_up": False, "message": None, "reason": "json_decode_failed"}
+    if reply_script in ["uz_cyril", "uz_latin"] and data.get("send_follow_up"):
+        customer.language = "uz"
+        customer.save(update_fields=["language", "updated_at"])
+    elif reply_script == "ru" and data.get("send_follow_up"):
+        customer.language = "ru"
+        customer.save(update_fields=["language", "updated_at"])
+    return data
 
 
 def ingest_customer_message(conversation, message_text, instagram_message_id="", metadata=None):
@@ -1282,3 +1368,31 @@ def process_pending_customer_reply(conversation_id, expected_message_id):
     else:
         Conversation.objects.filter(id=conversation_id, ai_reply_started_for_message_id=expected_message_id).update(ai_reply_started_for_message=None, ai_reply_started_at=None)
     return reply
+
+
+def process_stalled_conversation_follow_up(conversation_id, expected_ai_message_id):
+    conversation = Conversation.objects.select_related("customer").filter(id=conversation_id).first()
+    if not conversation or conversation.status != "ai":
+        return None
+    if conversation.ai_paused_until and conversation.ai_paused_until > timezone.now():
+        return None
+    expected_ai_message = conversation.messages.filter(id=expected_ai_message_id, sender="ai").first()
+    if not expected_ai_message:
+        return None
+    latest_message = conversation.messages.order_by("-created_at", "-id").first()
+    if not latest_message or latest_message.id != expected_ai_message.id:
+        return None
+    if conversation.leads.exists() or expected_ai_message.metadata.get("lead_created_id"):
+        return None
+    elapsed = (timezone.now() - expected_ai_message.created_at).total_seconds()
+    if elapsed < AI_FOLLOW_UP_DELAY_SECONDS:
+        return None
+    decision = ai_follow_up_decision(conversation, expected_ai_message)
+    message_text = (decision.get("message") or "").strip()
+    if not decision.get("send_follow_up") or not message_text:
+        Message.objects.create(conversation=conversation, sender="system", text="", metadata={"follow_up_cancelled": True, "expected_ai_message_id": expected_ai_message.id, "reason": decision.get("reason") or ""})
+        return None
+    follow_up = Message.objects.create(conversation=conversation, sender="ai", text=message_text, metadata={"follow_up": True, "expected_ai_message_id": expected_ai_message.id, "reason": decision.get("reason") or ""})
+    conversation.last_message_at = timezone.now()
+    conversation.save(update_fields=["last_message_at", "updated_at"])
+    return follow_up

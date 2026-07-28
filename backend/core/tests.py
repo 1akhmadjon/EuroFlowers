@@ -14,8 +14,8 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
-from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
-from .tasks import process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
+from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
 
@@ -612,10 +612,11 @@ class BusinessRulesTests(TestCase):
         Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(seconds=8))
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock:
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}) as text_mock, patch("core.tasks.process_conversation_follow_up.apply_async") as follow_up_schedule:
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
         text_mock.assert_called_once_with("555", "Mana rasmi")
+        follow_up_schedule.assert_called_once_with(args=[conversation.id, reply_message.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
 
     def test_delayed_telegram_reply_skips_context_image_after_tool_image(self):
         customer = Customer.objects.create(instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
@@ -624,9 +625,65 @@ class BusinessRulesTests(TestCase):
         Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(seconds=8))
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Rasmini yubordim.", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}], "image_tool_results": [{"image_sent": True, "catalog_id": self.item.id}]})
         from unittest.mock import patch
-        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}):
+        with patch("core.tasks.process_pending_customer_reply", return_value=reply_message), patch("core.tasks.telegram_sender_action", return_value={"ok": True}), patch("core.tasks.telegram_send", return_value={"ok": True}), patch("core.tasks.process_conversation_follow_up.apply_async") as follow_up_schedule:
             result = process_delayed_telegram_reply(conversation.id, customer_message.id, "555")
         self.assertEqual(result, reply_message.id)
+        follow_up_schedule.assert_called_once_with(args=[conversation.id, reply_message.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
+
+    def test_follow_up_waits_thirty_minutes_after_last_ai_message(self):
+        customer = Customer.objects.create(instagram_user_id="ig-follow-up")
+        conversation = Conversation.objects.create(customer=customer)
+        customer_message = conversation.messages.create(sender="customer", text="katalog narxlari")
+        ai_message = Message.objects.create(conversation=conversation, sender="ai", text="Oq buket\nNarxi 500 000 so'm")
+        Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(minutes=30))
+        Message.objects.filter(id=ai_message.id).update(created_at=timezone.now() - timedelta(minutes=29))
+        from unittest.mock import patch
+        with patch("core.services.ai_follow_up_decision") as decision_mock:
+            result = process_stalled_conversation_follow_up(conversation.id, ai_message.id)
+        self.assertIsNone(result)
+        decision_mock.assert_not_called()
+
+    def test_follow_up_skips_when_lead_exists(self):
+        customer = Customer.objects.create(instagram_user_id="ig-follow-up-lead", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
+        customer_message = conversation.messages.create(sender="customer", text="oq buket olaman Ahmad 901234567")
+        ai_message = Message.objects.create(conversation=conversation, sender="ai", text="Buyurtmangiz qabul qilindi", metadata={"lead_created_id": 10})
+        Lead.objects.create(customer=customer, conversation=conversation, request_uz="Oq buket", arrangement_type="catalog")
+        Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(minutes=32))
+        Message.objects.filter(id=ai_message.id).update(created_at=timezone.now() - timedelta(minutes=31))
+        from unittest.mock import patch
+        with patch("core.services.ai_follow_up_decision") as decision_mock:
+            result = process_stalled_conversation_follow_up(conversation.id, ai_message.id)
+        self.assertIsNone(result)
+        decision_mock.assert_not_called()
+
+    def test_follow_up_creates_ai_message_from_decision(self):
+        customer = Customer.objects.create(instagram_user_id="ig-follow-up-create")
+        conversation = Conversation.objects.create(customer=customer)
+        customer_message = conversation.messages.create(sender="customer", text="shu savat nechpul")
+        ai_message = Message.objects.create(conversation=conversation, sender="ai", text="Gortenziya Mix savat\nNarxi 900 000 so'm", metadata={"catalog_items": [{"catalog_name": "Gortenziya Mix", "quantity": 1}]})
+        Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(minutes=32))
+        Message.objects.filter(id=ai_message.id).update(created_at=timezone.now() - timedelta(minutes=31))
+        from unittest.mock import patch
+        with patch("core.services.ai_follow_up_decision", return_value={"send_follow_up": True, "message": "Hurmatli mijoz, budjetingiz qancha edi?", "reason": "price_shown"}):
+            follow_up = process_stalled_conversation_follow_up(conversation.id, ai_message.id)
+        self.assertIsNotNone(follow_up)
+        self.assertEqual(follow_up.sender, "ai")
+        self.assertTrue(follow_up.metadata["follow_up"])
+        self.assertIn("budjetingiz", follow_up.text)
+
+    def test_follow_up_task_sends_instagram_message(self):
+        customer = Customer.objects.create(instagram_user_id="ig-follow-up-send")
+        conversation = Conversation.objects.create(customer=customer)
+        customer_message = conversation.messages.create(sender="customer", text="katalog")
+        ai_message = Message.objects.create(conversation=conversation, sender="ai", text="Narxi 500 000 so'm")
+        Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(minutes=32))
+        Message.objects.filter(id=ai_message.id).update(created_at=timezone.now() - timedelta(minutes=31))
+        from unittest.mock import patch
+        with patch("core.services.ai_follow_up_decision", return_value={"send_follow_up": True, "message": "Budjetingiz qancha edi?", "reason": "stalled"}), patch("core.tasks.instagram_send", return_value={"ok": True}) as send_mock:
+            result = process_conversation_follow_up(conversation.id, ai_message.id)
+        self.assertIsNotNone(result)
+        send_mock.assert_called_once_with("ig-follow-up-send", "Budjetingiz qancha edi?")
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

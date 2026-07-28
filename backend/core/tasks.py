@@ -3,7 +3,7 @@ from math import ceil
 import threading
 import time
 from .platform_services import instagram_send, instagram_sender_action, send_due_lead_recalls, send_lead_recall, telegram_send, telegram_sender_action
-from .services import SHOP_LOCATION_LINK, ai_reply_wait_seconds_remaining, process_pending_customer_reply, should_start_ai_reply
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, SHOP_LOCATION_LINK, ai_reply_wait_seconds_remaining, process_pending_customer_reply, process_stalled_conversation_follow_up, should_start_ai_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import send_backup_to_telegram
 
@@ -81,6 +81,7 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
             return None
         for text in split_location_reply(reply.text):
             instagram_send(recipient_id, text)
+        process_conversation_follow_up.apply_async(args=[conversation_id, reply.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
         return reply.id
     finally:
         stop_typing.set()
@@ -118,6 +119,7 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
             return None
         for text in split_location_reply(reply.text):
             telegram_send(chat_id, text)
+        process_conversation_follow_up.apply_async(args=[conversation_id, reply.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
         return reply.id
     finally:
         stop_typing.set()
@@ -137,3 +139,16 @@ def process_due_lead_recalls():
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def send_telegram_backup(triggered_by="auto"):
     return send_backup_to_telegram(triggered_by)
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def process_conversation_follow_up(conversation_id, expected_ai_message_id):
+    follow_up = process_stalled_conversation_follow_up(conversation_id, expected_ai_message_id)
+    if not follow_up:
+        return None
+    customer = follow_up.conversation.customer
+    if customer.instagram_user_id.startswith("telegram:"):
+        telegram_send(customer.instagram_user_id.split(":", 1)[1], follow_up.text)
+    elif customer.instagram_user_id:
+        instagram_send(customer.instagram_user_id, follow_up.text)
+    return follow_up.id
