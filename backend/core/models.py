@@ -13,17 +13,6 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
-class Branch(TimeStampedModel):
-    name = models.CharField(max_length=120)
-    code = models.CharField(max_length=20, unique=True)
-    address = models.CharField(max_length=255, blank=True)
-    phone = models.CharField(max_length=30, blank=True)
-    is_active = models.BooleanField(default=True)
-
-    def __str__(self):
-        return self.name
-
-
 class UserProfile(TimeStampedModel):
     ROLE_CHOICES = [
         ("developer", "Developer"),
@@ -37,7 +26,6 @@ class UserProfile(TimeStampedModel):
     ]
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="operator")
-    branches = models.ManyToManyField(Branch, blank=True, related_name="staff")
     language = models.CharField(max_length=2, choices=[("uz", "O‘zbek"), ("ru", "Русский")], default="uz")
 
 
@@ -120,7 +108,6 @@ class Supplier(TimeStampedModel):
 
 
 class StockBatch(TimeStampedModel):
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="stock_batches")
     variant = models.ForeignKey(FlowerVariant, on_delete=models.PROTECT, related_name="batches")
     supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_batches")
     batch_number = models.CharField(max_length=40)
@@ -140,7 +127,7 @@ class StockBatch(TimeStampedModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["branch", "batch_number"], name="unique_branch_batch")]
+        constraints = [models.UniqueConstraint(fields=["batch_number"], name="unique_batch_number")]
         ordering = ["received_at", "id"]
 
     @property
@@ -188,7 +175,6 @@ class StockMovement(TimeStampedModel):
 
 class Packaging(TimeStampedModel):
     TYPE_CHOICES = [("wrap", "Buket qog‘ozi"), ("basket", "Savat"), ("box", "Quti"), ("other", "Boshqalar")]
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="packaging")
     packaging_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     name_uz = models.CharField(max_length=120)
     size = models.CharField(max_length=40, blank=True)
@@ -229,7 +215,6 @@ class PackagingMovement(TimeStampedModel):
 class FloristProfile(TimeStampedModel):
     STAFF_CHOICES = [("florist", "Florist"), ("apprentice", "Shogird")]
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="florist_profile")
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="florists")
     staff_type = models.CharField(max_length=20, choices=STAFF_CHOICES, default="florist")
     phone = models.CharField(max_length=30, blank=True)
     daily_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -284,7 +269,6 @@ class FloristSalaryEntry(TimeStampedModel):
 
 class FloristVolumeRate(TimeStampedModel):
     ARRANGEMENT_CHOICES = [("bouquet", "Buket"), ("basket", "Savat")]
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="florist_volume_rates")
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.CASCADE, related_name="volume_rates")
     arrangement_type = models.CharField(max_length=20, choices=ARRANGEMENT_CHOICES)
     volume = models.CharField(max_length=80)
@@ -293,7 +277,7 @@ class FloristVolumeRate(TimeStampedModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["branch", "florist", "arrangement_type", "volume"], name="unique_branch_florist_arrangement_volume_rate")]
+        constraints = [models.UniqueConstraint(fields=["florist", "arrangement_type", "volume"], name="unique_florist_arrangement_volume_rate")]
         ordering = ["arrangement_type", "volume"]
 
 
@@ -303,7 +287,6 @@ class Customer(TimeStampedModel):
     language = models.CharField(max_length=2, choices=[("uz", "O‘zbek"), ("ru", "Русский")], default="uz")
     instagram_user_id = models.CharField(max_length=100, unique=True)
     instagram_username = models.CharField(max_length=120, blank=True)
-    branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.SET_NULL, related_name="customers")
     notes = models.TextField(blank=True)
     is_blocked = models.BooleanField(default=False)
 
@@ -320,7 +303,6 @@ class Customer(TimeStampedModel):
 
 class SocialPost(TimeStampedModel):
     TYPE_CHOICES = [("post", "Post"), ("reel", "Reel"), ("story", "Story"), ("ad", "Target")]
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="social_posts")
     post_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     media_id = models.CharField(max_length=120, unique=True)
     permalink = models.URLField(blank=True)
@@ -342,10 +324,10 @@ class SocialPost(TimeStampedModel):
 class CatalogItem(TimeStampedModel):
     STATUS_CHOICES = [("draft", "Qoralama"), ("available", "Sotuvda"), ("reserved", "Band"), ("sold", "Sotildi"), ("archived", "Arxiv")]
     CATALOG_KIND_CHOICES = [("standard", "Standart"), ("custom", "Custom")]
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="catalog_items")
     name_uz = models.CharField(max_length=180)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
+    note = models.TextField(blank=True)
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti")])
     catalog_kind = models.CharField(max_length=20, choices=CATALOG_KIND_CHOICES, default="standard")
     volume = models.CharField(max_length=80, blank=True)
@@ -409,7 +391,6 @@ class CatalogHistory(TimeStampedModel):
 class Conversation(TimeStampedModel):
     STATUS_CHOICES = [("ai", "AI javob bermoqda"), ("operator", "Operatorga o‘tdi"), ("closed", "Yopildi")]
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="conversations")
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="conversations")
     social_post = models.ForeignKey(SocialPost, null=True, blank=True, on_delete=models.SET_NULL, related_name="conversations")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="ai")
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="assigned_conversations")
@@ -454,7 +435,6 @@ class LeadStatus(TimeStampedModel):
 
 class Lead(TimeStampedModel):
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="leads")
-    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="leads")
     conversation = models.ForeignKey(Conversation, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     social_post = models.ForeignKey(SocialPost, null=True, blank=True, on_delete=models.SET_NULL, related_name="leads")
     status = models.CharField(max_length=40, default="new")
@@ -498,7 +478,6 @@ class LeadCatalogUsage(TimeStampedModel):
 
 class Notification(TimeStampedModel):
     TYPE_CHOICES = [("stock_pending", "Sklad kamaytirilmagan"), ("low_stock", "Kam qoldiq"), ("lead", "Yangi lead"), ("handoff", "Operator kerak"), ("supplier_stock", "Postavshik kirimi"), ("florist_catalog", "Florist ishi"), ("florist_salary", "Florist ish haqi"), ("attendance", "Keldi-ketdi")]
-    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="notifications")
     target_user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE, related_name="notifications")
     notification_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
     title_uz = models.CharField(max_length=180)

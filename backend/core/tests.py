@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply
@@ -20,11 +20,10 @@ from .webhook_services import resolve_instagram_event, resolve_telegram_update
 class BusinessRulesTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("admin", password="password")
-        self.branch = Branch.objects.create(name="Test", code="TEST")
         flower = Flower.objects.create(name_uz="Atirgul", slug="rose")
         variant = FlowerVariant.objects.create(flower=flower, name_uz="Mondial", color_uz="Oq")
-        self.batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="T-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=20000, sale_price_per_stem=30000, sale_price_per_bunch=580000)
-        self.item = CatalogItem.objects.create(branch=self.branch, name_uz="Oq buket", arrangement_type="bouquet", price=500000)
+        self.batch = StockBatch.objects.create(variant=variant, batch_number="T-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=20000, sale_price_per_stem=30000, sale_price_per_bunch=580000)
+        self.item = CatalogItem.objects.create(name_uz="Oq buket", arrangement_type="bouquet", price=500000)
         CatalogComposition.objects.create(catalog_item=self.item, stock_batch=self.batch, quantity_stems=15)
 
     def test_selling_does_not_automatically_deduct_stock(self):
@@ -42,7 +41,7 @@ class BusinessRulesTests(TestCase):
             deduct_catalog_stock(self.item, self.user)
 
     def test_catalog_partial_sales_deduct_composition_per_quantity(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Qizil set", arrangement_type="bouquet", price=900000, quantity_total=10, status="available")
+        item = CatalogItem.objects.create(name_uz="Qizil set", arrangement_type="bouquet", price=900000, quantity_total=10, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=3)
         mark_catalog_sold(item, self.user, quantity=3)
         item.refresh_from_db()
@@ -55,7 +54,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(item.status, "available")
 
     def test_catalog_discounted_sale_requires_reason_and_creates_history(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
+        item = CatalogItem.objects.create(name_uz="Skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
         with self.assertRaises(ValueError):
             mark_catalog_sold(item, self.user, quantity=1, sale_price=450000)
         mark_catalog_sold(item, self.user, quantity=1, sale_price=450000, discount_reason="Doimiy mijoz")
@@ -68,11 +67,18 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(history.discount_percent, Decimal("10.00"))
         self.assertEqual(history.discount_reason, "Doimiy mijoz")
 
+    def test_ai_stock_rows_return_first_available_batch_per_variant(self):
+        StockBatch.objects.create(variant=self.batch.variant, batch_number="T-2", height_cm=60, stems_per_bunch=20, received_stems=200, remaining_stems=200, cost_per_stem=21000, sale_price_per_stem=35000, sale_price_per_bunch=680000, received_at=timezone.localdate() + timedelta(days=1))
+        rows = ai_stock_rows("atirgul mondial", limit=10)
+        batch_ids = [row["batch_id"] for row in rows]
+        self.assertIn(self.batch.id, batch_ids)
+        self.assertNotIn(StockBatch.objects.get(batch_number="T-2").id, batch_ids)
+
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
-        florist = FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
-        FloristVolumeRate.objects.create(branch=self.branch, arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
-        packaging = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Test qogoz", cost_price=10000, sale_price=20000, quantity=5)
+        florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
+        FloristVolumeRate.objects.create(arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
+        packaging = Packaging.objects.create(packaging_type="wrap", name_uz="Test qogoz", cost_price=10000, sale_price=20000, quantity=5)
         serializer = CatalogItemSerializer(data={
             "name_uz": "Custom buket",
             "arrangement_type": "bouquet",
@@ -109,7 +115,7 @@ class BusinessRulesTests(TestCase):
 
     def test_custom_catalog_accepts_custom_volume_and_manual_salary_amount(self):
         florist_user = User.objects.create_user("custom-florist", password="password", first_name="Ali")
-        florist = FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
         serializer = CatalogItemSerializer(data={
             "name_uz": "Juda katta custom buket",
             "arrangement_type": "bouquet",
@@ -154,7 +160,6 @@ class BusinessRulesTests(TestCase):
         })
         self.assertTrue(serializer.is_valid(), serializer.errors)
         profile = serializer.save()
-        self.assertEqual(profile.branch, self.branch)
         self.assertEqual(profile.daily_pay, Decimal("0"))
         self.assertEqual(profile.volume_rates.count(), 2)
         self.assertTrue(profile.volume_rates.filter(arrangement_type="basket", volume="large", florist_fee=Decimal("120000.00")).exists())
@@ -164,7 +169,7 @@ class BusinessRulesTests(TestCase):
 
     def test_apprentice_daily_salary_update_requires_reason(self):
         apprentice_user = User.objects.create_user("apprentice", password="password", first_name="Vali")
-        apprentice = FloristProfile.objects.create(user=apprentice_user, branch=self.branch, staff_type="apprentice", daily_pay=100000)
+        apprentice = FloristProfile.objects.create(user=apprentice_user, staff_type="apprentice", daily_pay=100000)
         entry = FloristSalaryEntry.objects.create(florist=apprentice, source="daily", amount=100000, work_date=timezone.localdate(), note="Kunlik")
         serializer = FloristSalaryEntrySerializer(entry, data={"amount": "120000.00"}, partial=True)
         self.assertFalse(serializer.is_valid())
@@ -186,7 +191,7 @@ class BusinessRulesTests(TestCase):
                     "image": SimpleUploadedFile("shokolad.jpg", b"image-bytes", content_type="image/jpeg"),
                 })
                 self.assertTrue(serializer.is_valid(), serializer.errors)
-                packaging = serializer.save(branch=self.branch)
+                packaging = serializer.save()
                 data = PackagingSerializer(packaging).data
                 self.assertEqual(data["quantity_label"], "12 dona")
                 self.assertTrue(data["image_url"].endswith("shokolad.jpg"))
@@ -208,14 +213,24 @@ class BusinessRulesTests(TestCase):
         from .services import ai_catalog_rows
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
+        CatalogItem.objects.create(name_uz="Sotilgan buket", arrangement_type="bouquet", price=500000, status="available", quantity_total=1, quantity_sold=1)
+        CatalogItem.objects.create(name_uz="Arxiv buket", arrangement_type="bouquet", price=500000, status="archived")
         for query in ["vitrina", "vitrinada qanaqa gulla bor", "katalogdagi tayyor mahsulotlar"]:
             rows = ai_catalog_rows(query)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["name_uz"], "Oq buket")
 
+    def test_recent_catalog_item_ignores_unavailable_metadata(self):
+        from .services import recent_catalog_item_for_conversation
+        customer = Customer.objects.create(instagram_user_id="ig-recent-catalog")
+        conversation = Conversation.objects.create(customer=customer)
+        sold = CatalogItem.objects.create(name_uz="Eski katalog", arrangement_type="bouquet", price=500000, status="available", quantity_total=1, quantity_sold=1)
+        conversation.messages.create(sender="ai", text="Eski rasm", metadata={"catalog_items": [{"catalog_id": sold.id, "quantity": 1}]})
+        self.assertIsNone(recent_catalog_item_for_conversation(conversation))
+
     def test_ai_lead_requires_valid_customer_phone(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="ig-test")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="buyurtma")
         from unittest.mock import patch
         with patch("core.services.ai_reply", return_value={"reply": "Qabul qilindi", "detected_language": "uz", "customer_name": "Ahmad", "phone": "+998 ** *** ** 67", "lead_ready": True, "lead_request": "Test lead", "arrangement_type": "bouquet", "estimated_price": 100000, "handoff": False}):
@@ -226,8 +241,8 @@ class BusinessRulesTests(TestCase):
         self.assertFalse(Lead.objects.filter(customer=customer).exists())
 
     def test_ai_lead_requires_customer_name(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-test-2", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="ig-test-2", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="buyurtma")
         from unittest.mock import patch
         with patch("core.services.ai_reply", return_value={"reply": "Qabul qilindi", "detected_language": "uz", "customer_name": None, "phone": "+998901234567", "lead_ready": True, "lead_request": "Test lead", "arrangement_type": "bouquet", "estimated_price": 100000, "handoff": False}):
@@ -241,11 +256,11 @@ class BusinessRulesTests(TestCase):
         self.item.arrangement_type = "basket"
         self.item.image_url = "https://example.com/oq-buket.jpg"
         self.item.save(update_fields=["status", "arrangement_type", "image_url", "updated_at"])
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-single-catalog")
-        post = SocialPost.objects.create(branch=self.branch, post_type="story", media_id="story-oq-buket", title_uz="Oq buket", title_ru="White bouquet", price=500000, is_active=True)
+        customer = Customer.objects.create(instagram_user_id="ig-single-catalog")
+        post = SocialPost.objects.create(post_type="story", media_id="story-oq-buket", title_uz="Oq buket", title_ru="White bouquet", price=500000, is_active=True)
         self.item.social_post = post
         self.item.save(update_fields=["social_post", "updated_at"])
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch, social_post=post)
+        conversation = Conversation.objects.create(customer=customer, social_post=post)
         conversation.messages.create(sender="customer", text="bu nechpul")
         payload = {
             "reply": "Savatga yasalgan vitrinadagi gullarimiz\n\n1. Oq buket\n2.\nQaysini tanlaysiz, rasmni ko'rsataman?",
@@ -275,8 +290,8 @@ class BusinessRulesTests(TestCase):
         self.item.arrangement_type = "basket"
         self.item.image_url = "https://example.com/oq-buket.jpg"
         self.item.save(update_fields=["status", "arrangement_type", "image_url", "updated_at"])
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-single-catalog-filter")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="ig-single-catalog-filter")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="savat katalog")
         payload = {
             "reply": "Savatga yasalgan vitrinadagi gullarimiz\n\n1. Oq buket\n2.\nQaysini tanlaysiz, rasmni ko'rsataman?",
@@ -305,9 +320,9 @@ class BusinessRulesTests(TestCase):
         self.item.status = "available"
         self.item.image_url = "https://example.com/oq-buket.jpg"
         self.item.save(update_fields=["status", "image_url", "updated_at"])
-        second = CatalogItem.objects.create(branch=self.branch, name_uz="Pushti buket", arrangement_type="bouquet", price=600000, status="available", image_url="https://example.com/pushti-buket.jpg")
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-multi-catalog")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        second = CatalogItem.objects.create(name_uz="Pushti buket", arrangement_type="bouquet", price=600000, status="available", image_url="https://example.com/pushti-buket.jpg")
+        customer = Customer.objects.create(instagram_user_id="ig-multi-catalog")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="shu ikkalasini rasmini yuboring")
         payload = {
             "reply": "Rasmlarini ko'rsataman.",
@@ -332,8 +347,8 @@ class BusinessRulesTests(TestCase):
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-tools", name="Ahmad")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="ig-tools", name="Ahmad")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="qanaqa gullar bor")
         conversation.messages.create(sender="ai", text="Skladimizda bor", metadata={"tool_results": [{"name": "get_stock", "output": {"stock": [{"price_per_stem": "105000.00"}]}}]})
         payload = {
@@ -366,8 +381,8 @@ class BusinessRulesTests(TestCase):
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_adds_greeting_control_for_first_batched_greeting(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-greeting-batch")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="ig-greeting-batch")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="Ассалому Алайкум")
         conversation.messages.create(sender="customer", text="гортензия кере")
         payload = {
@@ -398,27 +413,27 @@ class BusinessRulesTests(TestCase):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
 
     def test_get_catalog_tool_filters_baskets(self):
-        basket = CatalogItem.objects.create(branch=self.branch, name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
+        basket = CatalogItem.objects.create(name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:11")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:11")
+        conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": "basket"}, conversation)
         names = {row["name_uz"] for row in result["catalog"]}
         self.assertIn(basket.name_uz, names)
         self.assertNotIn(self.item.name_uz, names)
 
     def test_get_stock_tool_does_not_return_baskets_when_flower_is_missing(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:13")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:13")
+        conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("get_stock", {"query": "gortenziya"}, conversation)
         self.assertEqual(result, {"stock": []})
 
     def test_send_stock_image_tool_sends_flower_image(self):
         self.batch.image_url = "https://example.com/freedom.jpg"
         self.batch.save(update_fields=["image_url", "updated_at"])
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:13")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:13")
+        conversation = Conversation.objects.create(customer=customer)
         from unittest.mock import patch
         with patch("core.services.telegram_send_image", return_value={"ok": True}) as image_mock:
             result = execute_ai_tool("send_stock_image", {"query": "Mondial", "batch_id": None}, conversation)
@@ -429,8 +444,8 @@ class BusinessRulesTests(TestCase):
     def test_client_lead_create_tool_creates_customer_lead_and_usage(self):
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:10")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:10")
+        conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("client_lead_create", {
             "customer_name": "Ahmad",
             "phone": "901234567",
@@ -451,9 +466,9 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(LeadCatalogUsage.objects.filter(lead=lead, catalog_item=self.item, quantity=1).exists())
 
     def test_client_lead_edit_infers_pickup_when_request_text_missing(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:12", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
-        lead = Lead.objects.create(customer=customer, branch=self.branch, conversation=conversation, request_uz="Pion buketi 1 dona katalogdan. kelib olish yoki yetkazib berish tanlanmagan.")
+        customer = Customer.objects.create(instagram_user_id="telegram:12", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
+        lead = Lead.objects.create(customer=customer, conversation=conversation, request_uz="Pion buketi 1 dona katalogdan. kelib olish yoki yetkazib berish tanlanmagan.")
         conversation.messages.create(sender="customer", text="borib olaman")
         result = execute_ai_tool("client_lead_edit", {
             "lead_id": lead.id,
@@ -486,8 +501,8 @@ class BusinessRulesTests(TestCase):
         flower = Flower.objects.create(name_uz="Gortenziya", slug="gortenziya-display")
         golland = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Golland", color_uz="Moviy")
         kolumbiya = FlowerVariant.objects.create(flower=flower, name_uz="Gortenziya Kolumbiya", color_uz="Moviy")
-        StockBatch.objects.create(branch=self.branch, variant=golland, batch_number="GOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=70000, sale_price_per_stem=105000, sale_price_per_bunch=500000)
-        StockBatch.objects.create(branch=self.branch, variant=kolumbiya, batch_number="KOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=35000, sale_price_per_stem=60000, sale_price_per_bunch=285000)
+        StockBatch.objects.create(variant=golland, batch_number="GOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=70000, sale_price_per_stem=105000, sale_price_per_bunch=500000)
+        StockBatch.objects.create(variant=kolumbiya, batch_number="KOL-1", height_cm=50, stems_per_bunch=5, received_stems=20, remaining_stems=20, cost_per_stem=35000, sale_price_per_stem=60000, sale_price_per_bunch=285000)
         rows = ai_stock_rows("gortenziya kok", limit=10)
         rows_by_name = {row["display_name_uz"]: row for row in rows}
         self.assertIn("Gortenziya Golland Moviy", rows_by_name)
@@ -503,8 +518,8 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(any(row["variant_uz"] == "Snowball" and row["active_stock"] == [] for row in rows))
 
     def test_pending_customer_reply_debounces_to_latest_message(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="ig-debounce", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
         first = conversation.messages.create(sender="customer", text="katalog")
         second = conversation.messages.create(sender="customer", text="rasmlari bormi")
         from unittest.mock import patch
@@ -518,8 +533,8 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(conversation.ai_replied_to_message_id, second.id)
 
     def test_delayed_reply_waits_until_latest_message_is_old_enough(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:444", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:444", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
         message = conversation.messages.create(sender="customer", text="salom")
         from unittest.mock import patch
         with patch("core.tasks.process_delayed_telegram_reply.apply_async") as schedule_mock, patch("core.tasks.process_pending_customer_reply") as reply_mock:
@@ -529,8 +544,8 @@ class BusinessRulesTests(TestCase):
         reply_mock.assert_not_called()
 
     def test_pending_customer_reply_handles_empty_social_post(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-no-post", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch, social_post=None)
+        customer = Customer.objects.create(instagram_user_id="ig-no-post", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer, social_post=None)
         message = conversation.messages.create(sender="customer", text="salom")
         from unittest.mock import patch
         with patch("core.services.create_ai_reply_for_conversation", side_effect=lambda conv: Message.objects.create(conversation=conv, sender="ai", text="Javob")):
@@ -540,8 +555,8 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(conversation.ai_replied_to_message_id, message.id)
 
     def test_conversation_serializer_exposes_ai_active_and_clears_expired_pause(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-pause")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch, ai_paused_until=timezone.now() - timedelta(minutes=1), ai_pause_reason="operator_message")
+        customer = Customer.objects.create(instagram_user_id="ig-pause")
+        conversation = Conversation.objects.create(customer=customer, ai_paused_until=timezone.now() - timedelta(minutes=1), ai_pause_reason="operator_message")
         data = ConversationSerializer(conversation).data
         conversation.refresh_from_db()
         self.assertTrue(data["ai_is_active"])
@@ -549,8 +564,8 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(conversation.ai_pause_reason, "")
 
     def test_delayed_instagram_reply_does_not_show_typing_when_ai_paused(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-paused")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch, ai_paused_until=timezone.now() + timedelta(minutes=15), ai_pause_reason="operator_message")
+        customer = Customer.objects.create(instagram_user_id="ig-paused")
+        conversation = Conversation.objects.create(customer=customer, ai_paused_until=timezone.now() + timedelta(minutes=15), ai_pause_reason="operator_message")
         message = conversation.messages.create(sender="customer", text="salom")
         from unittest.mock import patch
         with patch("core.tasks.instagram_sender_action") as typing_mock, patch("core.tasks.process_pending_customer_reply") as reply_mock:
@@ -563,8 +578,8 @@ class BusinessRulesTests(TestCase):
         self.item.status = "available"
         self.item.image_url = "https://example.com/oq-buket.jpg"
         self.item.save(update_fields=["status", "image_url", "updated_at"])
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(seconds=8))
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Mana rasmi", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}]})
@@ -575,8 +590,8 @@ class BusinessRulesTests(TestCase):
         text_mock.assert_called_once_with("555", "Mana rasmi")
 
     def test_delayed_telegram_reply_skips_context_image_after_tool_image(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(instagram_user_id="telegram:123", name="Ahmad", phone="+998901234567")
+        conversation = Conversation.objects.create(customer=customer)
         customer_message = conversation.messages.create(sender="customer", text="oq buket rasmi")
         Message.objects.filter(id=customer_message.id).update(created_at=timezone.now() - timedelta(seconds=8))
         reply_message = Message.objects.create(conversation=conversation, sender="ai", text="Rasmini yubordim.", metadata={"catalog_items": [{"catalog_id": self.item.id, "quantity": 1}], "image_tool_results": [{"image_sent": True, "catalog_id": self.item.id}]})
@@ -601,7 +616,7 @@ class BusinessRulesTests(TestCase):
         self.assertIn("24/7", messages[1])
 
     def test_telegram_update_creates_conversation_message_once(self):
-        SocialPost.objects.create(branch=self.branch, post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
+        SocialPost.objects.create(post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
         payload = {
             "update_id": 1001,
             "message": {
@@ -620,7 +635,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(resolve_telegram_update(payload), [])
 
     def test_instagram_media_links_are_saved_in_chat_message(self):
-        SocialPost.objects.create(branch=self.branch, post_type="story", title_uz="Story", title_ru="Story", is_active=True)
+        SocialPost.objects.create(post_type="story", title_uz="Story", title_ru="Story", is_active=True)
         payload = {
             "entry": [{
                 "messaging": [{
@@ -649,7 +664,6 @@ class BusinessRulesTests(TestCase):
 
     def test_instagram_story_reply_links_catalog_by_active_story_asset_url(self):
         post = SocialPost.objects.create(
-            branch=self.branch,
             post_type="story",
             media_id="story-share-3946136376066774555",
             permalink="https://www.instagram.com/stories/extra_teest/3946136376066774555/",
@@ -661,7 +675,6 @@ class BusinessRulesTests(TestCase):
             is_active=True,
         )
         CatalogItem.objects.create(
-            branch=self.branch,
             social_post=post,
             name_uz="Pion buketi",
             arrangement_type="bouquet",
@@ -703,7 +716,6 @@ class BusinessRulesTests(TestCase):
 
     def test_instagram_story_reply_creates_social_post_from_catalog_story_url(self):
         item = CatalogItem.objects.create(
-            branch=self.branch,
             name_uz="Pushti atirgul buketi",
             arrangement_type="bouquet",
             price=500000,
@@ -747,7 +759,6 @@ class BusinessRulesTests(TestCase):
 
     def test_instagram_lookaside_base_url_does_not_match_other_story(self):
         SocialPost.objects.create(
-            branch=self.branch,
             post_type="story",
             media_id="18151925590500461",
             permalink="https://www.instagram.com/stories/extra_teest/3948457236253594433/",
@@ -789,9 +800,9 @@ class BusinessRulesTests(TestCase):
         self.assertIn("bazadagi story/post/reel katalogiga bog‘lanmagan", message.text)
 
     def test_unknown_instagram_media_clears_previous_post_context(self):
-        old_post = SocialPost.objects.create(branch=self.branch, post_type="reel", media_id="old-pion", title_uz="Pion buket", title_ru="Pion", is_active=True)
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="ig-user-2")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch, social_post=old_post)
+        old_post = SocialPost.objects.create(post_type="reel", media_id="old-pion", title_uz="Pion buket", title_ru="Pion", is_active=True)
+        customer = Customer.objects.create(instagram_user_id="ig-user-2")
+        conversation = Conversation.objects.create(customer=customer, social_post=old_post)
         payload = {
             "entry": [{
                 "messaging": [{
@@ -816,7 +827,7 @@ class BusinessRulesTests(TestCase):
         self.assertIn("bazadagi story/post/reel katalogiga bog‘lanmagan", message.text)
 
     def test_telegram_voice_link_is_saved_in_chat_message(self):
-        SocialPost.objects.create(branch=self.branch, post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
+        SocialPost.objects.create(post_type="post", title_uz="Test post", title_ru="Test post", is_active=True)
         IntegrationSettings.objects.update_or_create(pk=1, defaults={"telegram_bot_token": "test-token"})
         payload = {
             "update_id": 1002,
@@ -849,19 +860,18 @@ class ApiTests(TestCase):
         self.user = User.objects.create_user("admin", password="password", is_superuser=True, is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(self.user)
-        self.branch = Branch.objects.create(name="API Test", code="API")
         flower = Flower.objects.create(name_uz="Atirgul API", slug="rose-api")
         variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
-        self.batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="API-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=400000)
+        self.batch = StockBatch.objects.create(variant=variant, batch_number="API-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=400000)
 
     def test_dashboard_requires_authentication(self):
         response = APIClient().get("/api/dashboard/")
         self.assertEqual(response.status_code, 401)
 
     def test_dashboard_includes_daily_chart_stats_for_default_month(self):
-        customer = Customer.objects.create(branch=self.branch, name="Chart User", phone="+998901234567", instagram_user_id="chart-user")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
-        lead = Lead.objects.create(customer=customer, branch=self.branch, conversation=conversation, request_uz="Chart lead", arrangement_type="catalog")
+        customer = Customer.objects.create(name="Chart User", phone="+998901234567", instagram_user_id="chart-user")
+        conversation = Conversation.objects.create(customer=customer)
+        lead = Lead.objects.create(customer=customer, conversation=conversation, request_uz="Chart lead", arrangement_type="catalog")
         today = timezone.localdate()
         created_at = timezone.now()
         Conversation.objects.filter(id=conversation.id).update(created_at=created_at)
@@ -881,9 +891,8 @@ class ApiTests(TestCase):
         self.assertEqual(response.json(), 123)
 
     def test_customers_list_hides_incomplete_placeholders(self):
-        branch = Branch.objects.create(name="Test", code="CUST")
-        Customer.objects.create(branch=branch, instagram_user_id="placeholder")
-        Customer.objects.create(branch=branch, instagram_user_id="complete", name="Ahmad", phone="+998901234567")
+        Customer.objects.create(instagram_user_id="placeholder")
+        Customer.objects.create(instagram_user_id="complete", name="Ahmad", phone="+998901234567")
         response = self.client.get("/api/customers/")
         self.assertEqual(response.status_code, 200)
         ids = [row["instagram_user_id"] for row in response.json()["results"]]
@@ -894,8 +903,8 @@ class ApiTests(TestCase):
         self.assertIn("placeholder", ids)
 
     def test_customer_delete_archives_when_leads_exist(self):
-        customer = Customer.objects.create(branch=self.branch, instagram_user_id="delete-me", name="Ahmad", phone="+998901234567")
-        Lead.objects.create(customer=customer, branch=self.branch, request_uz="Test buyurtma")
+        customer = Customer.objects.create(instagram_user_id="delete-me", name="Ahmad", phone="+998901234567")
+        Lead.objects.create(customer=customer, request_uz="Test buyurtma")
         response = self.client.delete(f"/api/customers/{customer.id}/")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["archived"])
@@ -908,10 +917,10 @@ class ApiTests(TestCase):
         self.assertNotIn(customer.id, ids)
 
     def test_social_post_response_includes_lead_ids(self):
-        post = SocialPost.objects.create(branch=self.branch, post_type="story", title_uz="Story buket", title_ru="Story bouquet", is_active=True)
-        customer = Customer.objects.create(branch=self.branch, name="Madina", phone="+998901234567", instagram_user_id="ig-lead")
-        lead = Lead.objects.create(customer=customer, branch=self.branch, social_post=post, status="won", request_uz="Storydagi buket", arrangement_type="catalog", estimated_price=400000)
-        item = CatalogItem.objects.create(branch=self.branch, social_post=post, name_uz="Qizil buket", arrangement_type="bouquet", price=400000, quantity_total=4, status="available")
+        post = SocialPost.objects.create(post_type="story", title_uz="Story buket", title_ru="Story bouquet", is_active=True)
+        customer = Customer.objects.create(name="Madina", phone="+998901234567", instagram_user_id="ig-lead")
+        lead = Lead.objects.create(customer=customer, social_post=post, status="won", request_uz="Storydagi buket", arrangement_type="catalog", estimated_price=400000)
+        item = CatalogItem.objects.create(social_post=post, name_uz="Qizil buket", arrangement_type="bouquet", price=400000, quantity_total=4, status="available")
         lead.catalog_usage.create(catalog_item=item, quantity=1)
         response = self.client.get(f"/api/social-posts/{post.id}/")
         self.assertEqual(response.status_code, 200)
@@ -923,8 +932,7 @@ class ApiTests(TestCase):
 
     def test_social_post_create_accepts_catalog_composition(self):
         response = self.client.post("/api/social-posts/", {
-            "branch": self.branch.id,
-            "post_type": "post",
+                        "post_type": "post",
             "media_id": "api-post-composition",
             "title_uz": "Atirgul post",
             "title_ru": "Розовый пост",
@@ -958,10 +966,9 @@ class ApiTests(TestCase):
     def test_social_post_custom_catalog_merges_multiple_flower_payloads_into_one_item(self):
         flower = Flower.objects.create(name_uz="Pion API", slug="pion-api")
         variant = FlowerVariant.objects.create(flower=flower, name_uz="Sarah", color_uz="Pushti")
-        second_batch = StockBatch.objects.create(branch=self.branch, variant=variant, batch_number="API-2", height_cm=55, stems_per_bunch=10, received_stems=80, remaining_stems=80, cost_per_stem=50000, sale_price_per_stem=80000, sale_price_per_bunch=800000)
+        second_batch = StockBatch.objects.create(variant=variant, batch_number="API-2", height_cm=55, stems_per_bunch=10, received_stems=80, remaining_stems=80, cost_per_stem=50000, sale_price_per_stem=80000, sale_price_per_bunch=800000)
         response = self.client.post("/api/social-posts/", {
-            "branch": self.branch.id,
-            "post_type": "post",
+                        "post_type": "post",
             "media_id": "api-post-custom-merge",
             "title_uz": "Custom",
             "title_ru": "Custom",
@@ -1003,7 +1010,7 @@ class ApiTests(TestCase):
         self.assertTrue(item.composition.filter(stock_batch=second_batch, quantity_stems=3).exists())
 
     def test_catalog_create_deducts_flowers_and_materials_then_delete_restores_unsold(self):
-        material = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Koreya qogoz", quantity=10, sale_price=50000)
+        material = Packaging.objects.create(packaging_type="wrap", name_uz="Koreya qogoz", quantity=10, sale_price=50000)
         payload = {
             "name_uz": "Materialli buket",
             "arrangement_type": "bouquet",
@@ -1039,7 +1046,7 @@ class ApiTests(TestCase):
         self.assertEqual(material.quantity, 10)
 
     def test_catalog_create_merges_duplicate_composition_and_material_rows(self):
-        material = Packaging.objects.create(branch=self.branch, packaging_type="wrap", name_uz="Dubl qogoz", quantity=20, sale_price=50000)
+        material = Packaging.objects.create(packaging_type="wrap", name_uz="Dubl qogoz", quantity=20, sale_price=50000)
         response = self.client.post("/api/catalog/", {
             "name_uz": "Dubl rows buket",
             "arrangement_type": "bouquet",
@@ -1068,22 +1075,23 @@ class ApiTests(TestCase):
         self.assertEqual(material.quantity, 14)
 
     def test_catalog_sell_api_accepts_discounted_price_with_reason(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="API skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
+        item = CatalogItem.objects.create(name_uz="API skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00"}, format="json")
         self.assertEqual(response.status_code, 400)
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00", "discount_reason": "VIP mijoz"}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00", "discount_reason": "VIP mijoz", "payment_type": "card"}, format="json")
         self.assertEqual(response.status_code, 200, response.json())
         item.refresh_from_db()
         self.assertEqual(item.quantity_sold, 1)
         history = item.history.get(action="sold")
         self.assertEqual(history.discount_amount, Decimal("50000.00"))
         self.assertEqual(history.discount_reason, "VIP mijoz")
+        self.assertEqual(history.snapshot["payment_type"], "card")
 
     def test_conversation_response_includes_source(self):
-        instagram_customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
-        telegram_customer = Customer.objects.create(branch=self.branch, name="Telegram", phone="+998901234568", instagram_user_id="telegram:123")
-        instagram_conversation = Conversation.objects.create(customer=instagram_customer, branch=self.branch)
-        telegram_conversation = Conversation.objects.create(customer=telegram_customer, branch=self.branch)
+        instagram_customer = Customer.objects.create(name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
+        telegram_customer = Customer.objects.create(name="Telegram", phone="+998901234568", instagram_user_id="telegram:123")
+        instagram_conversation = Conversation.objects.create(customer=instagram_customer)
+        telegram_conversation = Conversation.objects.create(customer=telegram_customer)
         response = self.client.get(f"/api/conversations/{instagram_conversation.id}/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["source"], "instagram")
@@ -1094,8 +1102,8 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["source_label"], "Telegram")
 
     def test_operator_send_uses_telegram_for_telegram_conversation(self):
-        customer = Customer.objects.create(branch=self.branch, name="Telegram", phone="+998901234568", instagram_user_id="telegram:123")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(name="Telegram", phone="+998901234568", instagram_user_id="telegram:123")
+        conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="Salom", instagram_message_id="telegram:555:77")
         from unittest.mock import patch
         with patch("core.views.telegram_send", return_value={"ok": True}) as telegram_mock, patch("core.views.instagram_send", return_value={"ok": True}) as instagram_mock:
@@ -1105,8 +1113,8 @@ class ApiTests(TestCase):
         instagram_mock.assert_not_called()
 
     def test_operator_send_records_failed_delivery_when_instagram_rejects(self):
-        customer = Customer.objects.create(branch=self.branch, name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
-        conversation = Conversation.objects.create(customer=customer, branch=self.branch)
+        customer = Customer.objects.create(name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
+        conversation = Conversation.objects.create(customer=customer)
         response_obj = requests.Response()
         response_obj.status_code = 403
         response_obj._content = b'{"error":{"message":"Forbidden"}}'
@@ -1120,9 +1128,9 @@ class ApiTests(TestCase):
         message = conversation.messages.get(sender="operator", text="Javob")
         self.assertEqual(message.metadata["delivery_status"], "failed")
 
-    def test_branches_endpoint_is_registered(self):
+    def test_branches_endpoint_is_removed(self):
         response = self.client.get("/api/branches/")
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 404)
 
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
@@ -1154,18 +1162,18 @@ class ApiTests(TestCase):
         response = self.client.get("/api/audit/")
         self.assertEqual(response.status_code, 200)
 
-    def test_single_branch_mode_hides_branch_fields_and_defaults_branch(self):
+    def test_branchless_mode_hides_branch_fields(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="users", can_view=True, can_control=True)
         response = self.client.post("/api/users/", {
-            "username": "branch-default",
+            "username": "branchless-user",
             "password": "Password123!",
             "role": "operator",
             "permissions": [{"page": "conversations", "can_view": True, "can_control": True}]
         }, format="json")
         self.assertEqual(response.status_code, 201)
-        created = User.objects.get(username="branch-default")
-        self.assertIn(self.branch, list(created.profile.branches.all()))
+        created = User.objects.get(username="branchless-user")
+        self.assertFalse(hasattr(created.profile, "branches"))
         self.assertNotIn("branches", response.json()["profile"])
         response = self.client.post("/api/packaging/", {"packaging_type": "basket", "name_uz": "Branchsiz savat", "quantity": 1, "sale_price": "100000.00"}, format="json")
         self.assertEqual(response.status_code, 201)
@@ -1198,10 +1206,10 @@ class ApiTests(TestCase):
         UserProfile.objects.create(user=self.user, role="admin")
         florist_user = User.objects.create_user("target-florist", password="password", first_name="Ali")
         UserProfile.objects.create(user=florist_user, role="florist")
-        FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        FloristProfile.objects.create(user=florist_user, staff_type="florist")
         PagePermission.objects.create(user=florist_user, page="notifications", can_view=True, can_control=False)
-        Notification.objects.create(branch=self.branch, notification_type="lead", title_uz="Global", title_ru="Global", body_uz="Global", body_ru="Global")
-        target = Notification.objects.create(branch=self.branch, target_user=florist_user, notification_type="florist_salary", title_uz="Target", title_ru="Target", body_uz="Target", body_ru="Target")
+        Notification.objects.create(notification_type="lead", title_uz="Global", title_ru="Global", body_uz="Global", body_ru="Global")
+        target = Notification.objects.create(target_user=florist_user, notification_type="florist_salary", title_uz="Target", title_ru="Target", body_uz="Target", body_ru="Target")
         self.client.force_authenticate(florist_user)
         response = self.client.get("/api/notifications/")
         self.assertEqual(response.status_code, 200)
@@ -1219,7 +1227,7 @@ class ApiTests(TestCase):
         PagePermission.objects.create(user=self.user, page="notifications", can_view=True, can_control=False)
         florist_user = User.objects.create_user("checkin-florist", password="password", first_name="Ali")
         UserProfile.objects.create(user=florist_user, role="florist")
-        FloristProfile.objects.create(user=florist_user, branch=self.branch, staff_type="florist")
+        FloristProfile.objects.create(user=florist_user, staff_type="florist")
         PagePermission.objects.create(user=florist_user, page="attendance", can_view=True, can_control=True)
         self.client.force_authenticate(florist_user)
         response = self.client.post("/api/florist-attendance/check-in/", {"checked_at": "2026-07-27T09:00:00+05:00"}, format="json")
@@ -1248,15 +1256,14 @@ class ApiTests(TestCase):
         self.assertTrue(all(row["page"] == "users" for row in response.json()["results"]))
 
     def test_packaging_movement_updates_quantity(self):
-        branch = Branch.objects.create(name="Packaging", code="PKG")
-        response = self.client.post("/api/packaging/", {"branch": branch.id, "packaging_type": "basket", "name_uz": "API savat", "quantity": 4, "sale_price": "90000.00"}, format="json")
+        response = self.client.post("/api/packaging/", {"packaging_type": "basket", "name_uz": "API savat", "quantity": 4, "sale_price": "90000.00"}, format="json")
         self.assertEqual(response.status_code, 201)
         api_packaging = Packaging.objects.get(id=response.json()["id"])
         self.assertTrue(PackagingMovement.objects.filter(packaging=api_packaging, movement_type="in", quantity=4).exists())
         response = self.client.patch(f"/api/packaging/{api_packaging.id}/", {"quantity": 6}, format="json")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(PackagingMovement.objects.filter(packaging=api_packaging, movement_type="adjustment", quantity=2).exists())
-        packaging = Packaging.objects.create(branch=branch, packaging_type="basket", name_uz="Test savat", quantity=10, sale_price=100000)
+        packaging = Packaging.objects.create(packaging_type="basket", name_uz="Test savat", quantity=10, sale_price=100000)
         response = self.client.post(f"/api/packaging/{packaging.id}/movement/", {"movement_type": "out", "quantity": 3, "reason": "test"}, format="json")
         self.assertEqual(response.status_code, 200)
         packaging.refresh_from_db()
@@ -1288,12 +1295,11 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["remaining_bunches"], "3.00")
 
     def test_mini_app_lead_history_returns_customer_orders(self):
-        branch = Branch.objects.create(name="Mini", code="MINI")
-        CatalogItem.objects.create(branch=branch, name_uz="Mini katalog", arrangement_type="bouquet", price=250000, status="available")
+        CatalogItem.objects.create(name_uz="Mini katalog", arrangement_type="bouquet", price=250000, status="available")
         init_data = 'user={"id":777,"first_name":"Ali"}'
-        payload = {"init_data": init_data, "branch": branch.id, "arrangement_type": "basket", "request_text": "7 ta gortenziya savatga", "name": "Ali", "phone": "901234567", "note": "Bugun kerak"}
+        payload = {"init_data": init_data, "arrangement_type": "basket", "request_text": "7 ta gortenziya savatga", "name": "Ali", "phone": "901234567", "note": "Bugun kerak"}
         from unittest.mock import patch
-        quote = {"branch": branch, "lines": [{"type": "custom_text", "request_text": "7 ta gortenziya savatga"}], "packaging": None, "florist_fee": "50000", "estimated_price": "750000", "price_is_estimate": True, "ai_note": "Taxminiy narx"}
+        quote = {"lines": [{"type": "custom_text", "request_text": "7 ta gortenziya savatga"}], "packaging": None, "florist_fee": "50000", "estimated_price": "750000", "price_is_estimate": True, "ai_note": "Taxminiy narx"}
         with patch("core.views.mini_app_custom_quote_ai", return_value=quote):
             response = APIClient().post("/api/mini-app/leads/", payload, format="json")
         self.assertEqual(response.status_code, 201)
@@ -1314,7 +1320,7 @@ class ApiTests(TestCase):
         self.assertEqual(leads_data["customer"]["name"], "Ali")
         self.assertEqual(len(leads_data["orders"]), 1)
         self.assertEqual(leads_data["orders"][0]["status"], "new")
-        response = APIClient().get("/api/mini-app/catalog/", {"init_data": init_data, "branch": branch.id})
+        response = APIClient().get("/api/mini-app/catalog/", {"init_data": init_data})
         self.assertEqual(response.status_code, 200)
         catalog_data = response.json()
         self.assertEqual(len(catalog_data["orders"]), 1)
@@ -1324,8 +1330,7 @@ class ApiTests(TestCase):
 
     def test_catalog_create_rejects_short_stock_for_total_quantity(self):
         payload = {
-            "branch": self.branch.id,
-            "name_uz": "Kop buket",
+                        "name_uz": "Kop buket",
             "arrangement_type": "bouquet",
             "price": "100000.00",
             "status": "available",
@@ -1408,10 +1413,9 @@ class ApiTests(TestCase):
         self.assertEqual(rows[0]["image_url"], "https://example.com/freedom.jpg")
 
     def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
-        packaging = Packaging.objects.create(branch=self.branch, packaging_type="basket", name_uz="Lead savat", quantity=2, sale_price=50000)
+        packaging = Packaging.objects.create(packaging_type="basket", name_uz="Lead savat", quantity=2, sale_price=50000)
         payload = {
-            "branch": self.branch.id,
-            "status": "new",
+                        "status": "new",
             "request_uz": "Manual lead",
             "arrangement_type": "basket",
             "estimated_price": "250000.00",
@@ -1453,12 +1457,11 @@ class ApiTests(TestCase):
         self.assertEqual(packaging.quantity, 1)
 
     def test_catalog_lead_stock_returns_when_won_is_reverted(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Catalog buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
+        item = CatalogItem.objects.create(name_uz="Catalog buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
         deduct_catalog_stock(item, self.user)
         payload = {
-            "branch": self.branch.id,
-            "status": "new",
+                        "status": "new",
             "request_uz": "Catalog lead",
             "arrangement_type": "catalog",
             "customer_name": "Sardor",
@@ -1485,12 +1488,11 @@ class ApiTests(TestCase):
         self.assertEqual(item.status, "available")
 
     def test_catalog_lead_stock_returns_when_won_is_deleted(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Delete buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
+        item = CatalogItem.objects.create(name_uz="Delete buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
         deduct_catalog_stock(item, self.user)
         payload = {
-            "branch": self.branch.id,
-            "status": "new",
+                        "status": "new",
             "request_uz": "Delete lead",
             "arrangement_type": "catalog",
             "customer_name": "Sardor",
@@ -1557,10 +1559,10 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["results"], [])
 
     def test_analytics_and_dashboard_include_top_selling_flowers(self):
-        item = CatalogItem.objects.create(branch=self.branch, name_uz="Analytics buket", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")
+        item = CatalogItem.objects.create(name_uz="Analytics buket", arrangement_type="bouquet", price=300000, quantity_total=5, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=4)
-        customer = Customer.objects.create(branch=self.branch, name="Analytics", phone="+998901234501", instagram_user_id="analytics")
-        lead = Lead.objects.create(customer=customer, branch=self.branch, status="won", request_uz="Analytics lead", arrangement_type="catalog", estimated_price=600000, source="instagram")
+        customer = Customer.objects.create(name="Analytics", phone="+998901234501", instagram_user_id="analytics")
+        lead = Lead.objects.create(customer=customer, status="won", request_uz="Analytics lead", arrangement_type="catalog", estimated_price=600000, source="instagram")
         LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=2)
         mark_catalog_sold(item, self.user, quantity=1, sale_price=250000, discount_reason="Analytics skidka")
         response = self.client.get("/api/analytics/")
@@ -1577,16 +1579,22 @@ class ApiTests(TestCase):
         self.assertEqual(data["summary"]["discounted_catalog_sales_count"], 1)
         self.assertEqual(data["summary"]["discounted_catalog_quantity"], 1)
         self.assertEqual(Decimal(str(data["summary"]["discounted_catalog_amount"])), Decimal("50000.00"))
+        response = self.client.get("/api/accounting/")
+        self.assertEqual(response.status_code, 200)
+        accounting = response.json()
+        self.assertEqual(accounting["summary"]["discounted_sales_count"], 1)
+        self.assertEqual(accounting["summary"]["total_quantity"], 1)
+        self.assertEqual(accounting["history"][0]["catalog_name"], "Analytics buket")
         response = self.client.get("/api/dashboard/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["top_selling_flowers"][0]["stems"], 8)
         self.assertEqual(Decimal(str(response.json()["discounted_catalog_amount"])), Decimal("50000.00"))
 
     def test_lead_move_keeps_kanban_position_between_two_leads(self):
-        customer = Customer.objects.create(branch=self.branch, name="Kanban", phone="+998901234567", instagram_user_id="kanban")
-        first = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="First", sort_order=Decimal("1000"))
-        moving = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Moving", sort_order=Decimal("2000"))
-        last = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Last", sort_order=Decimal("3000"))
+        customer = Customer.objects.create(name="Kanban", phone="+998901234567", instagram_user_id="kanban")
+        first = Lead.objects.create(customer=customer, status="new", request_uz="First", sort_order=Decimal("1000"))
+        moving = Lead.objects.create(customer=customer, status="new", request_uz="Moving", sort_order=Decimal("2000"))
+        last = Lead.objects.create(customer=customer, status="new", request_uz="Last", sort_order=Decimal("3000"))
         response = self.client.post(f"/api/leads/{moving.id}/move/", {"status": "new", "before": first.id, "after": last.id}, format="json")
         self.assertEqual(response.status_code, 200)
         moving.refresh_from_db()
@@ -1595,10 +1603,10 @@ class ApiTests(TestCase):
         self.assertEqual(ids, [first.id, moving.id, last.id])
 
     def test_leads_can_be_paginated_by_status_for_kanban_column(self):
-        customer = Customer.objects.create(branch=self.branch, name="Kanban page", phone="+998901234569", instagram_user_id="kanban-page")
-        first = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="First", sort_order=Decimal("1000"))
-        second = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Second", sort_order=Decimal("2000"))
-        Lead.objects.create(customer=customer, branch=self.branch, status="qualified", request_uz="Other column", sort_order=Decimal("1000"))
+        customer = Customer.objects.create(name="Kanban page", phone="+998901234569", instagram_user_id="kanban-page")
+        first = Lead.objects.create(customer=customer, status="new", request_uz="First", sort_order=Decimal("1000"))
+        second = Lead.objects.create(customer=customer, status="new", request_uz="Second", sort_order=Decimal("2000"))
+        Lead.objects.create(customer=customer, status="qualified", request_uz="Other column", sort_order=Decimal("1000"))
         response = self.client.get("/api/leads/", {"status": "new", "page": 1, "page_size": 1})
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -1614,10 +1622,10 @@ class ApiTests(TestCase):
         self.assertGreaterEqual(response.json()["count"], 3)
 
     def test_lead_reorder_column_accepts_full_column_ids(self):
-        customer = Customer.objects.create(branch=self.branch, name="Kanban full", phone="+998901234568", instagram_user_id="kanban-full")
-        first = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="First", sort_order=Decimal("1000"))
-        second = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Second", sort_order=Decimal("2000"))
-        third = Lead.objects.create(customer=customer, branch=self.branch, status="new", request_uz="Third", sort_order=Decimal("3000"))
+        customer = Customer.objects.create(name="Kanban full", phone="+998901234568", instagram_user_id="kanban-full")
+        first = Lead.objects.create(customer=customer, status="new", request_uz="First", sort_order=Decimal("1000"))
+        second = Lead.objects.create(customer=customer, status="new", request_uz="Second", sort_order=Decimal("2000"))
+        third = Lead.objects.create(customer=customer, status="new", request_uz="Third", sort_order=Decimal("3000"))
         response = self.client.post("/api/leads/reorder-column/", {"status": "new", "lead_ids": [third.id, first.id, second.id]}, format="json")
         self.assertEqual(response.status_code, 200)
         ids = list(Lead.objects.filter(status="new").order_by("sort_order").values_list("id", flat=True))

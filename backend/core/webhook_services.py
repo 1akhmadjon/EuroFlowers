@@ -4,7 +4,7 @@ import re
 from django.conf import settings
 from django.db.models import Q
 
-from .models import Branch, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
+from .models import CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
 from .platform_services import find_active_story_by_media_url, find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
 from .services import ingest_customer_message
 
@@ -106,7 +106,7 @@ def social_post_url_query(url):
     return query
 
 
-def social_post_by_media_or_url(media_id="", url="", branch=None):
+def social_post_by_media_or_url(media_id="", url=""):
     query = Q()
     if media_id:
         query |= social_post_media_query(str(media_id))
@@ -115,8 +115,6 @@ def social_post_by_media_or_url(media_id="", url="", branch=None):
     if not query:
         return None
     queryset = SocialPost.objects.filter(query, is_active=True).distinct()
-    if branch:
-        queryset = queryset.filter(branch=branch)
     return queryset.order_by("-updated_at", "-created_at").first()
 
 
@@ -132,13 +130,11 @@ def catalog_item_url_query(url):
     return query
 
 
-def catalog_item_by_url(url="", branch=None):
+def catalog_item_by_url(url=""):
     query = catalog_item_url_query(url)
     if not query:
         return None
-    queryset = CatalogItem.objects.filter(query, status="available").select_related("branch", "social_post").distinct()
-    if branch:
-        queryset = queryset.filter(branch=branch)
+    queryset = CatalogItem.objects.filter(query, status="available").select_related("social_post").distinct()
     return queryset.order_by("-updated_at", "-created_at").first()
 
 
@@ -172,7 +168,6 @@ def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
         media_id = f"catalog-item-{item.id}"
     post_type = social_post_type_from_url(permalink, "story" if webhook_event and webhook_event.event_type in ["story_reply", "story_send"] else "post")
     post = SocialPost.objects.create(
-        branch=item.branch,
         post_type=post_type,
         media_id=media_id,
         permalink=permalink,
@@ -287,13 +282,13 @@ def save_instagram_webhook_event(payload, entry, event):
         return None
 
 
-def link_story_post_from_event(webhook_event, branch=None):
+def link_story_post_from_event(webhook_event):
     if not webhook_event or webhook_event.event_type not in ["story_reply", "story_send"]:
         return None
     story_id = webhook_event.story_id or webhook_event.media_id
     if not story_id and webhook_event.story_url:
         story_id = media_id_from_url(webhook_event.story_url)
-    exact = social_post_by_media_or_url(story_id, webhook_event.story_url, branch)
+    exact = social_post_by_media_or_url(story_id, webhook_event.story_url)
     if exact:
         updates = []
         if append_story_webhook_id(exact, story_id):
@@ -313,9 +308,9 @@ def link_story_post_from_event(webhook_event, branch=None):
     if story:
         story_permalink = story.get("permalink", "")
         story_api_id = str(story.get("id", ""))
-        post = social_post_by_media_or_url(story_api_id, story_permalink, branch)
+        post = social_post_by_media_or_url(story_api_id, story_permalink)
         if not post:
-            item = catalog_item_by_url(story_permalink, branch)
+            item = catalog_item_by_url(story_permalink)
             post = social_post_from_catalog_item(item, webhook_event, story_permalink)
         if post:
             updates = []
@@ -335,8 +330,6 @@ def link_story_post_from_event(webhook_event, branch=None):
     if not story_id:
         return None
     queryset = SocialPost.objects.filter(post_type="story", is_active=True, webhook_story_id="")
-    if branch:
-        queryset = queryset.filter(branch=branch)
     candidates = list(queryset.order_by("-created_at")[:2])
     if len(candidates) != 1:
         return None
@@ -353,21 +346,21 @@ def link_media_post_from_event(webhook_event):
         return None
     media_id = webhook_event.media_id
     if media_id:
-        exact = social_post_by_media_or_url(media_id, "", None)
+        exact = social_post_by_media_or_url(media_id, "")
         if exact:
             return exact
         media = find_media_by_id(media_id)
         if media:
-            exact = social_post_by_media_or_url(media_id, media.get("permalink", ""), None)
+            exact = social_post_by_media_or_url(media_id, media.get("permalink", ""))
             if exact:
                 if exact.media_id != media_id:
                     exact.media_id = media_id
                     exact.save(update_fields=["media_id", "updated_at"])
                 return exact
     if webhook_event.story_url:
-        exact = social_post_by_media_or_url(media_id, webhook_event.story_url, None)
+        exact = social_post_by_media_or_url(media_id, webhook_event.story_url)
         if not exact:
-            item = catalog_item_by_url(webhook_event.story_url, None)
+            item = catalog_item_by_url(webhook_event.story_url)
             exact = social_post_from_catalog_item(item, webhook_event, webhook_event.story_url)
         if exact and media_id and exact.media_id != media_id and not SocialPost.objects.filter(media_id=media_id).exclude(pk=exact.pk).exists():
             exact.media_id = media_id
@@ -395,24 +388,20 @@ def resolve_instagram_event(payload):
             message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
             if not sender_id or sender_id in own_ids or not message_text or message.get("is_echo"):
                 continue
-            branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None) or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
-            if not branch:
-                continue
             referral = event.get("referral") or message.get("referral") or {}
             media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
-            post = social_post_by_media_or_url(media_id, "", branch)
+            post = social_post_by_media_or_url(media_id, "")
             if not post:
-                post = link_story_post_from_event(webhook_event, branch)
+                post = link_story_post_from_event(webhook_event)
             if not post:
                 post = link_media_post_from_event(webhook_event)
-            customer, _ = Customer.objects.get_or_create(instagram_user_id=sender_id, defaults={"branch": branch})
+            customer, _ = Customer.objects.get_or_create(instagram_user_id=sender_id)
             conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
             if not conversation:
-                conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch, social_post=post)
+                conversation = Conversation.objects.create(customer=customer, social_post=post)
             elif post and conversation.social_post_id != post.id:
                 conversation.social_post = post
-                conversation.branch = post.branch
-                conversation.save(update_fields=["social_post", "branch", "updated_at"])
+                conversation.save(update_fields=["social_post", "updated_at"])
             elif (story_attachment or media_attachment or message_metadata.get("attachments")) and not post and conversation.social_post_id:
                 conversation.social_post = None
                 conversation.save(update_fields=["social_post", "updated_at"])
@@ -472,15 +461,12 @@ def resolve_telegram_update(payload):
     user_id = user.get("id")
     if not chat_id or not user_id or not message_text:
         return []
-    branch = getattr(SocialPost.objects.filter(is_active=True).first(), "branch", None) or Branch.objects.filter(is_active=True).first() or Branch.objects.first()
-    if not branch:
-        return []
     external_id = f"telegram:{user_id}"
-    defaults = {"branch": branch, "language": "uz"}
+    defaults = {"language": "uz"}
     customer, created = Customer.objects.get_or_create(instagram_user_id=external_id, defaults=defaults)
     conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
     if not conversation:
-        conversation = Conversation.objects.create(customer=customer, branch=customer.branch or branch)
+        conversation = Conversation.objects.create(customer=customer)
     message_id = message.get("message_id", "")
     saved_message = ingest_customer_message(conversation, message_text, f"telegram:{chat_id}:{message_id}", metadata)
     if not saved_message:

@@ -1,7 +1,7 @@
 import os
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
-from core.models import Branch, PagePermission, UserProfile
+from core.models import PagePermission, UserProfile
 
 
 class Command(BaseCommand):
@@ -37,9 +37,6 @@ class Command(BaseCommand):
         if profile.role != "admin":
             profile.role = "admin"
             profile.save(update_fields=["role", "updated_at"])
-        branches = list(Branch.objects.filter(is_active=True))
-        if branches:
-            profile.branches.set(branches)
         PagePermission.objects.filter(user=user, page__in=PagePermission.DEVELOPER_ONLY_PAGES).delete()
         for page, _ in PagePermission.PAGE_CHOICES:
             if page in PagePermission.DEVELOPER_ONLY_PAGES:

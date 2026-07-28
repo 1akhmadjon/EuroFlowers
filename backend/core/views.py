@@ -2,6 +2,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
 from django.core.serializers.json import DjangoJSONEncoder
+from django.http import HttpResponse
 from django.db import transaction
 from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.deletion import ProtectedError
@@ -15,6 +16,9 @@ import hmac
 import json
 import requests
 import django_filters
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill, Side, Border
+from openpyxl.utils import get_column_letter
 from urllib.parse import parse_qsl
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import status, viewsets
@@ -23,11 +27,11 @@ from rest_framework import serializers
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .branching import default_branch
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BranchSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .inventory_services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -54,16 +58,12 @@ def schedule_lead_recall(lead):
         process_lead_recall.delay(lead.id)
 
 
-def next_lead_sort_order(branch, status_value):
-    current = Lead.objects.filter(branch=branch, status=status_value).aggregate(value=Max("sort_order"))["value"] or Decimal("0")
+def next_lead_sort_order(status_value):
+    current = Lead.objects.filter(status=status_value).aggregate(value=Max("sort_order"))["value"] or Decimal("0")
     return current + Decimal("1000")
 
 
-def lead_sort_order_between(before, after, branch, status_value):
-    if before and before.branch_id != branch.id:
-        raise serializers.ValidationError({"before": "Lead boshqa filialga tegishli"})
-    if after and after.branch_id != branch.id:
-        raise serializers.ValidationError({"after": "Lead boshqa filialga tegishli"})
+def lead_sort_order_between(before, after, status_value):
     if before and before.status != status_value:
         raise serializers.ValidationError({"before": "Lead statusi yangi column bilan mos emas"})
     if after and after.status != status_value:
@@ -74,14 +74,13 @@ def lead_sort_order_between(before, after, branch, status_value):
         return before.sort_order + Decimal("1000")
     if after:
         return after.sort_order - Decimal("1000")
-    return next_lead_sort_order(branch, status_value)
+    return next_lead_sort_order(status_value)
 
 
-def create_user_notification(user, notification_type, title, body, reference_type="", reference_id=None, branch=None):
+def create_user_notification(user, notification_type, title, body, reference_type="", reference_id=None):
     if not user:
         return None
     return Notification.objects.create(
-        branch=branch or default_branch(),
         target_user=user,
         notification_type=notification_type,
         title_uz=title,
@@ -154,6 +153,223 @@ class PagePermissionFilter(django_filters.FilterSet):
     class Meta:
         model = PagePermission
         fields = ["user", "permission_page", "can_view", "can_control"]
+
+
+def parse_date_range_params(request):
+    date_from = parse_date(request.query_params.get("date_from", "") or "")
+    date_to = parse_date(request.query_params.get("date_to", "") or "")
+    return date_from, date_to
+
+
+def filter_date_field(queryset, field_name, date_from=None, date_to=None):
+    if date_from:
+        queryset = queryset.filter(**{f"{field_name}__date__gte": date_from})
+    if date_to:
+        queryset = queryset.filter(**{f"{field_name}__date__lte": date_to})
+    return queryset
+
+
+def local_datetime_label(value):
+    if not value:
+        return ""
+    return timezone.localtime(value).strftime("%Y-%m-%d %H:%M")
+
+
+def money_label(value):
+    return float(value or 0)
+
+
+def styled_workbook(title, headers):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = title[:31]
+    sheet.append(headers)
+    header_fill = PatternFill("solid", fgColor="0F172A")
+    header_font = Font(color="FFFFFF", bold=True)
+    border = Border(bottom=Side(style="thin", color="CBD5E1"))
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    sheet.freeze_panes = "A2"
+    return workbook, sheet
+
+
+def autosize_sheet(sheet):
+    for column in sheet.columns:
+        max_length = 0
+        column_letter = get_column_letter(column[0].column)
+        for cell in column:
+            max_length = max(max_length, len(str(cell.value or "")))
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+        sheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 42)
+
+
+def excel_response(workbook, filename):
+    response = HttpResponse(content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    workbook.save(response)
+    return response
+
+
+def catalog_payment_type(item, history=None):
+    sources = []
+    if history:
+        sources.append(history.snapshot or {})
+    sources.append({})
+    for source in sources:
+        value = source.get("payment_type") or source.get("payment_method")
+        if value:
+            return str(value)
+    return "Aniqlanmagan"
+
+
+def user_full_name(user):
+    if not user:
+        return ""
+    return user.get_full_name() or user.username
+
+
+def payment_label(value):
+    if value in ["cash", "naqd"]:
+        return "Naqd"
+    if value in ["card", "karta"]:
+        return "Karta"
+    return "Aniqlanmagan"
+
+
+def catalog_history_sale_total(history):
+    return Decimal(history.sold_unit_price or 0) * Decimal(history.quantity or 0)
+
+
+def catalog_history_listed_total(history):
+    return Decimal(history.listed_unit_price or 0) * Decimal(history.quantity or 0)
+
+
+def catalog_history_cost_total(history):
+    item = history.catalog_item
+    total = Decimal(item.quantity_total or 1)
+    quantity = Decimal(history.quantity or 0)
+    if total <= 0:
+        return Decimal("0")
+    return (Decimal(item.calculated_cost_price or 0) / total * quantity).quantize(Decimal("0.01"))
+
+
+def sold_catalog_history_queryset(request):
+    date_from, date_to = parse_date_range_params(request)
+    rows = CatalogHistory.objects.filter(action="sold").select_related("catalog_item__florist__user", "created_by")
+    if date_from:
+        rows = rows.filter(created_at__date__gte=date_from)
+    if date_to:
+        rows = rows.filter(created_at__date__lte=date_to)
+    return rows, date_from, date_to
+
+
+def accounting_report_data(request):
+    histories, date_from, date_to = sold_catalog_history_queryset(request)
+    summary = {
+        "total_sales": Decimal("0"),
+        "cash_total": Decimal("0"),
+        "card_total": Decimal("0"),
+        "unknown_total": Decimal("0"),
+        "total_quantity": 0,
+        "standard_quantity": 0,
+        "custom_quantity": 0,
+        "discount_total": Decimal("0"),
+        "discounted_sales_count": 0,
+        "discounted_quantity": 0,
+        "cost_total": Decimal("0"),
+        "net_profit": Decimal("0"),
+    }
+    by_kind = {
+        "standard": {"quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")},
+        "custom": {"quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")},
+    }
+    by_payment = {
+        "cash": {"label": "Naqd", "quantity": 0, "sales": Decimal("0")},
+        "card": {"label": "Karta", "quantity": 0, "sales": Decimal("0")},
+        "unknown": {"label": "Aniqlanmagan", "quantity": 0, "sales": Decimal("0")},
+    }
+    by_volume = {}
+    discount_rows = []
+    history_rows = []
+    for history in histories.order_by("-created_at", "-id"):
+        item = history.catalog_item
+        kind = item.catalog_kind or "standard"
+        payment = catalog_payment_type(item, history).lower()
+        if payment == "naqd":
+            payment = "cash"
+        elif payment == "karta":
+            payment = "card"
+        if payment not in ["cash", "card"]:
+            payment = "unknown"
+        quantity = int(history.quantity or 0)
+        sale_total = catalog_history_sale_total(history)
+        cost_total = catalog_history_cost_total(history)
+        discount = Decimal(history.discount_amount or 0)
+        summary["total_sales"] += sale_total
+        summary[f"{payment}_total"] += sale_total
+        summary["total_quantity"] += quantity
+        summary["discount_total"] += discount
+        summary["cost_total"] += cost_total
+        if discount > 0:
+            summary["discounted_sales_count"] += 1
+            summary["discounted_quantity"] += quantity
+        if kind == "custom":
+            summary["custom_quantity"] += quantity
+        else:
+            summary["standard_quantity"] += quantity
+        by_kind.setdefault(kind, {"quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")})
+        by_kind[kind]["quantity"] += quantity
+        by_kind[kind]["sales"] += sale_total
+        by_kind[kind]["discount"] += discount
+        by_payment[payment]["quantity"] += quantity
+        by_payment[payment]["sales"] += sale_total
+        volume_key = item.volume or "Belgilanmagan"
+        volume_row = by_volume.setdefault((kind, volume_key), {"catalog_kind": kind, "volume": volume_key, "quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")})
+        volume_row["quantity"] += quantity
+        volume_row["sales"] += sale_total
+        volume_row["discount"] += discount
+        row = {
+            "history_id": history.id,
+            "catalog_id": item.id,
+            "catalog_name": item.name_uz,
+            "catalog_kind": kind,
+            "arrangement_type": item.arrangement_type,
+            "volume": item.volume,
+            "quantity": quantity,
+            "created_at": history.created_at,
+            "catalog_created_at": item.created_at,
+            "sold_at": history.created_at,
+            "florist_id": item.florist_id,
+            "florist_name": str(item.florist) if item.florist_id else "",
+            "listed_unit_price": history.listed_unit_price,
+            "sold_unit_price": history.sold_unit_price,
+            "listed_total": catalog_history_listed_total(history),
+            "sale_total": sale_total,
+            "cost_total": cost_total,
+            "net_profit": sale_total - cost_total,
+            "payment_type": payment,
+            "payment_label": payment_label(payment),
+            "discount_amount": discount,
+            "discount_percent": history.discount_percent,
+            "discount_reason": history.discount_reason or history.note,
+            "sold_by": user_full_name(history.created_by),
+        }
+        history_rows.append(row)
+        if discount > 0:
+            discount_rows.append(row)
+    summary["net_profit"] = summary["total_sales"] - summary["cost_total"]
+    return {
+        "period": {"date_from": date_from.isoformat() if date_from else None, "date_to": date_to.isoformat() if date_to else None},
+        "summary": summary,
+        "by_kind": [{"catalog_kind": key, **value} for key, value in by_kind.items()],
+        "by_payment": [{"payment_type": key, **value} for key, value in by_payment.items()],
+        "by_volume": sorted(by_volume.values(), key=lambda row: (row["catalog_kind"], row["volume"])),
+        "discounted_sales": discount_rows,
+        "history": history_rows,
+    }
 
 
 class EuroFlowersTokenObtainPairView(TokenObtainPairView):
@@ -238,21 +454,10 @@ def write_audit(user, action, instance, before=None, after=None, request=None, s
 class ScopedViewSet(viewsets.ModelViewSet):
     permission_classes = [RolePermission]
 
-    def branch_ids(self):
-        return None
-
     def get_queryset(self):
         queryset = super().get_queryset()
         if not queryset.query.order_by and not queryset.model._meta.ordering:
             queryset = queryset.order_by("id")
-        branch_ids = self.branch_ids()
-        if branch_ids is None:
-            return queryset
-        field_names = {field.name for field in queryset.model._meta.fields}
-        if "branch" in field_names:
-            return queryset.filter(branch_id__in=branch_ids)
-        if queryset.model is Branch:
-            return queryset.filter(id__in=branch_ids)
         return queryset
 
     def perform_create(self, serializer):
@@ -282,18 +487,10 @@ class ScopedViewSet(viewsets.ModelViewSet):
             write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_archived", instance, before=before_changed, after=after_changed, request=self.request)
 
 
-class BranchViewSet(ScopedViewSet):
-    permission_page = "settings"
-    write_roles = ["admin"]
-    queryset = Branch.objects.all()
-    serializer_class = BranchSerializer
-    search_fields = ["name", "code", "address"]
-
-
 class UserViewSet(viewsets.ModelViewSet):
     permission_classes = [RolePermission]
     permission_page = "users"
-    queryset = User.objects.select_related("profile").prefetch_related("profile__branches", "page_permissions").order_by("id")
+    queryset = User.objects.select_related("profile").prefetch_related("page_permissions").order_by("id")
     serializer_class = UserSerializer
     search_fields = ["username", "first_name", "last_name", "email"]
     filterset_fields = ["is_active", "profile__role"]
@@ -415,7 +612,7 @@ class SupplierViewSet(ScopedViewSet):
 class FloristVolumeRateViewSet(ScopedViewSet):
     permission_page = "florists"
     write_roles = ["admin"]
-    queryset = FloristVolumeRate.objects.select_related("branch").all()
+    queryset = FloristVolumeRate.objects.all()
     serializer_class = FloristVolumeRateSerializer
     filterset_fields = ["arrangement_type", "volume", "is_active"]
 
@@ -423,14 +620,14 @@ class FloristVolumeRateViewSet(ScopedViewSet):
 class FloristProfileViewSet(ScopedViewSet):
     permission_page = "florists"
     write_roles = ["admin", "supervisor"]
-    queryset = FloristProfile.objects.select_related("user", "branch").annotate(salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")), catalog_count=Count("catalog_items", distinct=True)).all()
+    queryset = FloristProfile.objects.select_related("user").annotate(salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")), catalog_count=Count("catalog_items", distinct=True)).all()
     serializer_class = FloristProfileSerializer
     filterset_fields = ["staff_type", "is_active"]
     search_fields = ["user__first_name", "user__last_name", "user__username", "phone"]
 
     @action(detail=False, methods=["get"], url_path="me")
     def me_profile(self, request):
-        profile = FloristProfile.objects.select_related("user", "branch").filter(user=request.user).first()
+        profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
         if not profile:
             return Response({"detail": "Florist profili topilmadi"}, status=status.HTTP_404_NOT_FOUND)
         return Response(self.get_serializer(profile).data)
@@ -460,7 +657,7 @@ class FloristProfileViewSet(ScopedViewSet):
 class FloristAttendanceViewSet(ScopedViewSet):
     permission_page = "attendance"
     write_roles = ["admin", "supervisor", "florist", "apprentice"]
-    queryset = FloristAttendance.objects.select_related("florist__user", "florist__branch").all()
+    queryset = FloristAttendance.objects.select_related("florist__user").all()
     serializer_class = FloristAttendanceSerializer
     filterset_class = FloristAttendanceFilter
 
@@ -498,8 +695,8 @@ class FloristAttendanceViewSet(ScopedViewSet):
         row.save(update_fields=["check_in_at", "check_in_latitude", "check_in_longitude", "source", "note", "updated_at"])
         write_audit(request.user, "attendance_check_in", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishga keldi")
         if first_check_in:
-            create_user_notification(profile.user, "attendance", "Ishga keldingiz", f"{timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga kelganingiz belgilandi.", "attendance", row.id, profile.branch)
-            Notification.objects.create(branch=profile.branch, notification_type="attendance", title_uz=f"{profile} ishga keldi", title_ru=f"{profile} ishga keldi", body_uz=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", body_ru=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", reference_type="attendance", reference_id=row.id)
+            create_user_notification(profile.user, "attendance", "Ishga keldingiz", f"{timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga kelganingiz belgilandi.", "attendance", row.id)
+            Notification.objects.create(notification_type="attendance", title_uz=f"{profile} ishga keldi", title_ru=f"{profile} ishga keldi", body_uz=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", body_ru=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", reference_type="attendance", reference_id=row.id)
         return Response(self.get_serializer(row).data)
 
     @action(detail=False, methods=["post"], url_path="check-out")
@@ -523,10 +720,10 @@ class FloristAttendanceViewSet(ScopedViewSet):
             salary, _ = FloristSalaryEntry.objects.update_or_create(florist=profile, source="daily", attendance=row, defaults={"amount": profile.daily_pay, "work_date": work_date, "note": "Shogird kunlik ish haqi", "created_by": request.user})
             write_audit(request.user, "apprentice_daily_salary_recorded", salary, before={}, after=instance_snapshot(salary), request=request, summary=f"{profile} uchun kunlik ish haqi yozildi")
             if old_amount != salary.amount:
-                create_user_notification(profile.user, "florist_salary", "Kunlik ish haqi yozildi", f"{work_date} uchun {salary.amount} so‘m kunlik ish haqi yozildi.", "florist_salary", salary.id, profile.branch)
+                create_user_notification(profile.user, "florist_salary", "Kunlik ish haqi yozildi", f"{work_date} uchun {salary.amount} so‘m kunlik ish haqi yozildi.", "florist_salary", salary.id)
         write_audit(request.user, "attendance_check_out", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishdan ketdi")
         if first_check_out:
-            create_user_notification(profile.user, "attendance", "Ishdan ketdingiz", f"{timezone.localtime(row.check_out_at).strftime('%Y-%m-%d %H:%M')} da ishdan ketganingiz belgilandi.", "attendance", row.id, profile.branch)
+            create_user_notification(profile.user, "attendance", "Ishdan ketdingiz", f"{timezone.localtime(row.check_out_at).strftime('%Y-%m-%d %H:%M')} da ishdan ketganingiz belgilandi.", "attendance", row.id)
         return Response(self.get_serializer(row).data)
 
 
@@ -540,7 +737,7 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
     def perform_create(self, serializer):
         entry = serializer.save(created_by=self.request.user)
         write_audit(self.request.user, "florist_salary_created", entry, before={}, after=instance_snapshot(entry), request=self.request, summary=f"{entry.florist} uchun ish haqi qo‘shildi")
-        create_user_notification(entry.florist.user, "florist_salary", "Ish haqi qo‘shildi", f"{entry.work_date} uchun {entry.amount} so‘m ish haqi qo‘shildi.", "florist_salary", entry.id, entry.florist.branch)
+        create_user_notification(entry.florist.user, "florist_salary", "Ish haqi qo‘shildi", f"{entry.work_date} uchun {entry.amount} so‘m ish haqi qo‘shildi.", "florist_salary", entry.id)
 
     def perform_update(self, serializer):
         before = instance_snapshot(serializer.instance)
@@ -548,13 +745,13 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
         before_changed, after_changed = changed_snapshot(before, instance_snapshot(entry))
         if before_changed or after_changed:
             write_audit(self.request.user, "florist_salary_updated", entry, before=before_changed, after=after_changed, request=self.request, summary=f"{entry.florist} ish haqi o‘zgartirildi")
-            create_user_notification(entry.florist.user, "florist_salary", "Ish haqi o‘zgartirildi", f"{entry.work_date} uchun ish haqi {entry.amount} so‘m qilib yangilandi.", "florist_salary", entry.id, entry.florist.branch)
+            create_user_notification(entry.florist.user, "florist_salary", "Ish haqi o‘zgartirildi", f"{entry.work_date} uchun ish haqi {entry.amount} so‘m qilib yangilandi.", "florist_salary", entry.id)
 
 
 class StockBatchViewSet(ScopedViewSet):
     permission_page = "inventory"
     write_roles = ["admin", "warehouse"]
-    queryset = StockBatch.objects.select_related("branch", "variant__flower", "supplier").all()
+    queryset = StockBatch.objects.select_related("variant__flower", "supplier").all()
     serializer_class = StockBatchSerializer
     filterset_class = StockBatchFilter
     search_fields = ["batch_number", "variant__flower__name_uz", "variant__name_uz", "variant__color_uz", "supplier__name", "supplier__phone"]
@@ -567,7 +764,7 @@ class StockBatchViewSet(ScopedViewSet):
         if batch.supplier_id:
             title = "Yangi gul kirimi"
             body = f"{batch.supplier.name} postavshikdan {batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz} keldi. Partiya: {batch.batch_number}. Miqdor: {batch.received_stems} dona."
-            Notification.objects.create(branch=batch.branch, notification_type="supplier_stock", title_uz=title, title_ru=title, body_uz=body, body_ru=body, reference_type="stock_batch", reference_id=batch.id)
+            Notification.objects.create(notification_type="supplier_stock", title_uz=title, title_ru=title, body_uz=body, body_ru=body, reference_type="stock_batch", reference_id=batch.id)
             integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
             group_chat_id = integration.telegram_group_chat_id or settings.TELEGRAM_GROUP_CHAT_ID
             if group_chat_id:
@@ -609,7 +806,7 @@ class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
 class PackagingViewSet(ScopedViewSet):
     permission_page = "inventory"
     write_roles = ["admin", "warehouse"]
-    queryset = Packaging.objects.select_related("branch").all()
+    queryset = Packaging.objects.all()
     serializer_class = PackagingSerializer
     parser_classes = [JSONParser, FormParser, MultiPartParser]
     filterset_fields = ["packaging_type", "is_active"]
@@ -645,15 +842,124 @@ class PackagingViewSet(ScopedViewSet):
 class PackagingMovementViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [RolePermission]
     permission_page = "inventory"
-    queryset = PackagingMovement.objects.select_related("packaging__branch", "performed_by").all()
+    queryset = PackagingMovement.objects.select_related("packaging", "performed_by").all()
     serializer_class = PackagingMovementSerializer
     filterset_class = PackagingMovementFilter
+
+
+class InventoryMovementJournalView(APIView):
+    permission_classes = [RolePermission]
+    permission_page = "inventory"
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("stock_type", str, OpenApiParameter.QUERY, description="all, flower yoki material"),
+            OpenApiParameter("movement_type", str, OpenApiParameter.QUERY, description="in, out, adjustment, waste"),
+            OpenApiParameter("date_from", str, OpenApiParameter.QUERY),
+            OpenApiParameter("date_to", str, OpenApiParameter.QUERY),
+        ],
+        responses=inline_serializer(name="InventoryMovementJournal", fields={"results": serializers.ListField(child=serializers.DictField())}),
+    )
+    def get(self, request):
+        stock_type = request.query_params.get("stock_type", "all")
+        movement_type = request.query_params.get("movement_type", "")
+        date_from, date_to = parse_date_range_params(request)
+        rows = []
+        if stock_type in ["all", "flower"]:
+            flower_rows = StockMovement.objects.select_related("batch__variant__flower", "batch__supplier", "performed_by").all()
+            if movement_type:
+                flower_rows = flower_rows.filter(movement_type=movement_type)
+            flower_rows = filter_date_field(flower_rows, "created_at", date_from, date_to)
+            for row in flower_rows[:500]:
+                rows.append({
+                    "id": f"flower-{row.id}",
+                    "stock_type": "flower",
+                    "stock_type_label": "Gul sklad",
+                    "created_at": row.created_at,
+                    "movement_type": row.movement_type,
+                    "item_name": str(row.batch.variant),
+                    "batch_number": row.batch.batch_number,
+                    "quantity": row.quantity_stems,
+                    "quantity_label": f"{row.quantity_stems} dona / {row.quantity_bunches} pochka",
+                    "reason": row.reason,
+                    "performed_by": row.performed_by_id,
+                    "performed_by_name": user_full_name(row.performed_by),
+                    "reference_type": row.reference_type,
+                    "reference_id": row.reference_id,
+                })
+        if stock_type in ["all", "material"]:
+            material_rows = PackagingMovement.objects.select_related("packaging", "performed_by").all()
+            if movement_type:
+                material_rows = material_rows.filter(movement_type=movement_type)
+            material_rows = filter_date_field(material_rows, "created_at", date_from, date_to)
+            for row in material_rows[:500]:
+                rows.append({
+                    "id": f"material-{row.id}",
+                    "stock_type": "material",
+                    "stock_type_label": "Material sklad",
+                    "created_at": row.created_at,
+                    "movement_type": row.movement_type,
+                    "item_name": row.packaging.name_uz,
+                    "batch_number": "",
+                    "quantity": row.quantity,
+                    "quantity_label": f"{row.quantity} dona",
+                    "reason": row.reason,
+                    "performed_by": row.performed_by_id,
+                    "performed_by_name": user_full_name(row.performed_by),
+                    "reference_type": row.reference_type,
+                    "reference_id": row.reference_id,
+                })
+        rows = sorted(rows, key=lambda row: row["created_at"], reverse=True)[:500]
+        for row in rows:
+            row["created_at"] = local_datetime_label(row["created_at"])
+        return Response({"results": rows})
+
+
+class FloristSelfExcelExportView(APIView):
+    permission_classes = [RolePermission]
+    permission_page = None
+
+    def get(self, request):
+        profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
+        if not profile:
+            return Response({"detail": "Florist profile topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+        return export_florist_workbook(profile, request)
+
+
+class AdminFloristsExcelExportView(APIView):
+    permission_classes = [RolePermission]
+    permission_page = "florists"
+
+    def get(self, request):
+        if not has_page_permission(request.user, "florists", True):
+            return forbidden()
+        return export_all_florists_workbook(request)
+
+
+class AdminProfitExcelExportView(APIView):
+    permission_classes = [RolePermission]
+    permission_page = "dashboard"
+
+    def get(self, request):
+        if not has_page_permission(request.user, "dashboard", False):
+            return forbidden()
+        return export_profit_workbook(request)
+
+
+class AccountingReportView(APIView):
+    permission_classes = [RolePermission]
+    permission_page = "dashboard"
+
+    def get(self, request):
+        if not has_page_permission(request.user, "dashboard", False):
+            return forbidden()
+        return Response(json_safe(accounting_report_data(request)))
 
 
 class CatalogItemViewSet(ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
-    queryset = CatalogItem.objects.select_related("branch", "social_post").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
+    queryset = CatalogItem.objects.select_related("social_post", "florist__user").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
     serializer_class = CatalogItemSerializer
     filterset_fields = ["status", "arrangement_type"]
     search_fields = ["name_uz", "description_uz", "description_ru"]
@@ -673,6 +979,7 @@ class CatalogItemViewSet(ScopedViewSet):
                 serializer.validated_data.get("quantity", 1),
                 serializer.validated_data.get("sale_price"),
                 serializer.validated_data.get("discount_reason", ""),
+                serializer.validated_data.get("payment_type", ""),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -703,10 +1010,192 @@ class CatalogItemViewSet(ScopedViewSet):
                 write_audit(self.request.user, "catalog_archived", item, before=before, after=instance_snapshot(item), request=self.request)
 
 
+def export_florist_workbook(profile, request):
+    date_from, date_to = parse_date_range_params(request)
+    workbook, sheet = styled_workbook("Florist hisoboti", ["Sana", "Manba", "Katalog", "Hajm", "Arrangement", "Ish haqi", "Izoh", "Kim qo‘shdi"])
+    salary = FloristSalaryEntry.objects.filter(florist=profile).select_related("catalog_item", "created_by")
+    if date_from:
+        salary = salary.filter(work_date__gte=date_from)
+    if date_to:
+        salary = salary.filter(work_date__lte=date_to)
+    for row in salary.order_by("-work_date", "-id"):
+        item = row.catalog_item
+        sheet.append([
+            row.work_date.isoformat(),
+            row.get_source_display(),
+            item.name_uz if item else "",
+            item.volume if item else "",
+            item.get_arrangement_type_display() if item else "",
+            money_label(row.amount),
+            row.note,
+            user_full_name(row.created_by),
+        ])
+    daily_sheet = workbook.create_sheet("Kunlik hajm")
+    daily_sheet.append(["Sana", "Katalog turi", "Arrangement", "Hajm", "Yasalgan soni", "Floristga qo‘shilgan summa"])
+    for cell in daily_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    daily_rows = {}
+    for row in salary:
+        item = row.catalog_item
+        key = (row.work_date, item.catalog_kind if item else "", item.arrangement_type if item else "", item.volume if item else "")
+        current = daily_rows.setdefault(key, {"count": 0, "amount": Decimal("0")})
+        current["count"] += int(item.quantity_total or 1) if item else 1
+        current["amount"] += Decimal(row.amount or 0)
+    for key, value in sorted(daily_rows.items(), key=lambda row: row[0], reverse=True):
+        work_date, catalog_kind, arrangement_type, volume = key
+        daily_sheet.append([work_date.isoformat(), catalog_kind, arrangement_type, volume or "Belgilanmagan", value["count"], money_label(value["amount"])])
+    total_row = sheet.max_row + 2
+    sheet.cell(total_row, 5, "Jami")
+    sheet.cell(total_row, 6, money_label(salary.aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"]))
+    sheet.cell(total_row, 5).font = Font(bold=True)
+    sheet.cell(total_row, 6).font = Font(bold=True)
+    attendance_sheet = workbook.create_sheet("Keldi-ketdi")
+    attendance_sheet.append(["Sana", "Keldi", "Ketdi", "Manba", "Izoh"])
+    for cell in attendance_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+    attendance = FloristAttendance.objects.filter(florist=profile)
+    if date_from:
+        attendance = attendance.filter(work_date__gte=date_from)
+    if date_to:
+        attendance = attendance.filter(work_date__lte=date_to)
+    for row in attendance.order_by("-work_date", "-id"):
+        attendance_sheet.append([row.work_date.isoformat(), local_datetime_label(row.check_in_at), local_datetime_label(row.check_out_at), row.get_source_display(), row.note])
+    autosize_sheet(sheet)
+    autosize_sheet(daily_sheet)
+    autosize_sheet(attendance_sheet)
+    return excel_response(workbook, f"florist_{profile.id}_export.xlsx")
+
+
+def export_all_florists_workbook(request):
+    date_from, date_to = parse_date_range_params(request)
+    workbook, sheet = styled_workbook("Hamma floristlar", ["Florist", "Turi", "Katalog soni", "Custom katalog", "Standart katalog", "Jami ish haqi", "Keldi kunlari"])
+    profiles = FloristProfile.objects.select_related("user").filter(is_active=True).order_by("user__first_name", "user__username")
+    detail_sheet = workbook.create_sheet("Kunlik hajm")
+    detail_sheet.append(["Florist", "Sana", "Katalog turi", "Arrangement", "Hajm", "Yasalgan soni", "Floristga qo‘shilgan summa"])
+    for cell in detail_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for profile in profiles:
+        salary = FloristSalaryEntry.objects.filter(florist=profile)
+        catalog = CatalogItem.objects.filter(florist=profile)
+        attendance = FloristAttendance.objects.filter(florist=profile)
+        if date_from:
+            salary = salary.filter(work_date__gte=date_from)
+            catalog = catalog.filter(created_at__date__gte=date_from)
+            attendance = attendance.filter(work_date__gte=date_from)
+        if date_to:
+            salary = salary.filter(work_date__lte=date_to)
+            catalog = catalog.filter(created_at__date__lte=date_to)
+            attendance = attendance.filter(work_date__lte=date_to)
+        sheet.append([
+            str(profile),
+            profile.get_staff_type_display(),
+            catalog.count(),
+            catalog.filter(catalog_kind="custom").count(),
+            catalog.filter(catalog_kind="standard").count(),
+            money_label(salary.aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"]),
+            attendance.filter(check_in_at__isnull=False).count(),
+        ])
+        daily_rows = {}
+        for row in salary.select_related("catalog_item"):
+            item = row.catalog_item
+            key = (row.work_date, item.catalog_kind if item else "", item.arrangement_type if item else "", item.volume if item else "")
+            current = daily_rows.setdefault(key, {"count": 0, "amount": Decimal("0")})
+            current["count"] += int(item.quantity_total or 1) if item else 1
+            current["amount"] += Decimal(row.amount or 0)
+        for key, value in sorted(daily_rows.items(), key=lambda row: row[0], reverse=True):
+            work_date, catalog_kind, arrangement_type, volume = key
+            detail_sheet.append([str(profile), work_date.isoformat(), catalog_kind, arrangement_type, volume or "Belgilanmagan", value["count"], money_label(value["amount"])])
+    autosize_sheet(sheet)
+    autosize_sheet(detail_sheet)
+    return excel_response(workbook, "all_florists_export.xlsx")
+
+
+def export_profit_workbook(request):
+    data = accounting_report_data(request)
+    summary = data["summary"]
+    workbook, sheet = styled_workbook("Hisob-kitob", ["Ko‘rsatkich", "Qiymat"])
+    summary_rows = [
+        ("Umumiy savdo", summary["total_sales"]),
+        ("Naqd", summary["cash_total"]),
+        ("Karta", summary["card_total"]),
+        ("Aniqlanmagan to‘lov", summary["unknown_total"]),
+        ("Sotilgan son", summary["total_quantity"]),
+        ("Standart sotilgan", summary["standard_quantity"]),
+        ("Custom sotilgan", summary["custom_quantity"]),
+        ("Sof foyda", summary["net_profit"]),
+        ("Umumiy skidka", summary["discount_total"]),
+        ("Skidka bilan sotuvlar", summary["discounted_sales_count"]),
+    ]
+    for label, value in summary_rows:
+        sheet.append([label, money_label(value) if isinstance(value, Decimal) else value])
+    volume_sheet = workbook.create_sheet("Hajmlar")
+    volume_sheet.append(["Katalog turi", "Hajm", "Soni", "Savdo", "Skidka"])
+    for cell in volume_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row in data["by_volume"]:
+        volume_sheet.append([row["catalog_kind"], row["volume"], row["quantity"], money_label(row["sales"]), money_label(row["discount"])])
+    history_sheet = workbook.create_sheet("Sotuv history")
+    history_sheet.append(["Sotilgan vaqt", "Katalogga qo‘shilgan vaqt", "Katalog", "Turi", "Arrangement", "Hajm", "Florist", "Soni", "Asl jami", "Sotuv jami", "Cost", "Sof foyda", "To‘lov", "Skidka", "Skidka foiz", "Kim sotdi", "Izoh"])
+    for cell in history_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row in data["history"]:
+        history_sheet.append([
+            local_datetime_label(row["sold_at"]),
+            local_datetime_label(row["catalog_created_at"]),
+            row["catalog_name"],
+            row["catalog_kind"],
+            row["arrangement_type"],
+            row["volume"] or "Belgilanmagan",
+            row["florist_name"],
+            row["quantity"],
+            money_label(row["listed_total"]),
+            money_label(row["sale_total"]),
+            money_label(row["cost_total"]),
+            money_label(row["net_profit"]),
+            row["payment_label"],
+            money_label(row["discount_amount"]),
+            row["discount_percent"],
+            row["sold_by"],
+            row["discount_reason"],
+        ])
+    discount_sheet = workbook.create_sheet("Skidkalar")
+    discount_sheet.append(["Sana", "Katalog", "Turi", "Hajm", "Soni", "Skidka summa", "Skidka foiz", "Izoh", "Kim sotdi"])
+    for cell in discount_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row in data["discounted_sales"]:
+        discount_sheet.append([
+            local_datetime_label(row["sold_at"]),
+            row["catalog_name"],
+            row["catalog_kind"],
+            row["volume"] or "Belgilanmagan",
+            row["quantity"],
+            money_label(row["discount_amount"]),
+            row["discount_percent"],
+            row["discount_reason"],
+            row["sold_by"],
+        ])
+    autosize_sheet(sheet)
+    autosize_sheet(volume_sheet)
+    autosize_sheet(history_sheet)
+    autosize_sheet(discount_sheet)
+    return excel_response(workbook, "profit_export.xlsx")
+
+
 class CustomerViewSet(ScopedViewSet):
     permission_page = "customers"
     write_roles = ["admin", "operator"]
-    queryset = Customer.objects.select_related("branch").annotate(purchases_count=Count("leads", filter=Q(leads__status="won")), total_spent=Coalesce(Sum("leads__estimated_price", filter=Q(leads__status="won")), Decimal("0"))).all()
+    queryset = Customer.objects.annotate(purchases_count=Count("leads", filter=Q(leads__status="won")), total_spent=Coalesce(Sum("leads__estimated_price", filter=Q(leads__status="won")), Decimal("0"))).all()
     serializer_class = CustomerSerializer
     filterset_fields = ["language", "is_blocked"]
     search_fields = ["name", "phone", "instagram_username"]
@@ -748,7 +1237,7 @@ class LeadStatusViewSet(ScopedViewSet):
 class LeadViewSet(ScopedViewSet):
     permission_page = "crm"
     write_roles = ["admin", "operator"]
-    queryset = Lead.objects.select_related("customer", "branch", "assigned_to", "social_post").all()
+    queryset = Lead.objects.select_related("customer", "assigned_to", "social_post").all()
     serializer_class = LeadSerializer
     filterset_class = LeadFilter
     search_fields = ["customer__name", "customer__phone", "request_uz", "request_ru"]
@@ -759,9 +1248,8 @@ class LeadViewSet(ScopedViewSet):
         with transaction.atomic():
             extra = {}
             if "sort_order" not in serializer.validated_data:
-                branch = serializer.validated_data.get("branch") or default_branch()
                 status_value = serializer.validated_data.get("status", "new")
-                extra["sort_order"] = next_lead_sort_order(branch, status_value)
+                extra["sort_order"] = next_lead_sort_order(status_value)
             lead = serializer.save(**extra)
             write_audit(self.request.user, "lead_created", lead, before={}, after=instance_snapshot(lead), request=self.request)
             if lead.status == "won":
@@ -789,7 +1277,7 @@ class LeadViewSet(ScopedViewSet):
             before_snapshot = instance_snapshot(lead)
             before_status = lead.status
             if sort_order is None:
-                sort_order = lead_sort_order_between(before, after, lead.branch, status_value)
+                sort_order = lead_sort_order_between(before, after, status_value)
             lead.status = status_value
             lead.sort_order = sort_order
             lead.save(update_fields=["status", "sort_order", "updated_at"])
@@ -886,7 +1374,7 @@ class LeadViewSet(ScopedViewSet):
 class SocialPostViewSet(ScopedViewSet):
     permission_page = "social_posts"
     write_roles = ["admin", "content"]
-    queryset = SocialPost.objects.select_related("branch").prefetch_related("catalog_items__composition__stock_batch__variant__flower", "leads__customer", "leads__catalog_usage__catalog_item").annotate(reply_count=Count("conversations", distinct=True), lead_count=Count("leads", distinct=True)).all()
+    queryset = SocialPost.objects.prefetch_related("catalog_items__composition__stock_batch__variant__flower", "leads__customer", "leads__catalog_usage__catalog_item").annotate(reply_count=Count("conversations", distinct=True), lead_count=Count("leads", distinct=True)).all()
     serializer_class = SocialPostSerializer
     filterset_fields = ["post_type", "is_targeted", "is_active"]
     search_fields = ["title_uz", "title_ru", "media_id", "permalink"]
@@ -895,7 +1383,7 @@ class SocialPostViewSet(ScopedViewSet):
 class ConversationViewSet(ScopedViewSet):
     permission_page = "conversations"
     write_roles = ["admin", "operator"]
-    queryset = Conversation.objects.select_related("customer", "branch", "social_post", "assigned_to").prefetch_related("messages").all()
+    queryset = Conversation.objects.select_related("customer", "social_post", "assigned_to").prefetch_related("messages").all()
     serializer_class = ConversationSerializer
     filterset_class = ConversationFilter
     search_fields = ["customer__name", "customer__instagram_username", "messages__text"]
@@ -990,7 +1478,7 @@ class ConversationViewSet(ScopedViewSet):
 
 class NotificationViewSet(ScopedViewSet):
     permission_page = "notifications"
-    queryset = Notification.objects.select_related("branch").all()
+    queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
     filterset_fields = ["notification_type", "is_read"]
     write_roles = ["admin", "operator", "florist", "warehouse", "content"]
@@ -1211,7 +1699,7 @@ def dashboard(request):
         "stock_stems": stock.aggregate(value=Coalesce(Sum("remaining_stems"), 0))["value"],
         "low_stock": stock.filter(remaining_stems__lte=F("minimum_sale_stems")).count(),
         "lead_pipeline": list(leads.values("status").annotate(count=Count("id")).order_by("status")),
-        "recent_leads": LeadSerializer(leads.select_related("customer", "branch")[:6], many=True).data,
+        "recent_leads": LeadSerializer(leads.select_related("customer")[:6], many=True).data,
         "recent_notifications": NotificationSerializer(notifications.filter(is_read=False)[:6], many=True).data,
     }
     return Response(data)
@@ -1237,8 +1725,8 @@ def analytics(request):
     if not has_page_permission(request.user, "dashboard", False):
         return forbidden()
     period_start, period_end = dashboard_period(request)
-    leads = Lead.objects.select_related("customer", "branch").all()
-    conversations = Conversation.objects.select_related("customer", "branch").all()
+    leads = Lead.objects.select_related("customer").all()
+    conversations = Conversation.objects.select_related("customer").all()
     customers = Customer.objects.all()
     stock_movements = StockMovement.objects.all()
     period_leads = apply_created_range(leads, period_start, period_end)
@@ -1632,7 +2120,7 @@ def mini_app_customer(identity):
 def mini_app_order_rows(customer):
     if not customer:
         return []
-    rows = Lead.objects.filter(customer=customer).select_related("branch").order_by("-created_at")[:30]
+    rows = Lead.objects.filter(customer=customer).order_by("-created_at")[:30]
     statuses = {row.key: row.name_uz for row in LeadStatus.objects.filter(key__in=[lead.status for lead in rows])}
     return [{
         "id": row.id,
@@ -1648,16 +2136,9 @@ def mini_app_order_rows(customer):
     } for row in rows]
 
 
-def mini_app_branch(branch_id=None):
-    return default_branch()
-
-
 def mini_app_quote_payload(data):
-    branch = mini_app_branch(data.get("branch"))
     if data["arrangement_type"] in ["bouquet", "basket"]:
-        quote = mini_app_custom_quote_ai(data["request_text"], data["arrangement_type"])
-        quote["branch"] = branch
-        return quote
+        return mini_app_custom_quote_ai(data["request_text"], data["arrangement_type"])
     total = Decimal("0")
     lines = []
     for item in data["items"]:
@@ -1671,7 +2152,7 @@ def mini_app_quote_payload(data):
             lines.append({"type": "catalog", "id": catalog.id, "name_uz": catalog.name_uz, "quantity": quantity, "unit_price": str(catalog.price), "total": str(line_total)})
             continue
         raise ValueError("Mini app katalogda faqat catalog_item ishlatiladi")
-    return {"branch": branch, "lines": lines, "packaging": None, "florist_fee": str(Decimal("0")), "estimated_price": str(total), "price_is_estimate": False, "ai_note": ""}
+    return {"lines": lines, "packaging": None, "florist_fee": str(Decimal("0")), "estimated_price": str(total), "price_is_estimate": False, "ai_note": ""}
 
 
 def mini_app_request_text(arrangement_type, quote, note=""):
@@ -1717,7 +2198,7 @@ def mini_app_catalog(request):
         identity = mini_app_identity(request.query_params.get("init_data", ""))
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
-    catalog = CatalogItem.objects.filter(status="available").select_related("branch", "social_post")[:50]
+    catalog = CatalogItem.objects.filter(status="available").select_related("social_post")[:50]
     customer = mini_app_customer(identity)
     return Response({"catalog": CatalogItemSerializer(catalog, many=True).data, "customer": CustomerSerializer(customer).data if customer else None, "orders": mini_app_order_rows(customer)})
 
@@ -1733,7 +2214,6 @@ def mini_app_quote(request):
         quote = mini_app_quote_payload(serializer.validated_data)
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-    quote.pop("branch")
     return Response(quote)
 
 
@@ -1757,10 +2237,10 @@ def mini_app_lead(request):
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     phone = normalize_phone(serializer.validated_data["phone"]) or serializer.validated_data["phone"]
-    customer, _ = Customer.objects.update_or_create(instagram_user_id=f"miniapp:{mini_user}", defaults={"name": serializer.validated_data["name"], "phone": phone, "branch": quote["branch"], "language": "uz"})
+    customer, _ = Customer.objects.update_or_create(instagram_user_id=f"miniapp:{mini_user}", defaults={"name": serializer.validated_data["name"], "phone": phone, "language": "uz"})
     request_text = mini_app_request_text(serializer.validated_data["arrangement_type"], quote, serializer.validated_data.get("note", ""))
     details = {"lines": quote["lines"], "packaging": quote["packaging"], "florist_fee": quote["florist_fee"], "estimated_price": quote["estimated_price"], "price_is_estimate": quote["price_is_estimate"], "ai_note": quote.get("ai_note", ""), "note": serializer.validated_data.get("note", "")}
-    lead = Lead.objects.create(customer=customer, branch=quote["branch"], status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app", details=details)
+    lead = Lead.objects.create(customer=customer, status="new", request_uz=request_text, arrangement_type=serializer.validated_data["arrangement_type"], estimated_price=quote["estimated_price"], source="mini_app", details=details)
     for row in quote["lines"]:
         if row["type"] == "catalog":
             catalog_item = CatalogItem.objects.filter(id=row["id"]).first()
@@ -1770,7 +2250,7 @@ def mini_app_lead(request):
             batch = StockBatch.objects.filter(id=row["id"]).first()
             if batch:
                 LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=row["quantity_stems"], quantity_bunches=Decimal(row["quantity_stems"]) / Decimal(batch.stems_per_bunch))
-    Notification.objects.create(branch=quote["branch"], notification_type="lead", title_uz=f"Mini app lead: {customer}", title_ru=f"Mini app лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
+    Notification.objects.create(notification_type="lead", title_uz=f"Mini app lead: {customer}", title_ru=f"Mini app лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     return Response(LeadSerializer(lead).data, status=status.HTTP_201_CREATED)
 
 

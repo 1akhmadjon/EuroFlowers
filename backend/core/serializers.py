@@ -10,19 +10,12 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .branching import default_branch
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, UserProfile
 
 
 class DetailValidationError(APIException):
     status_code = 400
     default_code = "invalid"
-
-
-class BranchSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Branch
-        fields = "__all__"
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -139,8 +132,7 @@ class UserWriteSerializer(serializers.ModelSerializer):
         else:
             user.set_unusable_password()
         user.save()
-        profile = UserProfile.objects.create(user=user, role=role, language=language)
-        profile.branches.set([default_branch()])
+        UserProfile.objects.create(user=user, role=role, language=language)
         self.save_permissions(user, permissions)
         return user
 
@@ -216,14 +208,13 @@ class FloristProfileRateSerializer(serializers.ModelSerializer):
 
 class FloristProfileSerializer(serializers.ModelSerializer):
     user_detail = UserSerializer(source="user", read_only=True)
-    branch_detail = BranchSerializer(source="branch", read_only=True)
     salary_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     catalog_count = serializers.IntegerField(read_only=True)
     volume_rates = FloristProfileRateSerializer(many=True, required=False)
 
     class Meta:
         model = FloristProfile
-        exclude = ["branch"]
+        fields = "__all__"
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -239,7 +230,6 @@ class FloristProfileSerializer(serializers.ModelSerializer):
         for row in rows:
             seen.add((row["arrangement_type"], row["volume"]))
             FloristVolumeRate.objects.update_or_create(
-                branch=profile.branch,
                 florist=profile,
                 arrangement_type=row["arrangement_type"],
                 volume=row["volume"],
@@ -249,7 +239,7 @@ class FloristProfileSerializer(serializers.ModelSerializer):
                     "is_active": row.get("is_active", True),
                 },
             )
-        query = FloristVolumeRate.objects.filter(branch=profile.branch, florist=profile)
+        query = FloristVolumeRate.objects.filter(florist=profile)
         for rate in query:
             if (rate.arrangement_type, rate.volume) not in seen:
                 rate.is_active = False
@@ -257,7 +247,6 @@ class FloristProfileSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         volume_rates = validated_data.pop("volume_rates", None)
-        validated_data.setdefault("branch", default_branch())
         profile = super().create(validated_data)
         self.sync_volume_rates(profile, volume_rates)
         return profile
@@ -312,23 +301,11 @@ class FloristSalaryEntrySerializer(serializers.ModelSerializer):
 
 
 class FloristVolumeRateSerializer(serializers.ModelSerializer):
-    branch_detail = BranchSerializer(source="branch", read_only=True)
     florist_name = serializers.SerializerMethodField()
 
     class Meta:
         model = FloristVolumeRate
-        exclude = ["branch"]
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-        florist = attrs.get("florist") or getattr(self.instance, "florist", None)
-        if florist:
-            attrs["branch"] = florist.branch
-        return attrs
-
-    def create(self, validated_data):
-        validated_data.setdefault("branch", default_branch())
-        return super().create(validated_data)
+        fields = "__all__"
 
     @extend_schema_field(serializers.CharField())
     def get_florist_name(self, obj):
@@ -348,7 +325,7 @@ class StockBatchSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StockBatch
-        exclude = ["branch"]
+        fields = "__all__"
         extra_kwargs = {
             "received_stems": {"required": False},
             "remaining_stems": {"required": False},
@@ -390,7 +367,6 @@ class StockBatchSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data.pop("received_bunches", None)
-        validated_data.setdefault("branch", default_branch())
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
@@ -414,7 +390,7 @@ class PackagingSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Packaging
-        exclude = ["branch"]
+        fields = "__all__"
 
     def save_image(self, validated_data):
         image = validated_data.pop("image", None)
@@ -425,7 +401,6 @@ class PackagingSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data = self.save_image(validated_data)
-        validated_data.setdefault("branch", default_branch())
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
@@ -473,10 +448,11 @@ class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
     history = CatalogHistorySerializer(many=True, read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False, write_only=True)
 
     class Meta:
         model = CatalogItem
-        fields = ["id", "name_uz", "description_uz", "description_ru", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "height_cm", "diameter_cm", "price", "florist_fee", "florist_salary_amount", "calculated_component_price", "discount_amount", "discount_percent", "discount_reason", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials", "history"]
+        fields = ["id", "name_uz", "description_uz", "description_ru", "note", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "height_cm", "diameter_cm", "price", "florist_fee", "florist_salary_amount", "calculated_component_price", "discount_amount", "discount_percent", "discount_reason", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials", "history", "payment_type"]
         read_only_fields = ["quantity_sold", "quantity_stock_deducted", "calculated_component_price", "discount_amount", "discount_percent"]
 
 
@@ -587,16 +563,15 @@ def apply_volume_rate_to_attrs(attrs, initial_data=None):
     data = initial_data or {}
     if "florist_salary_amount" in attrs or "florist_salary_amount" in data:
         return attrs
-    branch = attrs.get("branch") or default_branch()
     arrangement_type = attrs.get("arrangement_type")
     volume = attrs.get("volume")
     florist = attrs.get("florist")
     if arrangement_type and volume:
         rate = None
         if florist:
-            rate = FloristVolumeRate.objects.filter(branch=branch, florist=florist, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
+            rate = FloristVolumeRate.objects.filter(florist=florist, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
         if not rate:
-            rate = FloristVolumeRate.objects.filter(branch=branch, florist__isnull=True, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
+            rate = FloristVolumeRate.objects.filter(florist__isnull=True, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
         if rate:
             attrs["florist_salary_amount"] = rate.florist_fee
     return attrs
@@ -621,7 +596,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
     catalog_items = SocialPostCatalogItemSerializer(many=True, required=False)
     class Meta:
         model = SocialPost
-        exclude = ["branch"]
+        fields = "__all__"
         extra_kwargs = {"media_id": {"required": False}, "post_type": {"required": False}}
 
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
@@ -707,28 +682,22 @@ class SocialPostSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"permalink": f"Bu Instagram link allaqachon SocialPost id={existing.id} da bor."})
 
     def _validate_catalog_items(self, post_data, catalog_items):
-        branch = post_data.get("branch") or getattr(self.instance, "branch", None)
         for item in catalog_items:
             quantity_total = item.get("quantity_total", 1)
             for row in item.get("composition") or []:
                 batch = row["stock_batch"]
-                if branch and batch.branch_id != branch.id:
-                    raise serializers.ValidationError({"catalog_items": f"{batch.batch_number} boshqa filialga tegishli"})
                 needed = row["quantity_stems"] * quantity_total
                 if batch.remaining_stems < needed:
                     detail = catalog_stock_error(batch, needed)
                     raise DetailValidationError(detail)
             for row in item.get("materials") or []:
                 packaging = row["packaging"]
-                if branch and packaging.branch_id != branch.id:
-                    raise serializers.ValidationError({"catalog_items": f"{packaging.name_uz} boshqa filialga tegishli"})
                 needed = row.get("quantity", 1) * quantity_total
                 if packaging.quantity < needed:
                     detail = catalog_material_error(packaging, needed)
                     raise DetailValidationError(detail)
 
     def validate(self, attrs):
-        attrs.setdefault("branch", default_branch())
         if "catalog_items" in attrs:
             attrs["catalog_items"] = merge_catalog_item_payloads(attrs.get("catalog_items") or [])
         catalog_items = attrs.get("catalog_items") or []
@@ -739,6 +708,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
         from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
         user = getattr(self.context.get("request"), "user", None)
         for item_data in merge_catalog_item_payloads(catalog_items):
+            payment_type = item_data.pop("payment_type", "")
             has_composition = "composition" in item_data
             composition = item_data.pop("composition", None)
             has_materials = "materials" in item_data
@@ -759,7 +729,6 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     restore_catalog_inventory(item, user, item.quantity_stock_deducted)
                 for key, value in item_data.items():
                     setattr(item, key, value)
-                item.branch = post.branch
                 item.social_post = post
                 if item.catalog_kind == "custom":
                     item.status = "sold"
@@ -772,7 +741,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     item_data["status"] = "sold"
                     item_data["quantity_sold"] = item_data.get("quantity_total") or 1
                     item_data["sold_at"] = timezone.now()
-                item = CatalogItem.objects.create(branch=post.branch, social_post=post, **item_data)
+                item = CatalogItem.objects.create(social_post=post, **item_data)
             if has_composition:
                 item.composition.all().delete()
                 CatalogComposition.objects.bulk_create([CatalogComposition(catalog_item=item, **row) for row in composition])
@@ -798,7 +767,12 @@ class SocialPostSerializer(serializers.ModelSerializer):
                 if not item.history.filter(action="created").exists():
                     create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi")
                 if not item.history.filter(action="sold").exists():
-                    create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason)
+                    snapshot = None
+                    if payment_type:
+                        from .inventory_services import catalog_snapshot
+                        snapshot = catalog_snapshot(item)
+                        snapshot["payment_type"] = payment_type
+                    create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot)
                     notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             elif not item.history.filter(action="created").exists():
                 create_catalog_history(item, "created", user=user, note="Katalog qo‘shildi")
@@ -829,13 +803,13 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     history = CatalogHistorySerializer(many=True, read_only=True)
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False, write_only=True)
     class Meta:
         model = CatalogItem
-        exclude = ["branch"]
+        fields = "__all__"
         read_only_fields = ["created_by", "sold_at", "stock_deducted_at", "calculated_component_price", "discount_amount", "discount_percent"]
 
     def validate(self, attrs):
-        attrs.setdefault("branch", getattr(self.instance, "branch", None) or default_branch())
         composition = attrs.get("composition")
         materials = attrs.get("materials")
         quantity_total = attrs.get("quantity_total", getattr(self.instance, "quantity_total", 1))
@@ -855,16 +829,6 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             materials = attrs["materials"]
         elif materials is not None:
             materials = normalize_catalog_material_rows(materials)
-        if composition:
-            for row in composition:
-                batch = row["stock_batch"]
-                if batch.branch_id != attrs["branch"].id:
-                    raise serializers.ValidationError({"composition": f"{batch.batch_number} boshqa filialga tegishli"})
-        if materials:
-            for row in materials:
-                packaging = row["packaging"]
-                if packaging.branch_id != attrs["branch"].id:
-                    raise serializers.ValidationError({"materials": f"{packaging.name_uz} boshqa filialga tegishli"})
         if composition and not self.instance:
             for row in composition:
                 batch = row["stock_batch"]
@@ -886,6 +850,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, sync_catalog_financials, sync_catalog_florist_salary
+        payment_type = validated_data.pop("payment_type", "")
         composition = normalize_catalog_composition_rows(validated_data.pop("composition", []))
         materials = normalize_catalog_material_rows(validated_data.pop("materials", []))
         validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
@@ -909,13 +874,19 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi" if item.catalog_kind == "custom" else "Katalog qo‘shildi")
             notify_florist_catalog(item, "Yangi ish biriktirildi", f"{item.name_uz} katalogi sizga biriktirildi.")
             if item.catalog_kind == "custom":
-                create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason)
+                snapshot = None
+                if payment_type:
+                    from .inventory_services import catalog_snapshot
+                    snapshot = catalog_snapshot(item)
+                    snapshot["payment_type"] = payment_type
+                create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot)
                 notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             self._sync_social_post_image(item)
         return item
 
     def update(self, instance, validated_data):
         from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        payment_type = validated_data.pop("payment_type", "")
         old_florist_id = instance.florist_id
         composition = validated_data.pop("composition", None)
         materials = validated_data.pop("materials", None)
@@ -960,7 +931,12 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 notify_florist_catalog(instance, "Yangi ish biriktirildi", f"{instance.name_uz} katalogi sizga biriktirildi.")
             create_catalog_history(instance, "updated", user=user, note="Katalog o‘zgartirildi")
             if instance.catalog_kind == "custom" and not instance.history.filter(action="sold").exists():
-                create_catalog_history(instance, "sold", user=user, quantity=instance.quantity_sold, listed_unit_price=custom_component_unit_price(instance), sold_unit_price=instance.price, discount_reason=instance.discount_reason)
+                snapshot = None
+                if payment_type:
+                    from .inventory_services import catalog_snapshot
+                    snapshot = catalog_snapshot(instance)
+                    snapshot["payment_type"] = payment_type
+                create_catalog_history(instance, "sold", user=user, quantity=instance.quantity_sold, listed_unit_price=custom_component_unit_price(instance), sold_unit_price=instance.price, discount_reason=instance.discount_reason, snapshot=snapshot)
                 notify_florist_catalog(instance, "Katalog sotildi", f"{instance.name_uz} katalogidan {instance.quantity_sold} ta sotildi.")
             self._sync_social_post_image(instance)
         return instance
@@ -984,7 +960,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     total_spent = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     class Meta:
         model = Customer
-        exclude = ["branch"]
+        fields = "__all__"
 
 
 class MessageSerializer(serializers.ModelSerializer):
@@ -1002,7 +978,7 @@ class ConversationSerializer(serializers.ModelSerializer):
     ai_is_active = serializers.SerializerMethodField()
     class Meta:
         model = Conversation
-        exclude = ["branch"]
+        fields = "__all__"
 
     def to_representation(self, instance):
         if instance.ai_paused_until and instance.ai_paused_until <= timezone.now():
@@ -1068,7 +1044,7 @@ class LeadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lead
-        exclude = ["branch"]
+        fields = "__all__"
         extra_kwargs = {"customer": {"required": False}}
 
     @extend_schema_field(serializers.DictField(allow_null=True))
@@ -1102,7 +1078,7 @@ class LeadSerializer(serializers.ModelSerializer):
             "catalog_item": row.catalog_item_id,
             "catalog_detail": CatalogItemSerializer(row.catalog_item).data,
             "quantity": row.quantity,
-        } for row in obj.catalog_usage.select_related("catalog_item__branch", "catalog_item__social_post").prefetch_related("catalog_item__composition").all()]
+        } for row in obj.catalog_usage.select_related("catalog_item__social_post").prefetch_related("catalog_item__composition").all()]
 
     def validate(self, attrs):
         customer = attrs.get("customer") or getattr(self.instance, "customer", None)
@@ -1127,24 +1103,17 @@ class LeadSerializer(serializers.ModelSerializer):
             return customer
         from .services import normalize_phone
         normalized = normalize_phone(phone) or phone
-        branch = attrs.get("branch")
-        if not branch:
-            branch = default_branch()
-            attrs["branch"] = branch
         customer = Customer.objects.filter(phone=normalized).first() if normalized else None
         if customer:
             updates = []
             if name and not customer.name:
                 customer.name = name
                 updates.append("name")
-            if branch and not customer.branch_id:
-                customer.branch = branch
-                updates.append("branch")
             if updates:
                 customer.save(update_fields=updates + ["updated_at"])
             return customer
         external = external_id or f"manual:{normalized or name}"
-        customer = Customer.objects.create(name=name, phone=normalized, branch=branch, language="uz", instagram_user_id=external)
+        customer = Customer.objects.create(name=name, phone=normalized, language="uz", instagram_user_id=external)
         return customer
 
     def _save_usage(self, lead, stock_rows=None, packaging_rows=None, catalog_rows=None):
@@ -1162,7 +1131,6 @@ class LeadSerializer(serializers.ModelSerializer):
         stock_rows = validated_data.pop("stock_usage_input", None)
         packaging_rows = validated_data.pop("packaging_usage_input", None)
         catalog_rows = validated_data.pop("catalog_usage_input", None)
-        validated_data.setdefault("branch", default_branch())
         customer = self._customer_from_attrs(validated_data)
         lead = Lead.objects.create(customer=customer, **validated_data)
         self._save_usage(lead, stock_rows, packaging_rows, catalog_rows)
@@ -1187,7 +1155,7 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Notification
-        exclude = ["branch"]
+        fields = "__all__"
 
 
 class LeadStatusSerializer(serializers.ModelSerializer):
@@ -1332,6 +1300,7 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, required=False, default=1)
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     discount_reason = serializers.CharField(required=False, allow_blank=True)
+    payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False)
 
 
 class SimulateResponseSerializer(serializers.Serializer):

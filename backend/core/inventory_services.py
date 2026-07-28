@@ -79,9 +79,9 @@ def apply_volume_rate(item):
         return item
     rate = None
     if item.florist_id:
-        rate = FloristVolumeRate.objects.filter(branch=item.branch, florist=item.florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
+        rate = FloristVolumeRate.objects.filter(florist=item.florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
     if not rate:
-        rate = FloristVolumeRate.objects.filter(branch=item.branch, florist__isnull=True, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
+        rate = FloristVolumeRate.objects.filter(florist__isnull=True, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
     if rate:
         item.florist_salary_amount = rate.florist_fee
     return item
@@ -121,10 +121,9 @@ def sync_catalog_florist_salary(item, user):
             "note": f"{item.name_uz} uchun florist haqi",
             "created_by": user if getattr(user, "is_authenticated", False) else None,
         },
-    )
+        )
     if old_amount != entry.amount:
         Notification.objects.create(
-            branch=item.branch,
             target_user=item.florist.user,
             notification_type="florist_salary",
             title_uz="Ish haqi qo‘shildi",
@@ -138,11 +137,10 @@ def sync_catalog_florist_salary(item, user):
 
 
 def notify_florist_catalog(item, title, body, reference_id=None):
-    item = CatalogItem.objects.select_related("florist__user", "branch").filter(pk=item.pk).first()
+    item = CatalogItem.objects.select_related("florist__user").filter(pk=item.pk).first()
     if not item or not item.florist_id:
         return None
     return Notification.objects.create(
-        branch=item.branch,
         target_user=item.florist.user,
         notification_type="florist_catalog",
         title_uz=title,
@@ -277,7 +275,7 @@ def restore_catalog_inventory(item, user, quantity=None):
     return item
 
 
-def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason=""):
+def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type=""):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
         quantity = int(quantity or 1)
@@ -298,9 +296,11 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
         elif item.status == "draft":
             item.status = "available"
         item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
-        history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason)
+        snapshot = catalog_snapshot(item)
+        snapshot["payment_type"] = payment_type or ""
+        history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason, snapshot=snapshot)
         notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
-        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason})
+        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "payment_type": payment_type or "", "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason})
     return item
 
 
@@ -453,7 +453,6 @@ def apply_stock_movement(batch, movement_type, quantity_stems=None, reason="", u
         AuditLog.objects.create(user=user, action="stock_movement", summary=f"{batch.batch_number} partiyada {movement_type} harakati", entity_type="StockBatch", entity_id=str(batch.id), before={"remaining_stems": before, "remaining_bunches": str(Decimal(before) / Decimal(batch.stems_per_bunch))}, after={"batch": batch.batch_number, "flower": str(batch.variant), "supplier": batch.supplier.name if batch.supplier_id else "", "movement": movement.id, "movement_type": movement_type, "quantity_stems": delta, "quantity_bunches": str(movement_bunches), "remaining_stems": batch.remaining_stems, "remaining_bunches": str(batch.remaining_bunches), "reason": reason})
         if batch.remaining_stems <= batch.minimum_sale_stems:
             Notification.objects.create(
-                branch=batch.branch,
                 notification_type="low_stock",
                 title_uz=f"{batch.variant.flower.name_uz} qoldig‘i kamaydi",
                 title_ru=f"{batch.variant.flower.name_uz} qoldig‘i kamaydi",

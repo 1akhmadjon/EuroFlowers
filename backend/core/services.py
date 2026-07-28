@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Prefetch, Q
+from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
 from .models import AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
@@ -120,6 +120,10 @@ def catalog_composition_summary(item):
         name = f"{batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz}".strip()
         rows.append({"name_uz": name, "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)})
     return rows
+
+
+def available_catalog_queryset():
+    return CatalogItem.objects.filter(status="available", quantity_sold__lt=F("quantity_total"))
 
 
 def stock_availability(batch):
@@ -273,7 +277,7 @@ def recent_customer_orders(customer):
 
 
 def ai_catalog_rows(query="", limit=24, arrangement_type=""):
-    queryset = CatalogItem.objects.filter(status="available").select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
+    queryset = available_catalog_queryset().select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
     if arrangement_type in ["bouquet", "basket", "box"]:
         queryset = queryset.filter(arrangement_type=arrangement_type)
     generic_query_terms = {"vitrina", "katalog", "catalog", "tayyor", "mahsulot", "gulla", "buketlar", "savatlar"}
@@ -300,7 +304,7 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
 
 
 def ai_stock_rows(query="", limit=24):
-    stock_batches = StockBatch.objects.filter(is_active=True).select_related("variant__flower").order_by("-remaining_stems", "sale_price_per_stem", "id")
+    stock_batches = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("received_at", "id")
     queryset = (
         FlowerVariant.objects
         .filter(is_active=True)
@@ -323,7 +327,8 @@ def ai_stock_rows(query="", limit=24):
     rows = []
     for variant in queryset:
         batches = getattr(variant, "ai_stock_batches", [])
-        rows.extend(stock_batch_ai_row(batch) for batch in batches if batch.remaining_stems > 0)
+        if batches:
+            rows.append(stock_batch_ai_row(batches[0]))
         if len(rows) >= limit:
             break
     return rows[:limit]
@@ -355,7 +360,7 @@ def ai_flower_variant_rows(query="", limit=24):
         queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz))]
     rows = []
     for variant in queryset[:limit]:
-        stock_rows = StockBatch.objects.filter(variant=variant, is_active=True).order_by("-remaining_stems", "sale_price_per_stem", "id")[:10]
+        stock_rows = StockBatch.objects.filter(variant=variant, is_active=True, remaining_stems__gt=0).order_by("received_at", "id")[:1]
         rows.append({
             "variant_id": variant.id,
             "display_name_uz": flower_variant_display_name(variant, "uz"),
@@ -382,7 +387,7 @@ def ai_post_context(conversation):
     if not conversation.social_post_id:
         return None
     post = conversation.social_post
-    post_catalog = CatalogItem.objects.filter(social_post=post, status="available").prefetch_related("composition__stock_batch__variant__flower")
+    post_catalog = available_catalog_queryset().filter(social_post=post).prefetch_related("composition__stock_batch__variant__flower")
     return {
         "type": post.post_type,
         "title_uz": post.title_uz,
@@ -648,7 +653,7 @@ def send_catalog_item_image(conversation, item):
 
 
 def _stock_batch_for_ai(query="", batch_id=None):
-    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("-remaining_stems", "sale_price_per_stem", "id")
+    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("received_at", "id")
     if batch_id:
         return queryset.filter(id=batch_id).first()
     query = (query or "").strip()
@@ -669,7 +674,7 @@ def _stock_batch_for_ai(query="", batch_id=None):
         if score:
             ranked.append((score, batch))
     if ranked:
-        return sorted(ranked, key=lambda row: (-row[0], not bool(stock_image_url(row[1])), -row[1].remaining_stems, row[1].sale_price_per_stem, row[1].id))[0][1]
+        return sorted(ranked, key=lambda row: (-row[0], row[1].received_at, row[1].id))[0][1]
     return None
 
 
@@ -712,7 +717,7 @@ def execute_ai_tool(name, arguments, conversation):
         query = arguments.get("query") or ""
         item = _catalog_item_for_ai(query)
         if not item:
-            item = CatalogItem.objects.filter(status="available").filter(Q(name_uz__icontains=query)).select_related("social_post").first()
+            item = available_catalog_queryset().filter(Q(name_uz__icontains=query)).select_related("social_post").first()
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
@@ -802,7 +807,6 @@ def execute_ai_tool(name, arguments, conversation):
         return {"ok": False, "detail": "phone_required"}
     lead = Lead.objects.create(
         customer=customer,
-        branch=conversation.branch,
         conversation=conversation,
         social_post=conversation.social_post,
         request_uz=request_text,
@@ -821,7 +825,7 @@ def execute_ai_tool(name, arguments, conversation):
         quantity_stems = int(row.get("quantity_stems") or 0)
         if batch and quantity_stems > 0:
             LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
-    Notification.objects.create(branch=conversation.branch, notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
+    Notification.objects.create(notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     return {"ok": True, "lead_id": lead.id}
 
 
@@ -1002,13 +1006,13 @@ def recent_catalog_item_for_conversation(conversation):
             catalog_id = row.get("catalog_id")
             quantity = int(row.get("quantity") or 0)
             if catalog_id and quantity > 0:
-                item = CatalogItem.objects.filter(id=catalog_id).first()
+                item = available_catalog_queryset().filter(id=catalog_id).first()
                 if item:
                     return item
         media_key = (message.metadata or {}).get("media_image_key") or ""
         match = re.search(r":catalog:(\d+):", media_key)
         if match:
-            item = CatalogItem.objects.filter(id=match.group(1)).first()
+            item = available_catalog_queryset().filter(id=match.group(1)).first()
             if item:
                 return item
     return None
@@ -1046,7 +1050,7 @@ def _catalog_item_for_ai(*values):
     for value in values:
         if value:
             texts.extend(_catalog_text_aliases(compact_match_text(value)))
-    available_items = list(CatalogItem.objects.filter(status="available"))
+    available_items = list(available_catalog_queryset())
     for text in texts:
         for item in available_items:
             name = compact_match_text(item.name_uz)
@@ -1148,7 +1152,7 @@ def single_catalog_item_from_ai_result(result, conversation):
         if item:
             return item, "selected_item"
     if conversation.social_post_id:
-        post_items = list(CatalogItem.objects.filter(social_post=conversation.social_post, status="available")[:2])
+        post_items = list(available_catalog_queryset().filter(social_post=conversation.social_post)[:2])
         if len(post_items) == 1:
             return post_items[0], "social_post"
     return None, ""
@@ -1224,7 +1228,7 @@ def create_ai_reply_for_conversation(conversation):
     result = enforce_catalog_image_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
-        Notification.objects.create(branch=conversation.branch, notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
+        Notification.objects.create(notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
     return reply
 
 
@@ -1268,7 +1272,7 @@ def process_pending_customer_reply(conversation_id, expected_message_id):
         conversation.ai_reply_started_at = timezone.now()
         conversation.save(update_fields=["ai_reply_started_for_message", "ai_reply_started_at", "updated_at"])
     try:
-        conversation = Conversation.objects.select_related("customer", "branch", "social_post").get(id=conversation_id)
+        conversation = Conversation.objects.select_related("customer", "social_post").get(id=conversation_id)
         reply = create_ai_reply_for_conversation(conversation)
     except Exception:
         Conversation.objects.filter(id=conversation_id, ai_reply_started_for_message_id=expected_message_id).update(ai_reply_started_for_message=None, ai_reply_started_at=None)

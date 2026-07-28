@@ -1,7 +1,7 @@
 import os
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
-from core.models import Branch, PagePermission, UserProfile
+from core.models import PagePermission, UserProfile
 
 
 class Command(BaseCommand):
@@ -43,9 +43,6 @@ class Command(BaseCommand):
             profile_changed.append("language")
         if profile_changed:
             profile.save(update_fields=profile_changed + ["updated_at"])
-        branches = list(Branch.objects.filter(is_active=True))
-        if branches:
-            profile.branches.set(branches)
         for page, _ in PagePermission.PAGE_CHOICES:
             PagePermission.objects.update_or_create(user=user, page=page, defaults={"can_view": True, "can_control": True})
         self.stdout.write(self.style.SUCCESS(f"Developer user ready: {username}"))

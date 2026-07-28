@@ -17,7 +17,7 @@ def broadcast_notification(sender, instance, created, **kwargs):
     if instance.target_user_id:
         transaction.on_commit(lambda: broadcast_to_user(instance.target_user_id, payload))
     else:
-        transaction.on_commit(lambda: broadcast_to_page("notifications", payload, instance.branch_id))
+        transaction.on_commit(lambda: broadcast_to_page("notifications", payload))
 
 
 @receiver(post_save, sender=Conversation)
@@ -28,7 +28,7 @@ def broadcast_conversation(sender, instance, created, **kwargs):
         "type": "conversation.created",
         "conversation": ConversationSerializer(instance).data,
     }
-    transaction.on_commit(lambda: broadcast_to_page("conversations", payload, instance.branch_id))
+    transaction.on_commit(lambda: broadcast_to_page("conversations", payload))
 
 
 @receiver(post_save, sender=Message)
@@ -40,8 +40,7 @@ def broadcast_message(sender, instance, created, **kwargs):
         "conversation_id": instance.conversation_id,
         "message": MessageSerializer(instance).data,
     }
-    branch_id = instance.conversation.branch_id
-    transaction.on_commit(lambda: broadcast_to_page("conversations", payload, branch_id))
+    transaction.on_commit(lambda: broadcast_to_page("conversations", payload))
 
 
 @receiver(post_save, sender=Lead)
@@ -50,4 +49,4 @@ def broadcast_lead(sender, instance, created, **kwargs):
         "type": "lead.created" if created else "lead.updated",
         "lead": LeadSerializer(instance).data,
     }
-    transaction.on_commit(lambda: broadcast_to_page("crm", payload, instance.branch_id))
+    transaction.on_commit(lambda: broadcast_to_page("crm", payload))

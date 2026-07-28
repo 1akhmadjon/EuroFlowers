@@ -208,13 +208,12 @@ def telegram_sender_action(chat_id, action="typing"):
 
 def send_lead_recall(lead_id):
     with transaction.atomic():
-        lead = Lead.objects.select_for_update().select_related("customer", "branch").filter(id=lead_id).first()
+        lead = Lead.objects.select_for_update().select_related("customer").filter(id=lead_id).first()
         if not lead or lead.status == "lost" or lead.recall_sent_at or not lead.recall_at or lead.recall_at > timezone.now():
             return None
         title = f"Recall: Lead #{lead.id}"
         body = f"{lead.customer} buyurtmasi 1 soat ichida yuborilishi kerak. Telefon: {lead.customer.phone or lead.customer.masked_phone}. So‘rov: {lead.request_uz or lead.request_ru}"
         notification = Notification.objects.create(
-            branch=lead.branch,
             notification_type="lead",
             title_uz=title,
             title_ru=title,
