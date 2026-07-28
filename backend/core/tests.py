@@ -714,6 +714,16 @@ class BusinessRulesTests(TestCase):
         self.assertIn("150 000 + 150 000 + 50 000 = 350 000", rule)
         self.assertIn("Hech qachon shu holatni 550 000", rule)
 
+    def test_public_reply_boundaries_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0043_ai_prompt_public_reply_boundaries")
+        rule = migration.PUBLIC_REPLY_BOUNDARIES_RULE
+        self.assertIn("lead, CRM, tizimga yozish", rule)
+        self.assertIn("leadga qo'shsam bo'ladimi", rule)
+        self.assertIn("Manzil javobining oxiriga", rule)
+        self.assertIn("Rahmat, tez orada operatorlarimiz", rule)
+        self.assertIn("Ko'pi bilan 3-5 qator", rule)
+        self.assertIn("Jami taxminan 350 000 so'm", rule)
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
