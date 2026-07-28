@@ -80,6 +80,8 @@ def lead_sort_order_between(before, after, status_value):
 def create_user_notification(user, notification_type, title, body, reference_type="", reference_id=None):
     if not user:
         return None
+    if getattr(getattr(user, "profile", None), "role", None) == "developer":
+        return None
     return Notification.objects.create(
         target_user=user,
         notification_type=notification_type,
@@ -92,9 +94,24 @@ def create_user_notification(user, notification_type, title, body, reference_typ
     )
 
 
+def notification_references_developer(queryset):
+    developer_user_ids = list(User.objects.filter(profile__role="developer").values_list("id", flat=True))
+    developer_florist_ids = list(FloristProfile.objects.filter(user_id__in=developer_user_ids).values_list("id", flat=True))
+    developer_attendance_ids = list(FloristAttendance.objects.filter(florist_id__in=developer_florist_ids).values_list("id", flat=True))
+    developer_salary_ids = list(FloristSalaryEntry.objects.filter(florist_id__in=developer_florist_ids).values_list("id", flat=True))
+    developer_filters = Q(target_user__profile__role="developer")
+    if developer_attendance_ids:
+        developer_filters |= Q(reference_type="attendance", reference_id__in=developer_attendance_ids)
+    if developer_salary_ids:
+        developer_filters |= Q(reference_type="florist_salary", reference_id__in=developer_salary_ids)
+    return queryset.exclude(developer_filters)
+
+
 def notification_queryset_for_user(user):
     queryset = Notification.objects.all()
     role = getattr(getattr(user, "profile", None), "role", None)
+    if role != "developer":
+        queryset = notification_references_developer(queryset)
     if role in ["florist", "apprentice"]:
         return queryset.filter(target_user=user)
     return queryset.filter(Q(target_user__isnull=True) | Q(target_user=user))
@@ -696,7 +713,8 @@ class FloristAttendanceViewSet(ScopedViewSet):
         write_audit(request.user, "attendance_check_in", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} ishga keldi")
         if first_check_in:
             create_user_notification(profile.user, "attendance", "Ishga keldingiz", f"{timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga kelganingiz belgilandi.", "attendance", row.id)
-            Notification.objects.create(notification_type="attendance", title_uz=f"{profile} ishga keldi", title_ru=f"{profile} ishga keldi", body_uz=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", body_ru=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", reference_type="attendance", reference_id=row.id)
+            if getattr(getattr(profile.user, "profile", None), "role", None) != "developer":
+                Notification.objects.create(notification_type="attendance", title_uz=f"{profile} ishga keldi", title_ru=f"{profile} ishga keldi", body_uz=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", body_ru=f"{profile} {timezone.localtime(row.check_in_at).strftime('%Y-%m-%d %H:%M')} da ishga keldi.", reference_type="attendance", reference_id=row.id)
         return Response(self.get_serializer(row).data)
 
     @action(detail=False, methods=["post"], url_path="check-out")

@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
@@ -1329,6 +1329,37 @@ class ApiTests(TestCase):
         response = self.client.get("/api/notifications/?notification_type=attendance")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(any("ishga keldi" in row["title_uz"] for row in response.json()["results"]))
+
+    def test_admin_does_not_see_developer_notifications(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="notifications", can_view=True, can_control=False)
+        developer = User.objects.create_user("hidden-developer", password="password", first_name="Developer")
+        UserProfile.objects.create(user=developer, role="developer")
+        developer_profile = FloristProfile.objects.create(user=developer, staff_type="florist")
+        attendance = FloristAttendance.objects.create(florist=developer_profile, work_date=timezone.localdate(), check_in_at=timezone.now())
+        Notification.objects.create(notification_type="attendance", title_uz="Developer ishga keldi", title_ru="Developer ishga keldi", body_uz="Developer ishga keldi", body_ru="Developer ishga keldi", reference_type="attendance", reference_id=attendance.id)
+        Notification.objects.create(target_user=developer, notification_type="attendance", title_uz="Developer target", title_ru="Developer target", body_uz="Developer target", body_ru="Developer target")
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/notifications/")
+        self.assertEqual(response.status_code, 200)
+        titles = [row["title_uz"] for row in response.json()["results"]]
+        self.assertFalse(any("Developer" in title for title in titles))
+
+    def test_developer_check_in_does_not_create_visible_notifications(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="notifications", can_view=True, can_control=False)
+        developer = User.objects.create_user("checkin-developer", password="password", first_name="Developer")
+        UserProfile.objects.create(user=developer, role="developer")
+        FloristProfile.objects.create(user=developer, staff_type="florist")
+        PagePermission.objects.create(user=developer, page="attendance", can_view=True, can_control=True)
+        self.client.force_authenticate(developer)
+        response = self.client.post("/api/florist-attendance/check-in/", {"checked_at": "2026-07-27T09:00:00+05:00"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Notification.objects.filter(title_uz__icontains="Developer").exists())
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/notifications/?notification_type=attendance")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"], [])
 
     def test_permissions_pagination_does_not_conflict_with_permission_page_filter(self):
         UserProfile.objects.create(user=self.user, role="admin")
