@@ -279,6 +279,7 @@ def recent_customer_orders(customer):
 
 
 def ai_catalog_rows(query="", limit=24, arrangement_type=""):
+    query = (query or "").strip()
     queryset = available_catalog_queryset().select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
     if arrangement_type in ["bouquet", "basket", "box"]:
         queryset = queryset.filter(arrangement_type=arrangement_type)
@@ -306,6 +307,7 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
 
 
 def ai_stock_rows(query="", limit=24):
+    query = (query or "").strip()
     stock_batches = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("received_at", "id")
     queryset = (
         FlowerVariant.objects

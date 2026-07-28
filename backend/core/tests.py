@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -77,6 +77,18 @@ class BusinessRulesTests(TestCase):
         batch_ids = [row["batch_id"] for row in rows]
         self.assertIn(self.batch.id, batch_ids)
         self.assertNotIn(StockBatch.objects.get(batch_number="T-2").id, batch_ids)
+
+    def test_ai_stock_rows_treats_whitespace_query_as_all_stock(self):
+        rows = ai_stock_rows(" ", limit=10)
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["batch_id"], self.batch.id)
+
+    def test_ai_catalog_rows_treats_whitespace_query_as_all_catalog(self):
+        self.item.status = "available"
+        self.item.save(update_fields=["status", "updated_at"])
+        rows = ai_catalog_rows(" ", limit=10)
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["name_uz"], self.item.name_uz)
 
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
