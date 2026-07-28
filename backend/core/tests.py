@@ -764,6 +764,17 @@ class BusinessRulesTests(TestCase):
         self.assertIn("775 000", rule)
         self.assertIn("errors qaytarsa, narx aytma", rule)
 
+    def test_natural_sales_flow_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0045_ai_prompt_natural_sales_flow")
+        rule = migration.NATURAL_SALES_FLOW_RULE
+        self.assertIn("qattiq shablon emas", rule)
+        self.assertIn("50 dona guldan bitta buket", rule)
+        self.assertIn("50 dona bitta buketmi yoki 50 ta buket kerakmi", rule)
+        self.assertIn("darhol get_stock va calculate_custom_arrangement_price", rule)
+        self.assertIn("Sizga qachonga kerak edi?", rule)
+        self.assertIn("Yetkazib berish kerakmi yoki kelib olib ketasizmi", rule)
+        self.assertIn("Tushunarli", rule)
+
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
         messages = split_location_reply(text)
