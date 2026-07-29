@@ -78,89 +78,109 @@ def flower_variant_display_name(variant, language):
     return " ".join(part for part in parts if part).strip()
 
 
-def uz_latin_to_cyril(text):
+PROTECTED_RE = re.compile(r"https?://\S+|www\.\S+|[\w.+-]+@[\w-]+\.[\w.]+|EuroFlowers|Next\s+Mall|Instagram|Telegram|\bAI\b", re.IGNORECASE)
+
+CYRIL_TO_LATIN = {
+    "А": "A", "а": "a", "Б": "B", "б": "b", "В": "V", "в": "v", "Г": "G", "г": "g",
+    "Д": "D", "д": "d", "Ё": "Yo", "ё": "yo", "Ж": "J", "ж": "j", "З": "Z", "з": "z",
+    "И": "I", "и": "i", "Й": "Y", "й": "y", "К": "K", "к": "k", "Л": "L", "л": "l",
+    "М": "M", "м": "m", "Н": "N", "н": "n", "О": "O", "о": "o", "П": "P", "п": "p",
+    "Р": "R", "р": "r", "С": "S", "с": "s", "Т": "T", "т": "t", "У": "U", "у": "u",
+    "Ф": "F", "ф": "f", "Х": "X", "х": "x", "Ц": "Ts", "ц": "ts", "Ч": "Ch", "ч": "ch",
+    "Ш": "Sh", "ш": "sh", "Щ": "Shch", "щ": "shch", "Ъ": "’", "ъ": "’", "Ь": "", "ь": "",
+    "Э": "E", "э": "e", "Ю": "Yu", "ю": "yu", "Я": "Ya", "я": "ya",
+    "Ў": "O‘", "ў": "o‘", "Қ": "Q", "қ": "q", "Ғ": "G‘", "ғ": "g‘", "Ҳ": "H", "ҳ": "h",
+    "Ы": "I", "ы": "i", "Ъ".lower(): "’",
+}
+
+LATIN_DIGRAPHS = [
+    ("Sh", "Ш"), ("SH", "Ш"), ("sh", "ш"),
+    ("Ch", "Ч"), ("CH", "Ч"), ("ch", "ч"),
+    ("Yo", "Ё"), ("YO", "Ё"), ("yo", "ё"),
+    ("Yu", "Ю"), ("YU", "Ю"), ("yu", "ю"),
+    ("Ya", "Я"), ("YA", "Я"), ("ya", "я"),
+]
+LATIN_APOSTROPHE = [
+    ("O‘", "Ў"), ("O'", "Ў"), ("O’", "Ў"), ("o‘", "ў"), ("o'", "ў"), ("o’", "ў"),
+    ("G‘", "Ғ"), ("G'", "Ғ"), ("G’", "Ғ"), ("g‘", "ғ"), ("g'", "ғ"), ("g’", "ғ"),
+]
+LATIN_SINGLE = {
+    "a": "а", "b": "б", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "ҳ", "i": "и",
+    "j": "ж", "k": "к", "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "q": "қ",
+    "r": "р", "s": "с", "t": "т", "u": "у", "v": "в", "x": "х", "y": "й", "z": "з",
+    "c": "к", "w": "в",
+    "A": "А", "B": "Б", "D": "Д", "E": "Е", "F": "Ф", "G": "Г", "H": "Ҳ", "I": "И",
+    "J": "Ж", "K": "К", "L": "Л", "M": "М", "N": "Н", "O": "О", "P": "П", "Q": "Қ",
+    "R": "Р", "S": "С", "T": "Т", "U": "У", "V": "В", "X": "Х", "Y": "Й", "Z": "З",
+    "C": "К", "W": "В",
+    "'": "ъ", "’": "ъ", "‘": "ъ",
+}
+
+WORD_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ’‘'"
+
+
+def _split_protected(text):
+    parts, last = [], 0
+    for m in PROTECTED_RE.finditer(text or ""):
+        if m.start() > last:
+            parts.append((text[last:m.start()], False))
+        parts.append((m.group(0), True))
+        last = m.end()
+    parts.append((text[last:], False))
+    return parts
+
+
+def _cyril_chunk_to_latin(chunk):
+    out, prev = [], ""
+    for ch in chunk:
+        if ch in ("Е", "е"):
+            starts_word = not prev or prev not in WORD_CHARS + "абвгдеёжзийклмнопрстуфхцчшщъьэюяўқғҳАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЬЭЮЯЎҚҒҲ"
+            out.append(("Ye" if ch == "Е" else "ye") if starts_word else ("E" if ch == "Е" else "e"))
+        else:
+            out.append(CYRIL_TO_LATIN.get(ch, ch))
+        prev = ch
+    return "".join(out)
+
+
+def cyrillic_to_latin(text):
+    return "".join(chunk if keep else _cyril_chunk_to_latin(chunk) for chunk, keep in _split_protected(text or ""))
+
+
+def _latin_chunk_to_cyril(chunk):
+    value = chunk
+    for src, dst in LATIN_APOSTROPHE:
+        value = value.replace(src, dst)
+    value = re.sub(r"\bYe", "Е", value)
+    value = re.sub(r"\bye", "е", value)
+    value = re.sub(r"\bE(?![‘'’])", "Э", value)
+    value = re.sub(r"\be(?![‘'’])", "э", value)
+    for src, dst in LATIN_DIGRAPHS:
+        value = value.replace(src, dst)
+    return "".join(LATIN_SINGLE.get(ch, ch) for ch in value)
+
+
+def latin_to_cyrillic(text):
+    return "".join(chunk if keep else _latin_chunk_to_cyril(chunk) for chunk, keep in _split_protected(text or ""))
+
+
+RU_MARKERS = re.compile(r"\b(цветы|цветов|какие|сколько|стоит|есть|адрес|где|здравствуйте|спасибо|доставка|нужен|нужна|хочу|работаете|дорого|букет из|привет|можно|пожалуйста|заказ|цена|день|это|вы|мне|для)\b", re.IGNORECASE)
+UZ_CYRIL_MARKERS = re.compile(r"[ўқғҳЎҚҒҲ]|\b(гул|гулла|гуллар|бор|борми|бормиди|керак|кере|канака|қанақа|нечпул|неч|манзил|каерда|қаерда|ассалом|ассалому|раҳмат|рахмат|сават|яса|ясаймиз|ясанг|олиб|беринг|сизда|бизда|ишлайсизми|нархи|дона|сўм|киммат|қиммат|арзон|яхши|ҳам|учун|билан)\b", re.IGNORECASE)
+
+
+def detect_text_script(text):
     value = text or ""
-    replacements = [
-        ("g‘", "ғ"),
-        ("G‘", "Ғ"),
-        ("o‘", "ў"),
-        ("O‘", "Ў"),
-        ("g'", "ғ"),
-        ("G'", "Ғ"),
-        ("o'", "ў"),
-        ("O'", "Ў"),
-        ("sh", "ш"),
-        ("Sh", "Ш"),
-        ("SH", "Ш"),
-        ("ch", "ч"),
-        ("Ch", "Ч"),
-        ("CH", "Ч"),
-        ("yo", "ё"),
-        ("Yo", "Ё"),
-        ("YO", "Ё"),
-        ("yu", "ю"),
-        ("Yu", "Ю"),
-        ("YU", "Ю"),
-        ("ya", "я"),
-        ("Ya", "Я"),
-        ("YA", "Я"),
-        ("ts", "ц"),
-        ("Ts", "Ц"),
-        ("TS", "Ц"),
-    ]
-    for source, target in replacements:
-        value = value.replace(source, target)
-    table = str.maketrans({
-        "a": "а",
-        "b": "б",
-        "d": "д",
-        "e": "е",
-        "f": "ф",
-        "g": "г",
-        "h": "ҳ",
-        "i": "и",
-        "j": "ж",
-        "k": "к",
-        "l": "л",
-        "m": "м",
-        "n": "н",
-        "o": "о",
-        "p": "п",
-        "q": "қ",
-        "r": "р",
-        "s": "с",
-        "t": "т",
-        "u": "у",
-        "v": "в",
-        "x": "х",
-        "y": "й",
-        "z": "з",
-        "A": "А",
-        "B": "Б",
-        "D": "Д",
-        "E": "Е",
-        "F": "Ф",
-        "G": "Г",
-        "H": "Ҳ",
-        "I": "И",
-        "J": "Ж",
-        "K": "К",
-        "L": "Л",
-        "M": "М",
-        "N": "Н",
-        "O": "О",
-        "P": "П",
-        "Q": "Қ",
-        "R": "Р",
-        "S": "С",
-        "T": "Т",
-        "U": "У",
-        "V": "В",
-        "X": "Х",
-        "Y": "Й",
-        "Z": "З",
-    })
-    return value.translate(table)
+    if not re.search(r"[А-Яа-яЁёЎўҚқҒғҲҳ]", value):
+        return "latin"
+    # Rus belgilari aniqroq. Avval ularni tekshiramiz, chunki "букет" kabi so'zlar ikkala tilda bor.
+    if RU_MARKERS.search(value):
+        return "ru"
+    if UZ_CYRIL_MARKERS.search(value):
+        return "uz_cyril"
+    return "uz_cyril"
+
+
+def uz_latin_to_cyril(text):
+    return latin_to_cyrillic(text)
 
 
 def stock_image_url(batch):
@@ -1027,11 +1047,17 @@ def ai_reply(conversation):
     customer = conversation.customer
     history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
     fresh_session = bool(len(history_messages) > 1 and history_messages[-1].created_at - history_messages[-2].created_at >= timedelta(hours=24))
+    latest_customer_text = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
+    # O'zbek kirill suhbatda model lotinda aniqroq yozadi. Kirill matnni lotinga o'girib beramiz,
+    # javobni esa oxirida kirillga qaytaramiz. Rus tiliga tegilmaydi.
+    cyrillic_mode = detect_text_script(latest_customer_text) == "uz_cyril"
     history = []
     for message in history_messages:
         content = message.text
         if message.metadata:
             content = json.dumps({"text": message.text, "metadata": message.metadata}, ensure_ascii=False, default=str)
+        if cyrillic_mode:
+            content = cyrillic_to_latin(content)
         history.append({"role": "user" if message.sender == "customer" else "assistant", "content": content})
     ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
@@ -1164,6 +1190,9 @@ def ai_reply(conversation):
     result.setdefault("stock_items", [])
     if tool_results:
         result["tool_results"] = tool_results
+    if cyrillic_mode and result.get("reply"):
+        result["reply_latin"] = result["reply"]
+        result["reply"] = latin_to_cyrillic(result["reply"])
     created_leads = [row["output"].get("lead_id") for row in tool_results if row.get("name") == "client_lead_create" and row.get("output", {}).get("ok")]
     if created_leads:
         result["lead_created_id"] = created_leads[-1]

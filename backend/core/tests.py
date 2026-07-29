@@ -83,6 +83,61 @@ class BusinessRulesTests(TestCase):
         context = json.loads(client.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
         self.assertEqual(context["customer"]["last_delivery_address"], "Xadra 9")
 
+    def test_cyrillic_latin_roundtrip(self):
+        from .services import cyrillic_to_latin, latin_to_cyrillic, detect_text_script
+        self.assertEqual(cyrillic_to_latin("Ассалому Алайкум"), "Assalomu Alaykum")
+        self.assertEqual(cyrillic_to_latin("Етказиб бериш керакми"), "Yetkazib berish kerakmi")
+        self.assertEqual(cyrillic_to_latin("силада нечпул"), "silada nechpul")
+        self.assertEqual(latin_to_cyrillic("Yetkazib berish kerakmi"), "Етказиб бериш керакми")
+        self.assertEqual(latin_to_cyrillic("Rahmat, kuningiz xayrli o'tsin"), "Раҳмат, кунингиз хайрли ўтсин")
+        self.assertEqual(latin_to_cyrillic("Sizga qanday gul kerak edi?"), "Сизга қандай гул керак эди?")
+        self.assertEqual(latin_to_cyrillic("Florist haqi taxminan 50 000 so'm"), "Флорист ҳақи тахминан 50 000 сўм")
+
+    def test_transliteration_protects_links_and_brands(self):
+        from .services import latin_to_cyrillic
+        self.assertIn("https://yandex.uz/maps/-/CTfQ6TMD", latin_to_cyrillic("Manzil https://yandex.uz/maps/-/CTfQ6TMD"))
+        self.assertIn("Next Mall", latin_to_cyrillic("Next Mall dan keyin"))
+        self.assertIn("EuroFlowers", latin_to_cyrillic("EuroFlowers Premium gul do'koni"))
+
+    def test_detect_text_script_separates_uzbek_cyrillic_from_russian(self):
+        from .services import detect_text_script
+        self.assertEqual(detect_text_script("qanaqa gullar bor"), "latin")
+        self.assertEqual(detect_text_script("канака гулла бор"), "uz_cyril")
+        self.assertEqual(detect_text_script("Ассалому алайкум"), "uz_cyril")
+        self.assertEqual(detect_text_script("какие цветы есть"), "ru")
+        self.assertEqual(detect_text_script("сколько стоит букет"), "ru")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_cyrillic_customer_gets_cyrillic_reply_from_latin_model_output(self):
+        from unittest.mock import patch
+        customer = Customer.objects.create(instagram_user_id="ig-cyr")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="канака гулла бор")
+        payload = {"reply": "Skladimizda hozir quyidagi gullar bor", "detected_language": "uz", "customer_name": None, "phone": None, "lead_ready": False, "lead_request": None, "arrangement_type": None, "estimated_price": None, "handoff": False, "catalog_items": [], "stock_items": []}
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="rc")
+            result = ai_reply(conversation)
+        sent = client.responses.create.call_args.kwargs["input"][-1]["content"]
+        self.assertIn("kanaka gulla bor", sent)
+        self.assertEqual(result["reply"], "Складимизда ҳозир қуйидаги гуллар бор")
+        self.assertEqual(result["reply_latin"], "Skladimizda hozir quyidagi gullar bor")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_russian_customer_reply_is_not_transliterated(self):
+        from unittest.mock import patch
+        customer = Customer.objects.create(instagram_user_id="ig-ru2")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="какие цветы есть")
+        payload = {"reply": "На складе сейчас есть розы", "detected_language": "ru", "customer_name": None, "phone": None, "lead_ready": False, "lead_request": None, "arrangement_type": None, "estimated_price": None, "handoff": False, "catalog_items": [], "stock_items": []}
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="rr")
+            result = ai_reply(conversation)
+        sent = client.responses.create.call_args.kwargs["input"][-1]["content"]
+        self.assertIn("какие цветы есть", sent)
+        self.assertEqual(result["reply"], "На складе сейчас есть розы")
+
     def test_stock_row_exposes_pochka_fields(self):
         row = stock_batch_ai_row(self.batch)
         self.assertEqual(row["stems_per_pochka"], self.batch.stems_per_bunch)
