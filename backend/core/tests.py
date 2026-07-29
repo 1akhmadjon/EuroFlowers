@@ -30,6 +30,27 @@ class BusinessRulesTests(TestCase):
         self.item = CatalogItem.objects.create(name_uz="Oq buket", arrangement_type="bouquet", price=500000)
         CatalogComposition.objects.create(catalog_item=self.item, stock_batch=self.batch, quantity_stems=15)
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_ai_context_exposes_already_known_lead_fields(self):
+        from unittest.mock import patch
+        customer = Customer.objects.create(instagram_user_id="ig-known", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="borib olaman")
+        Lead.objects.create(customer=customer, conversation=conversation, request_uz="2 pochka", fulfillment="pickup", desired_date="2026-07-30", desired_time="15:00")
+        payload = {"reply": "Yaxshi", "detected_language": "uz", "customer_name": None, "phone": None, "lead_ready": False, "lead_request": None, "arrangement_type": None, "estimated_price": None, "handoff": False, "catalog_items": [], "stock_items": []}
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="r1")
+            ai_reply(conversation)
+        context = json.loads(client.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
+        known = context["conversation"]["already_known"]
+        self.assertTrue(known["name"])
+        self.assertTrue(known["phone"])
+        self.assertEqual(known["fulfillment"], "pickup")
+        self.assertTrue(known["desired_date"])
+        self.assertTrue(known["desired_time"])
+        self.assertEqual(context["conversation"]["open_lead"]["fulfillment"], "pickup")
+
     def test_stock_row_exposes_pochka_fields(self):
         row = stock_batch_ai_row(self.batch)
         self.assertEqual(row["stems_per_pochka"], self.batch.stems_per_bunch)
