@@ -414,7 +414,7 @@ def set_sales_prompt(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("core", "0060_ai_prompt_reply_shape"),
+        ("core", "0061_remove_leadstatus_name_ru"),
     ]
 
     operations = [
