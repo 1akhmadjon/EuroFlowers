@@ -88,6 +88,12 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows[0]["batch_id"], self.batch.id)
 
+    def test_ai_stock_rows_include_cyrillic_display_names(self):
+        rows = ai_stock_rows("atirgul", limit=10)
+        self.assertTrue(rows)
+        self.assertIn("display_name_uz_cyril", rows[0])
+        self.assertIn("Атиргул", rows[0]["display_name_uz_cyril"])
+
     def test_ai_catalog_rows_treats_whitespace_query_as_all_catalog(self):
         self.item.status = "available"
         self.item.save(update_fields=["status", "updated_at"])
@@ -448,6 +454,61 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(reply.metadata["tool_results"][-1]["name"], "send_stock_image")
         self.assertIn("Atirgul Mondial Oq rasmi", reply.text)
         self.assertIn("Shu guldan nechta dona qilib buket yoki savat yasaymiz?", reply.text)
+
+    def test_pickup_reply_updates_lead_and_removes_internal_status_words(self):
+        customer = Customer.objects.create(instagram_user_id="telegram:45", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        lead = Lead.objects.create(customer=customer, conversation=conversation, request_uz="70 ta Atirgul prut oq buket. kelib olish yoki yetkazib berish tanlanmagan.")
+        conversation.messages.create(sender="customer", text="borib olaman")
+        payload = {
+            "reply": "Rahmat. Siz kelib olib ketasiz deb qayd etildi. Buyurtma saqlanmoqda.",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        lead.refresh_from_db()
+        self.assertIn("Mijoz kelib olib ketadi.", lead.request_uz)
+        self.assertIn("Manzilimiz", reply.text)
+        self.assertIn("Telefon +998 88 009 33 30", reply.text)
+        self.assertNotIn("qayd", reply.text.lower())
+        self.assertNotIn("saql", reply.text.lower())
+        self.assertEqual(reply.metadata["tool_results"][-1]["name"], "client_lead_edit")
+
+    def test_location_request_returns_clean_shop_contact_only(self):
+        customer = Customer.objects.create(instagram_user_id="telegram:46", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="manzil tashang")
+        payload = {
+            "reply": "Manzilimiz Bobur ko'chasi. Rahmat, buyurtma saqlanmoqda.",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertIn("Manzilimiz", reply.text)
+        self.assertIn("Telefon +998 88 009 33 30", reply.text)
+        self.assertIn("Ish vaqti 24/7", reply.text)
+        self.assertNotIn("Rahmat", reply.text)
+        self.assertNotIn("saql", reply.text.lower())
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
@@ -884,6 +945,15 @@ class BusinessRulesTests(TestCase):
         self.assertIn("rasmni ko'rmoqchimisiz", rule)
         self.assertIn("send_stock_image", rule)
         self.assertIn("Tool chaqirmasdan hech qachon", rule)
+
+    def test_stock_language_pickup_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0050_ai_prompt_stock_language_pickup_rules")
+        rule = migration.STOCK_LANGUAGE_PICKUP_PROMPT_RULE
+        self.assertIn("Stock mavjudlik, til va pickup aniqligi", rule)
+        self.assertIn("majburiy get_stock chaqir", rule)
+        self.assertIn("display_name_uz_cyril", rule)
+        self.assertIn("vitrinada yo'q", rule)
+        self.assertIn("qayd etildi", rule)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"

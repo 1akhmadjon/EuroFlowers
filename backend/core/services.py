@@ -152,19 +152,110 @@ def flower_variant_display_name(variant, language):
     return " ".join(part for part in parts if part).strip()
 
 
+def uz_latin_to_cyril(text):
+    value = text or ""
+    replacements = [
+        ("g‘", "ғ"),
+        ("G‘", "Ғ"),
+        ("o‘", "ў"),
+        ("O‘", "Ў"),
+        ("g'", "ғ"),
+        ("G'", "Ғ"),
+        ("o'", "ў"),
+        ("O'", "Ў"),
+        ("sh", "ш"),
+        ("Sh", "Ш"),
+        ("SH", "Ш"),
+        ("ch", "ч"),
+        ("Ch", "Ч"),
+        ("CH", "Ч"),
+        ("yo", "ё"),
+        ("Yo", "Ё"),
+        ("YO", "Ё"),
+        ("yu", "ю"),
+        ("Yu", "Ю"),
+        ("YU", "Ю"),
+        ("ya", "я"),
+        ("Ya", "Я"),
+        ("YA", "Я"),
+        ("ts", "ц"),
+        ("Ts", "Ц"),
+        ("TS", "Ц"),
+    ]
+    for source, target in replacements:
+        value = value.replace(source, target)
+    table = str.maketrans({
+        "a": "а",
+        "b": "б",
+        "d": "д",
+        "e": "е",
+        "f": "ф",
+        "g": "г",
+        "h": "ҳ",
+        "i": "и",
+        "j": "ж",
+        "k": "к",
+        "l": "л",
+        "m": "м",
+        "n": "н",
+        "o": "о",
+        "p": "п",
+        "q": "қ",
+        "r": "р",
+        "s": "с",
+        "t": "т",
+        "u": "у",
+        "v": "в",
+        "x": "х",
+        "y": "й",
+        "z": "з",
+        "A": "А",
+        "B": "Б",
+        "D": "Д",
+        "E": "Е",
+        "F": "Ф",
+        "G": "Г",
+        "H": "Ҳ",
+        "I": "И",
+        "J": "Ж",
+        "K": "К",
+        "L": "Л",
+        "M": "М",
+        "N": "Н",
+        "O": "О",
+        "P": "П",
+        "Q": "Қ",
+        "R": "Р",
+        "S": "С",
+        "T": "Т",
+        "U": "У",
+        "V": "В",
+        "X": "Х",
+        "Y": "Й",
+        "Z": "З",
+    })
+    return value.translate(table)
+
+
 def stock_image_url(batch):
     return batch.image_url or batch.variant.image_url or batch.variant.flower.image_url or ""
 
 
 def stock_batch_ai_row(batch):
     image_url = stock_image_url(batch)
+    display_name_uz = flower_variant_display_name(batch.variant, "uz")
     return {
         "batch_id": batch.id,
-        "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
+        "display_name_uz": display_name_uz,
+        "display_name_uz_cyril": uz_latin_to_cyril(display_name_uz),
         "flower_uz": batch.variant.flower.name_uz,
+        "flower_uz_cyril": uz_latin_to_cyril(batch.variant.flower.name_uz),
         "variant_uz": batch.variant.name_uz,
+        "variant_uz_cyril": uz_latin_to_cyril(batch.variant.name_uz),
         "color_uz": batch.variant.color_uz,
+        "color_uz_cyril": uz_latin_to_cyril(batch.variant.color_uz),
         "description_uz": batch.variant.description_uz,
+        "description_uz_cyril": uz_latin_to_cyril(batch.variant.description_uz),
         "description_ru": batch.variant.description_ru,
         "height_cm": batch.height_cm,
         "height_from_cm": batch.height_from_cm,
@@ -182,13 +273,19 @@ def stock_batch_ai_row(batch):
 
 def variant_without_stock_ai_row(variant):
     image_url = variant.image_url or variant.flower.image_url or ""
+    display_name_uz = flower_variant_display_name(variant, "uz")
     return {
         "batch_id": None,
-        "display_name_uz": flower_variant_display_name(variant, "uz"),
+        "display_name_uz": display_name_uz,
+        "display_name_uz_cyril": uz_latin_to_cyril(display_name_uz),
         "flower_uz": variant.flower.name_uz,
+        "flower_uz_cyril": uz_latin_to_cyril(variant.flower.name_uz),
         "variant_uz": variant.name_uz,
+        "variant_uz_cyril": uz_latin_to_cyril(variant.name_uz),
         "color_uz": variant.color_uz,
+        "color_uz_cyril": uz_latin_to_cyril(variant.color_uz),
         "description_uz": variant.description_uz,
+        "description_uz_cyril": uz_latin_to_cyril(variant.description_uz),
         "description_ru": variant.description_ru,
         "height_cm": None,
         "height_from_cm": None,
@@ -378,6 +475,7 @@ def ai_flower_variant_rows(query="", limit=24):
             "active_stock": [{
                 "batch_id": batch.id,
                 "display_name_uz": flower_variant_display_name(batch.variant, "uz"),
+                "display_name_uz_cyril": uz_latin_to_cyril(flower_variant_display_name(batch.variant, "uz")),
                 "height_label": batch.height_label,
                 "availability": stock_availability(batch),
                 "remaining_stems": batch.remaining_stems,
@@ -1270,6 +1368,34 @@ def pickup_requested(text):
     return any(phrase in compact for phrase in phrases)
 
 
+def location_requested(text):
+    compact = compact_match_text(text)
+    phrases = [
+        "адрес",
+        "lokatsiya",
+        "location",
+        "manzil",
+        "qayerda",
+        "qayoda",
+        "tashang",
+    ]
+    return any(phrase in compact for phrase in phrases)
+
+
+def shop_location_reply(include_final_thanks=False):
+    parts = [
+        f"Manzilimiz {SHOP_ADDRESS}",
+        SHOP_ORIENTIR,
+        "",
+        SHOP_LOCATION_LINK,
+        f"Telefon {SHOP_PHONE}",
+        f"Ish vaqti {SHOP_WORKING_HOURS}",
+    ]
+    if include_final_thanks:
+        parts.extend(["", "Rahmat, tez orada operatorlarimiz buyurtmangizni tasdiqlash uchun aloqaga chiqishadi."])
+    return "\n".join(parts)
+
+
 def append_lead_request_text(current, addition):
     current = (current or "").strip()
     addition = (addition or "").strip()
@@ -1474,6 +1600,39 @@ def enforce_stock_image_flow(result, conversation):
     return result
 
 
+def enforce_pickup_and_location_flow(result, conversation):
+    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    if not latest_customer_message:
+        return result
+    latest_text = latest_customer_message.text or ""
+    if location_requested(latest_text) and not pickup_requested(latest_text):
+        result["reply"] = shop_location_reply()
+        return result
+    if not pickup_requested(latest_text):
+        return result
+    latest_lead = conversation.leads.order_by("-created_at", "-id").first()
+    if not latest_lead:
+        return result
+    already_edited = any(tool_result.get("name") == "client_lead_edit" for tool_result in result.get("tool_results") or [])
+    if not already_edited:
+        tool_result = execute_ai_tool("client_lead_edit", {
+            "lead_id": latest_lead.id,
+            "customer_name": None,
+            "phone": None,
+            "request_text": None,
+            "status": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "catalog_items": None,
+            "stock_items": None,
+            "note": None,
+        }, conversation)
+        result.setdefault("tool_results", [])
+        result["tool_results"].append({"name": "client_lead_edit", "arguments": {"lead_id": latest_lead.id, "pickup_auto": True}, "output": tool_result})
+    result["reply"] = shop_location_reply(include_final_thanks=True)
+    return result
+
+
 def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
@@ -1512,6 +1671,7 @@ def create_ai_reply_for_conversation(conversation):
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
     result = enforce_catalog_image_flow(result, conversation)
     result = enforce_stock_image_flow(result, conversation)
+    result = enforce_pickup_and_location_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
         Notification.objects.create(notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
