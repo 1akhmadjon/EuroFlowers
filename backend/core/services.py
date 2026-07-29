@@ -1477,6 +1477,74 @@ def clean_stock_image_offer(text):
     return cleaned
 
 
+def stock_rows_from_ai_result(result):
+    rows = []
+    for tool_result in result.get("tool_results") or []:
+        if tool_result.get("name") != "get_stock":
+            continue
+        rows.extend(tool_result.get("output", {}).get("stock") or [])
+    unique = []
+    seen = set()
+    for row in rows:
+        batch_id = row.get("batch_id")
+        if not batch_id or batch_id in seen:
+            continue
+        seen.add(batch_id)
+        unique.append(row)
+    return unique
+
+
+def reply_has_stock_false_negative(text):
+    compact = compact_match_text(text)
+    phrases = [
+        "vitrinada tayyor gullar ro yxati bo sh",
+        "vitrinada yo q",
+        "yo q ekan",
+        "yok ekan",
+        "bo sh ekan",
+        "готовых цветов нет",
+        "в витрине нет",
+        "нет доступных цветов",
+        "рўйхати бўш",
+        "йўқ экан",
+        "бўш экан",
+    ]
+    return any(phrase in compact for phrase in phrases)
+
+
+def latest_message_asks_stock_list(text):
+    compact = compact_match_text(text)
+    if not compact:
+        return False
+    stock_words = ["gullar", "gulla", "gul", "цветы", "цвет", "гулла", "гул"]
+    availability_words = ["bor", "bormi", "есть", "бор", "борми", "qanaqa", "qanday", "какие", "канака", "қанақа"]
+    return any(word in compact for word in stock_words) and any(word in compact for word in availability_words)
+
+
+def format_stock_rows_reply(rows, latest_customer_text):
+    script = detect_customer_reply_script(latest_customer_text)
+    if script == "ru":
+        lines = ["Сейчас в складе есть такие цветы", ""]
+        for index, row in enumerate(rows, start=1):
+            name = row.get("display_name_uz_cyril") or row.get("display_name_uz") or ""
+            lines.append(f"{index} {name} — за штуку {money_uz(row.get('price_per_stem'))} сум")
+        lines.extend(["", "Из какого цветка соберём букет или корзину?"])
+        return "\n".join(lines)
+    if script == "uz_cyril":
+        lines = ["Ҳозир складимизда қуйидаги гуллар бор", ""]
+        for index, row in enumerate(rows, start=1):
+            name = row.get("display_name_uz_cyril") or uz_latin_to_cyril(row.get("display_name_uz") or "")
+            lines.append(f"{index} {name} — дона {money_uz(row.get('price_per_stem'))} сўм")
+        lines.extend(["", "Қайси биридан букет ёки сават ясаймиз?"])
+        return "\n".join(lines)
+    lines = ["Skladimizda hozir quyidagi gullar bor", ""]
+    for index, row in enumerate(rows, start=1):
+        name = row.get("display_name_uz") or ""
+        lines.append(f"{index} {name} — dona {money_uz(row.get('price_per_stem'))} so'm")
+    lines.extend(["", "Qaysi biridan buket yoki savat yasaymiz?"])
+    return "\n".join(lines)
+
+
 def catalog_image_already_sent(conversation, item):
     if not item:
         return False
@@ -1600,6 +1668,21 @@ def enforce_stock_image_flow(result, conversation):
     return result
 
 
+def enforce_stock_list_reply(result, conversation):
+    rows = stock_rows_from_ai_result(result)
+    if not rows:
+        return result
+    tool_names = {tool_result.get("name") for tool_result in result.get("tool_results") or []}
+    if tool_names & {"calculate_custom_arrangement_price", "send_stock_image", "send_stock_images", "client_lead_create", "client_lead_edit"}:
+        return result
+    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    latest_text = latest_customer_message.text if latest_customer_message else ""
+    if reply_has_stock_false_negative(result.get("reply", "")) or latest_message_asks_stock_list(latest_text):
+        result["reply"] = format_stock_rows_reply(rows, latest_text)
+        result["stock_items"] = [{"batch_id": row["batch_id"], "quantity_stems": 0, "quantity_bunches": 0} for row in rows]
+    return result
+
+
 def enforce_pickup_and_location_flow(result, conversation):
     latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
     if not latest_customer_message:
@@ -1670,6 +1753,7 @@ def create_ai_reply_for_conversation(conversation):
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
     result = enforce_catalog_image_flow(result, conversation)
+    result = enforce_stock_list_reply(result, conversation)
     result = enforce_stock_image_flow(result, conversation)
     result = enforce_pickup_and_location_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)

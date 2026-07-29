@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, detect_customer_reply_script, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply, split_location_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -425,6 +425,58 @@ class BusinessRulesTests(TestCase):
         image_mock.assert_not_called()
         self.assertNotIn("rasmni", reply.text.lower())
         self.assertIn("Qaysi biridan buket yoki savat yasaymiz?", reply.text)
+
+    def test_ai_stock_false_negative_is_overridden_for_russian(self):
+        customer = Customer.objects.create(instagram_user_id="ig-stock-ru")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="какие цветы есть")
+        payload = {
+            "reply": "Сейчас в витрине готовых цветов нет.",
+            "detected_language": "ru",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+            "tool_results": [{"name": "get_stock", "arguments": {"query": "текущие цветы"}, "output": {"stock": [stock_batch_ai_row(self.batch)]}}],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertIn("Сейчас в складе есть такие цветы", reply.text)
+        self.assertIn("Атиргул", reply.text)
+        self.assertNotIn("витрине", reply.text.lower())
+        self.assertNotIn("нет", reply.text.lower())
+
+    def test_ai_stock_false_negative_is_overridden_for_uzbek_cyrillic(self):
+        customer = Customer.objects.create(instagram_user_id="ig-stock-cyril")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="канака гулла бор")
+        payload = {
+            "reply": "Ҳозир витринада тайёр гуллар рўйхати бўш экан.",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+            "tool_results": [{"name": "get_stock", "arguments": {"query": "канака гулла"}, "output": {"stock": [stock_batch_ai_row(self.batch)]}}],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertIn("Ҳозир складимизда қуйидаги гуллар бор", reply.text)
+        self.assertIn("Атиргул", reply.text)
+        self.assertNotIn("Atirgul", reply.text)
+        self.assertNotIn("бўш", reply.text.lower())
 
     def test_ai_stock_image_request_sends_recent_stock_image_when_tool_missing(self):
         self.batch.image_url = "https://example.com/mondial.jpg"
