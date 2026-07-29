@@ -1521,6 +1521,47 @@ def latest_message_asks_stock_list(text):
     return any(word in compact for word in stock_words) and any(word in compact for word in availability_words)
 
 
+def latest_message_asks_stock_availability(text):
+    compact = compact_match_text(text)
+    phrases = ["bormi", "bor mi", "борми", "бор ми", "есть", "продаете", "sotasiz", "sotasilami"]
+    return any(phrase in compact for phrase in phrases)
+
+
+def stock_query_subject(text):
+    compact = compact_match_text(text)
+    removable = {
+        "bormi",
+        "bor",
+        "mi",
+        "борми",
+        "бор",
+        "ми",
+        "есть",
+        "ли",
+        "продаете",
+        "sotasiz",
+        "sotasilami",
+        "sizlarda",
+        "силада",
+        "у",
+        "вас",
+    }
+    words = [word for word in compact.split() if word not in removable]
+    return " ".join(words).strip()
+
+
+def format_stock_not_found_reply(latest_customer_text):
+    script = detect_customer_reply_script(latest_customer_text)
+    subject = stock_query_subject(latest_customer_text)
+    if script == "ru":
+        name = subject or "этого цветка"
+        return f"Сейчас в складе {name} нет."
+    if script == "uz_cyril":
+        name = uz_latin_to_cyril(subject) if re.search(r"[a-z]", subject) else subject
+        return f"Ҳозир складимизда {name or 'бу гул'} қолмаган экан."
+    return f"Hozir skladimizda {subject or 'bu gul'} qolmagan ekan."
+
+
 def format_stock_rows_reply(rows, latest_customer_text):
     script = detect_customer_reply_script(latest_customer_text)
     if script == "ru":
@@ -1670,13 +1711,17 @@ def enforce_stock_image_flow(result, conversation):
 
 def enforce_stock_list_reply(result, conversation):
     rows = stock_rows_from_ai_result(result)
+    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    latest_text = latest_customer_message.text if latest_customer_message else ""
+    if not rows and latest_message_asks_stock_list(latest_text):
+        rows = ai_stock_rows("", limit=100)
     if not rows:
+        if any(tool_result.get("name") == "get_stock" for tool_result in result.get("tool_results") or []) and latest_message_asks_stock_availability(latest_text):
+            result["reply"] = format_stock_not_found_reply(latest_text)
         return result
     tool_names = {tool_result.get("name") for tool_result in result.get("tool_results") or []}
     if tool_names & {"calculate_custom_arrangement_price", "send_stock_image", "send_stock_images", "client_lead_create", "client_lead_edit"}:
         return result
-    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    latest_text = latest_customer_message.text if latest_customer_message else ""
     if reply_has_stock_false_negative(result.get("reply", "")) or latest_message_asks_stock_list(latest_text):
         result["reply"] = format_stock_rows_reply(rows, latest_text)
         result["stock_items"] = [{"batch_id": row["batch_id"], "quantity_stems": 0, "quantity_bunches": 0} for row in rows]

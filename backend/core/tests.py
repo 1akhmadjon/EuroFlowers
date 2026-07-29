@@ -478,6 +478,55 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("Atirgul", reply.text)
         self.assertNotIn("бўш", reply.text.lower())
 
+    def test_ai_stock_generic_empty_tool_result_falls_back_to_all_stock(self):
+        customer = Customer.objects.create(instagram_user_id="ig-stock-generic-empty")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="какие цветы есть")
+        payload = {
+            "reply": "Сейчас в витрине готовых цветов нет.",
+            "detected_language": "ru",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+            "tool_results": [{"name": "get_stock", "arguments": {"query": "популярные цветы"}, "output": {"stock": []}}],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertIn("Сейчас в складе есть такие цветы", reply.text)
+        self.assertIn("Атиргул", reply.text)
+        self.assertNotIn("витрине", reply.text.lower())
+
+    def test_ai_stock_specific_empty_tool_result_is_clean_not_found_reply(self):
+        customer = Customer.objects.create(instagram_user_id="ig-stock-specific-empty")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="gortenziya bormi")
+        payload = {
+            "reply": "Qaysi rangini xohlaysiz?",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+            "tool_results": [{"name": "get_stock", "arguments": {"query": "gortenziya"}, "output": {"stock": []}}],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertEqual(reply.text, "Hozir skladimizda gortenziya qolmagan ekan.")
+        self.assertNotIn("Qaysi rangini", reply.text)
+
     def test_ai_stock_image_request_sends_recent_stock_image_when_tool_missing(self):
         self.batch.image_url = "https://example.com/mondial.jpg"
         self.batch.save(update_fields=["image_url", "updated_at"])
