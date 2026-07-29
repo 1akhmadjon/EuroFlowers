@@ -1107,7 +1107,7 @@ def ai_reply(conversation):
         "model": ai_settings.openai_model or settings.OPENAI_MODEL,
         "instructions": ai_settings.system_prompt,
         "input": model_input,
-        "max_output_tokens": 2000,
+        "max_output_tokens": 8000,
         "reasoning": {"effort": ai_settings.reasoning_effort or "low"},
         "tools": ai_tool_definitions(),
         "parallel_tool_calls": False,
@@ -1140,7 +1140,7 @@ def ai_reply(conversation):
             instructions=ai_settings.system_prompt,
             previous_response_id=response.id,
             input=tool_outputs,
-            max_output_tokens=2000,
+            max_output_tokens=8000,
             reasoning={"effort": ai_settings.reasoning_effort or "low"},
             tools=ai_tool_definitions(),
             parallel_tool_calls=False,
@@ -1149,10 +1149,17 @@ def ai_reply(conversation):
     try:
         result = json.loads(response.output_text)
     except json.JSONDecodeError:
-        print(f"OPENAI_JSON_DECODE_FAILED conversation={conversation.id} output={response.output_text!r}", flush=True)
-        response_kwargs["max_output_tokens"] = 4000
+        status_detail = getattr(response, "status", "") or ""
+        incomplete = getattr(response, "incomplete_details", None)
+        print(f"OPENAI_JSON_DECODE_FAILED conversation={conversation.id} status={status_detail} incomplete={incomplete} output={response.output_text!r}", flush=True)
+        response_kwargs["max_output_tokens"] = 16000
+        response_kwargs["reasoning"] = {"effort": "low"}
         response = client.responses.create(**response_kwargs)
-        result = json.loads(response.output_text)
+        try:
+            result = json.loads(response.output_text)
+        except json.JSONDecodeError:
+            print(f"OPENAI_JSON_DECODE_FAILED_RETRY conversation={conversation.id} status={getattr(response, 'status', '')} output={response.output_text!r}", flush=True)
+            raise
     result.setdefault("catalog_items", [])
     result.setdefault("stock_items", [])
     if tool_results:
@@ -1213,7 +1220,7 @@ def ai_follow_up_decision(conversation, expected_ai_message):
             {"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False, default=str)},
             *history,
         ],
-        max_output_tokens=700,
+        max_output_tokens=3000,
         reasoning={"effort": ai_settings.reasoning_effort or "low"},
         text={"format": {"type": "json_schema", "name": "follow_up_decision", "strict": True, "schema": ai_follow_up_schema()}},
     )
