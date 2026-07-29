@@ -192,6 +192,8 @@ def stock_batch_ai_row(batch):
         "stems_per_bunch": batch.stems_per_bunch,
         "price_per_stem": str(batch.sale_price_per_stem),
         "price_per_bunch": str(batch.sale_price_per_bunch),
+        "stems_per_pochka": batch.stems_per_bunch,
+        "price_per_pochka": str(batch.sale_price_per_bunch),
         "has_image": bool(image_url),
         "image_url": image_url,
     }
@@ -222,6 +224,8 @@ def variant_without_stock_ai_row(variant):
         "stems_per_bunch": variant.default_stems_per_bunch,
         "price_per_stem": "",
         "price_per_bunch": "",
+        "stems_per_pochka": variant.default_stems_per_bunch,
+        "price_per_pochka": "",
         "has_image": bool(image_url),
         "image_url": image_url,
     }
@@ -659,7 +663,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_stock",
-            "description": "Skladdagi gul variantlari va narxlarini olish. Bu tool faqat gullar uchun, savat/qadoq/materiallarni qaytarmaydi. Butun sklad ro'yxati kerak bo'lsa query ni bo'sh string qoldiring; 'all', 'hammasi' kabi so'z yozmang. Aniq gul yoki rang qidirilsagina query ga o'sha nomni yozing.",
+            "description": "Skladdagi gul variantlari va narxlarini olish. Bu tool faqat gullar uchun, savat/qadoq/materiallarni qaytarmaydi. Butun sklad ro'yxati kerak bo'lsa query ni bo'sh string qoldiring; 'all', 'hammasi' kabi so'z yozmang. Aniq gul yoki rang qidirilsagina query ga o'sha nomni yozing. Natijada price_per_stem dona narxi, stems_per_pochka bir pochkadagi gul soni, price_per_pochka esa bitta pochka narxi. Pochka bu bog'lam, dostavka emas.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Bo'sh string = butun sklad. Aks holda gul nomi yoki rangi."}},

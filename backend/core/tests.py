@@ -30,6 +30,12 @@ class BusinessRulesTests(TestCase):
         self.item = CatalogItem.objects.create(name_uz="Oq buket", arrangement_type="bouquet", price=500000)
         CatalogComposition.objects.create(catalog_item=self.item, stock_batch=self.batch, quantity_stems=15)
 
+    def test_stock_row_exposes_pochka_fields(self):
+        row = stock_batch_ai_row(self.batch)
+        self.assertEqual(row["stems_per_pochka"], self.batch.stems_per_bunch)
+        self.assertEqual(row["price_per_pochka"], str(self.batch.sale_price_per_bunch))
+        self.assertEqual(row["price_per_stem"], str(self.batch.sale_price_per_stem))
+
     def test_stock_search_does_not_match_term_inside_another_word(self):
         from .services import haystack_has_term
         self.assertFalse(haystack_has_term("atirgul jumila podgallan pushti", "all"))
