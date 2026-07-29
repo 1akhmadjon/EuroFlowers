@@ -457,7 +457,7 @@ def mini_app_custom_quote_ai(request_text, arrangement_type):
             "florist_fee": str(florist_fee),
             "estimated_price": str(florist_fee),
             "price_is_estimate": True,
-            "ai_note": "Taxminiy narxni operator aniqlashtirib beradi.",
+            "ai_note": mini_app_quote_note(florist_fee),
         }
     context = {
         "request_text": request_text,
@@ -495,8 +495,12 @@ def mini_app_custom_quote_ai(request_text, arrangement_type):
         "florist_fee": str(florist_fee),
         "estimated_price": str(estimated_price),
         "price_is_estimate": True,
-        "ai_note": data.get("ai_note") or "Taxminiy narx, operator aniq ma'lumot beradi.",
+        "ai_note": mini_app_quote_note(estimated_price),
     }
+
+
+def mini_app_quote_note(estimated_price):
+    return f"Taxminiy narx {money_uz(estimated_price)} so'm. Operatorlarimiz aloqaga chiqib, sizga batafsil ma'lumot berishadi."
 
 
 def calculate_custom_arrangement_price(stock_items):

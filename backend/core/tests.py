@@ -15,7 +15,7 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -1497,6 +1497,13 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["received_stems"], 15)
         self.assertEqual(response.json()["remaining_stems"], 15)
         self.assertEqual(response.json()["remaining_bunches"], "3.00")
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_mini_app_custom_quote_ai_returns_final_price_note(self):
+        BusinessSettings.objects.update_or_create(pk=1, defaults={"default_florist_fee": Decimal("50000")})
+        result = mini_app_custom_quote_ai("10 ta atirgul buketga", "bouquet")
+        self.assertEqual(result["ai_note"], mini_app_quote_note(result["estimated_price"]))
+        self.assertEqual(result["ai_note"], "Taxminiy narx 50 000 so'm. Operatorlarimiz aloqaga chiqib, sizga batafsil ma'lumot berishadi.")
 
     def test_mini_app_lead_history_returns_customer_orders(self):
         CatalogItem.objects.create(name_uz="Mini katalog", arrangement_type="bouquet", price=250000, status="available")
