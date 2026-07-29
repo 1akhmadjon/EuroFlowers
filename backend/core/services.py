@@ -1368,6 +1368,20 @@ def pickup_requested(text):
     return any(phrase in compact for phrase in phrases)
 
 
+def delivery_requested(text):
+    compact = compact_match_text(text)
+    phrases = [
+        "dostafka",
+        "dastafka",
+        "yetkazib",
+        "етказиб",
+        "доставка",
+        "olib keling",
+        "олиб келинг",
+    ]
+    return any(phrase in compact for phrase in phrases)
+
+
 def location_requested(text):
     compact = compact_match_text(text)
     phrases = [
@@ -1713,7 +1727,7 @@ def enforce_stock_list_reply(result, conversation):
     rows = stock_rows_from_ai_result(result)
     latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
     latest_text = latest_customer_message.text if latest_customer_message else ""
-    if not rows and latest_message_asks_stock_list(latest_text):
+    if latest_message_asks_stock_list(latest_text):
         rows = ai_stock_rows("", limit=100)
     if not rows:
         if any(tool_result.get("name") == "get_stock" for tool_result in result.get("tool_results") or []) and latest_message_asks_stock_availability(latest_text):
@@ -1761,6 +1775,22 @@ def enforce_pickup_and_location_flow(result, conversation):
     return result
 
 
+def enforce_lead_created_next_question(result, conversation):
+    if not result.get("lead_created_id"):
+        return result
+    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    latest_text = latest_customer_message.text if latest_customer_message else ""
+    if pickup_requested(latest_text) or delivery_requested(latest_text):
+        return result
+    compact_reply = compact_match_text(result.get("reply", ""))
+    if "manzil" not in compact_reply and "манзил" not in compact_reply and "адрес" not in compact_reply:
+        return result
+    customer_name = result.get("customer_name") or conversation.customer.name or ""
+    name_part = f", {customer_name}" if valid_customer_name(customer_name) else ""
+    result["reply"] = f"Rahmat{name_part}. Yetkazib berish kerakmi yoki kelib olib ketasizmi?"
+    return result
+
+
 def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
@@ -1800,6 +1830,7 @@ def create_ai_reply_for_conversation(conversation):
     result = enforce_catalog_image_flow(result, conversation)
     result = enforce_stock_list_reply(result, conversation)
     result = enforce_stock_image_flow(result, conversation)
+    result = enforce_lead_created_next_question(result, conversation)
     result = enforce_pickup_and_location_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):

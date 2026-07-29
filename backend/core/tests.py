@@ -479,6 +479,8 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("бўш", reply.text.lower())
 
     def test_ai_stock_generic_empty_tool_result_falls_back_to_all_stock(self):
+        second_variant = FlowerVariant.objects.create(flower=self.batch.variant.flower, name_uz="Prut", color_uz="Oq")
+        StockBatch.objects.create(variant=second_variant, batch_number="PR-1", height_cm=50, stems_per_bunch=25, received_stems=50, remaining_stems=50, cost_per_stem=10000, sale_price_per_stem=15000, sale_price_per_bunch=375000)
         customer = Customer.objects.create(instagram_user_id="ig-stock-generic-empty")
         conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="какие цветы есть")
@@ -501,6 +503,7 @@ class BusinessRulesTests(TestCase):
             reply = create_ai_reply_for_conversation(conversation)
         self.assertIn("Сейчас в складе есть такие цветы", reply.text)
         self.assertIn("Атиргул", reply.text)
+        self.assertIn("Прут", reply.text)
         self.assertNotIn("витрине", reply.text.lower())
 
     def test_ai_stock_specific_empty_tool_result_is_clean_not_found_reply(self):
@@ -610,6 +613,30 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Ish vaqti 24/7", reply.text)
         self.assertNotIn("Rahmat", reply.text)
         self.assertNotIn("saql", reply.text.lower())
+
+    def test_lead_created_without_delivery_choice_does_not_ask_address(self):
+        customer = Customer.objects.create(instagram_user_id="telegram:47")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="Ahmad 901112233")
+        payload = {
+            "reply": "Rahmat, Ahmad. Buyurtmangiz qabul qilindi. Yetkazib berish manzilingizni yozib yuborasizmi?",
+            "detected_language": "uz",
+            "customer_name": "Ahmad",
+            "phone": "901112233",
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+            "lead_created_id": 99,
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertEqual(reply.text, "Rahmat, Ahmad. Yetkazib berish kerakmi yoki kelib olib ketasizmi?")
+        self.assertNotIn("manzil", reply.text.lower())
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
