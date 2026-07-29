@@ -1052,6 +1052,7 @@ def ai_reply(conversation):
             "instagram_username": customer.instagram_username,
             "previous_orders_count": customer.leads.count(),
             "is_returning": bool(valid_customer_name(customer.name) and customer.phone),
+            "last_delivery_address": (customer.leads.exclude(delivery_address="").order_by("-created_at", "-id").values_list("delivery_address", flat=True).first() or ""),
         },
         "conversation": {
             "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
