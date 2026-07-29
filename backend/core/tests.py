@@ -12,9 +12,9 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
-from .inventory_services import deduct_catalog_stock, mark_catalog_sold
+from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
@@ -1111,6 +1111,67 @@ class ApiTests(TestCase):
         flower = Flower.objects.create(name_uz="Atirgul API", slug="rose-api")
         variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
         self.batch = StockBatch.objects.create(variant=variant, batch_number="API-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=400000)
+
+    def test_supplier_payment_crud_and_rollups(self):
+        supplier = Supplier.objects.create(name="Gul Import")
+        variant = self.batch.variant
+        StockBatch.objects.create(variant=variant, supplier=supplier, batch_number="SUP-1", height_cm=50, stems_per_bunch=25, received_stems=100, remaining_stems=100, cost_per_stem=Decimal("7000"), sale_price_per_stem=15000, sale_price_per_bunch=375000)
+        StockBatch.objects.create(variant=variant, supplier=supplier, batch_number="SUP-2", height_cm=50, stems_per_bunch=25, received_stems=50, remaining_stems=50, cost_per_stem=Decimal("8000"), sale_price_per_stem=16000, sale_price_per_bunch=400000)
+        created = self.client.post("/api/supplier-payments/", {"supplier": supplier.id, "amount": "500000.00", "paid_at": "2026-07-29", "method": "cash", "note": "Iyul oyi uchun"}, format="json")
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data["method_label"], "Naqd")
+        self.assertEqual(created.data["supplier_detail"]["name"], "Gul Import")
+        self.client.post("/api/supplier-payments/", {"supplier": supplier.id, "amount": "200000.00", "paid_at": "2026-07-30", "method": "transfer"}, format="json")
+        listed = self.client.get(f"/api/supplier-payments/?supplier={supplier.id}")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.data["count"], 2)
+        detail = self.client.get(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(detail.status_code, 200)
+        # 100*7000 + 50*8000 = 1 100 000
+        self.assertEqual(Decimal(detail.data["purchase_total"]), Decimal("1100000.00"))
+        self.assertEqual(Decimal(detail.data["paid_total"]), Decimal("700000.00"))
+        self.assertEqual(Decimal(detail.data["outstanding"]), Decimal("400000.00"))
+        self.assertEqual(str(detail.data["last_payment_at"]), "2026-07-30")
+
+    def test_supplier_without_payments_reports_zero_paid(self):
+        supplier = Supplier.objects.create(name="Yangi Postavshik")
+        response = self.client.get(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(Decimal(response.data["purchase_total"]), Decimal("0"))
+        self.assertEqual(Decimal(response.data["paid_total"]), Decimal("0"))
+        self.assertEqual(Decimal(response.data["outstanding"]), Decimal("0"))
+
+    def test_supplier_payment_rejects_non_positive_amount(self):
+        supplier = Supplier.objects.create(name="Test Postavshik")
+        response = self.client.post("/api/supplier-payments/", {"supplier": supplier.id, "amount": "0", "paid_at": "2026-07-29", "method": "cash"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_accounting_summary_splits_cost_and_reports_waste(self):
+        packaging = Packaging.objects.create(packaging_type="wrap", name_uz="Qog‘oz", cost_price=Decimal("5000"), sale_price=Decimal("9000"), quantity=100)
+        item = CatalogItem.objects.create(name_uz="Hisob buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=1, status="available", florist_fee=Decimal("20000"))
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=10)
+        CatalogMaterialUsage.objects.create(catalog_item=item, packaging=packaging, quantity=2)
+        sync_catalog_financials(item)
+        mark_catalog_sold(item, self.user)
+        StockMovement.objects.create(batch=self.batch, movement_type="waste", quantity_stems=-4, reason="so‘lgan")
+        response = self.client.get("/api/accounting/")
+        self.assertEqual(response.status_code, 200)
+        summary = response.data["summary"]
+        self.assertEqual(Decimal(summary["flower_cost_total"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(summary["material_cost_total"]), Decimal("10000.00"))
+        self.assertEqual(Decimal(summary["florist_fee_cost_total"]), Decimal("20000.00"))
+        self.assertEqual(Decimal(summary["cost_total"]), Decimal("130000.00"))
+        self.assertEqual(Decimal(summary["waste_cost_total"]), Decimal("40000.00"))
+        self.assertEqual(summary["waste_stems"], 4)
+        row = response.data["history"][0]
+        self.assertEqual(Decimal(row["flower_cost"]) + Decimal(row["material_cost"]) + Decimal(row["florist_fee_cost"]), Decimal(row["cost_total"]))
+
+    def test_stock_movement_exposes_cost_value(self):
+        StockMovement.objects.create(batch=self.batch, movement_type="waste", quantity_stems=-3, reason="chiqit")
+        response = self.client.get("/api/stock-movements/")
+        self.assertEqual(response.status_code, 200)
+        row = response.data["results"][0]
+        self.assertEqual(Decimal(row["cost_value"]), Decimal("30000.00"))
+        self.assertEqual(Decimal(row["sale_value"]), Decimal("60000.00"))
 
     def test_dashboard_requires_authentication(self):
         response = APIClient().get("/api/dashboard/")

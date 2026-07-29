@@ -4,7 +4,7 @@ from django.core.files.storage import default_storage
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
 from django.db import transaction
-from django.db.models import Count, F, Max, Q, Sum
+from django.db.models import Count, DecimalField, F, Max, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils.dateparse import parse_date, parse_datetime
@@ -29,10 +29,10 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
-from .inventory_services import apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
+from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .inventory_services import catalog_cost_breakdown, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -279,6 +279,23 @@ def catalog_history_cost_total(history):
     return (Decimal(item.calculated_cost_price or 0) / total * quantity).quantize(Decimal("0.01"))
 
 
+def catalog_history_cost_breakdown(history):
+    """Sotuv tannarxini gul, material va florist haqiga ajratadi."""
+    item = history.catalog_item
+    total = Decimal(item.quantity_total or 1)
+    quantity = Decimal(history.quantity or 0)
+    empty = {"flower_cost": Decimal("0"), "material_cost": Decimal("0"), "florist_fee_cost": Decimal("0")}
+    if total <= 0 or quantity <= 0:
+        return empty
+    breakdown = catalog_cost_breakdown(item)
+    share = quantity / total
+    rows = {key: (breakdown[key] * share).quantize(Decimal("0.01")) for key in empty}
+    # yaxlitlash farqini gul tannarxiga qo'shib, yig'indi cost_total bilan mos bo'lishini ta'minlaymiz
+    diff = catalog_history_cost_total(history) - sum(rows.values())
+    rows["flower_cost"] += diff
+    return rows
+
+
 def sold_catalog_history_queryset(request):
     date_from, date_to = parse_date_range_params(request)
     rows = CatalogHistory.objects.filter(action="sold").select_related("catalog_item__florist__user", "created_by")
@@ -303,6 +320,10 @@ def accounting_report_data(request):
         "discounted_sales_count": 0,
         "discounted_quantity": 0,
         "cost_total": Decimal("0"),
+        "flower_cost_total": Decimal("0"),
+        "material_cost_total": Decimal("0"),
+        "florist_fee_cost_total": Decimal("0"),
+        "waste_cost_total": Decimal("0"),
         "net_profit": Decimal("0"),
     }
     by_kind = {
@@ -330,12 +351,16 @@ def accounting_report_data(request):
         quantity = int(history.quantity or 0)
         sale_total = catalog_history_sale_total(history)
         cost_total = catalog_history_cost_total(history)
+        cost_breakdown = catalog_history_cost_breakdown(history)
         discount = Decimal(history.discount_amount or 0)
         summary["total_sales"] += sale_total
         summary[f"{payment}_total"] += sale_total
         summary["total_quantity"] += quantity
         summary["discount_total"] += discount
         summary["cost_total"] += cost_total
+        summary["flower_cost_total"] += cost_breakdown["flower_cost"]
+        summary["material_cost_total"] += cost_breakdown["material_cost"]
+        summary["florist_fee_cost_total"] += cost_breakdown["florist_fee_cost"]
         if discount > 0:
             summary["discounted_sales_count"] += 1
             summary["discounted_quantity"] += quantity
@@ -372,6 +397,9 @@ def accounting_report_data(request):
             "listed_total": catalog_history_listed_total(history),
             "sale_total": sale_total,
             "cost_total": cost_total,
+            "flower_cost": cost_breakdown["flower_cost"],
+            "material_cost": cost_breakdown["material_cost"],
+            "florist_fee_cost": cost_breakdown["florist_fee_cost"],
             "net_profit": sale_total - cost_total,
             "payment_type": payment,
             "payment_label": payment_label(payment),
@@ -383,6 +411,17 @@ def accounting_report_data(request):
         history_rows.append(row)
         if discount > 0:
             discount_rows.append(row)
+    waste_movements = StockMovement.objects.filter(movement_type="waste").select_related("batch")
+    if date_from:
+        waste_movements = waste_movements.filter(created_at__date__gte=date_from)
+    if date_to:
+        waste_movements = waste_movements.filter(created_at__date__lte=date_to)
+    waste_stems = 0
+    for movement in waste_movements:
+        stems = abs(int(movement.quantity_stems or 0))
+        waste_stems += stems
+        summary["waste_cost_total"] += (Decimal(stems) * Decimal(movement.batch.cost_per_stem or 0)).quantize(Decimal("0.01"))
+    summary["waste_stems"] = waste_stems
     summary["net_profit"] = summary["total_sales"] - summary["cost_total"]
     return {
         "period": {"date_from": date_from.isoformat() if date_from else None, "date_to": date_to.isoformat() if date_to else None},
@@ -623,13 +662,58 @@ class FlowerVariantViewSet(ScopedViewSet):
             write_audit(self.request.user, "flowervariant_archived", instance, before=before_changed, after=after_changed, request=self.request)
 
 
+def supplier_rollup_queryset():
+    money = DecimalField(max_digits=16, decimal_places=2)
+    purchase = Subquery(
+        StockBatch.objects.filter(supplier=OuterRef("pk"))
+        .values("supplier")
+        .annotate(total=Coalesce(Sum(F("received_stems") * F("cost_per_stem"), output_field=money), Value(Decimal("0"), output_field=money)))
+        .values("total")[:1],
+        output_field=money,
+    )
+    paid = Subquery(
+        SupplierPayment.objects.filter(supplier=OuterRef("pk"))
+        .values("supplier")
+        .annotate(total=Coalesce(Sum("amount", output_field=money), Value(Decimal("0"), output_field=money)))
+        .values("total")[:1],
+        output_field=money,
+    )
+    last_paid = Subquery(SupplierPayment.objects.filter(supplier=OuterRef("pk")).order_by("-paid_at", "-id").values("paid_at")[:1])
+    zero = Value(Decimal("0"), output_field=money)
+    return (
+        Supplier.objects.annotate(
+            batches_count=Count("stock_batches", distinct=True),
+            total_received_stems=Coalesce(Sum("stock_batches__received_stems"), 0),
+            purchase_total=Coalesce(purchase, zero),
+            paid_total=Coalesce(paid, zero),
+            last_payment_at=last_paid,
+        )
+        .annotate(outstanding=F("purchase_total") - F("paid_total"))
+    )
+
+
 class SupplierViewSet(ScopedViewSet):
     permission_page = "suppliers"
     write_roles = ["admin", "warehouse"]
-    queryset = Supplier.objects.annotate(batches_count=Count("stock_batches", distinct=True), total_received_stems=Coalesce(Sum("stock_batches__received_stems"), 0)).all()
+    queryset = supplier_rollup_queryset()
     serializer_class = SupplierSerializer
     filterset_fields = ["is_active"]
     search_fields = ["name", "phone", "notes"]
+    ordering_fields = ["name", "purchase_total", "paid_total", "outstanding", "last_payment_at", "created_at"]
+
+
+class SupplierPaymentViewSet(ScopedViewSet):
+    permission_page = "suppliers"
+    write_roles = ["admin", "warehouse"]
+    queryset = SupplierPayment.objects.select_related("supplier", "created_by").all()
+    serializer_class = SupplierPaymentSerializer
+    filterset_fields = ["supplier", "method", "paid_at"]
+    search_fields = ["note", "supplier__name"]
+    ordering_fields = ["paid_at", "amount", "created_at"]
+
+    def perform_create(self, serializer):
+        payment = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        write_audit(self.request.user, "supplierpayment_created", payment, before={}, after=instance_snapshot(payment), request=self.request)
 
 
 class FloristVolumeRateViewSet(ScopedViewSet):
@@ -2030,11 +2114,15 @@ def batch_inventory_stats(start, end):
             "standard_catalog_stems": 0,
             "custom_catalog_stems": 0,
             "waste_stems": 0,
+            "waste_cost_value": Decimal("0"),
             "total_out_stems": 0,
+            "total_out_cost_value": Decimal("0"),
         })
         stems = abs(int(movement.quantity_stems or 0))
+        cost_value = (Decimal(stems) * Decimal(batch.cost_per_stem or 0)).quantize(Decimal("0.01"))
         if movement.movement_type == "waste":
             row["waste_stems"] += stems
+            row["waste_cost_value"] += cost_value
         elif movement.reference_type == "catalog_item":
             if catalog_kinds.get(movement.reference_id) == "custom":
                 row["custom_catalog_stems"] += stems
@@ -2042,6 +2130,7 @@ def batch_inventory_stats(start, end):
                 row["standard_catalog_stems"] += stems
         if movement.quantity_stems < 0:
             row["total_out_stems"] += stems
+            row["total_out_cost_value"] += cost_value
     return sorted(rows.values(), key=lambda row: row["total_out_stems"], reverse=True)
 
 

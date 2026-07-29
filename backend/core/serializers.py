@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -193,10 +193,38 @@ class FlowerVariantSerializer(serializers.ModelSerializer):
 class SupplierSerializer(serializers.ModelSerializer):
     batches_count = serializers.IntegerField(read_only=True)
     total_received_stems = serializers.IntegerField(read_only=True)
+    purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    paid_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    outstanding = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    last_payment_at = serializers.DateField(read_only=True)
 
     class Meta:
         model = Supplier
         fields = "__all__"
+
+
+class SupplierPaymentSerializer(serializers.ModelSerializer):
+    supplier_detail = serializers.SerializerMethodField(read_only=True)
+    method_label = serializers.SerializerMethodField(read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = SupplierPayment
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_supplier_detail(self, obj):
+        return {"id": obj.supplier_id, "name": obj.supplier.name, "phone": obj.supplier.phone}
+
+    @extend_schema_field(serializers.CharField())
+    def get_method_label(self, obj):
+        return dict(SupplierPayment.METHOD_CHOICES).get(obj.method, obj.method)
+
+    def validate_amount(self, value):
+        if value is None or Decimal(value) <= 0:
+            raise serializers.ValidationError("To‘lov summasi noldan katta bo‘lishi kerak.")
+        return value
 
 
 class FloristProfileRateSerializer(serializers.ModelSerializer):
@@ -395,10 +423,23 @@ class StockBatchSerializer(serializers.ModelSerializer):
 class StockMovementSerializer(serializers.ModelSerializer):
     batch_detail = StockBatchSerializer(source="batch", read_only=True)
     performed_by_detail = UserSerializer(source="performed_by", read_only=True)
+    cost_value = serializers.SerializerMethodField(read_only=True)
+    sale_value = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = StockMovement
         fields = "__all__"
         read_only_fields = ["performed_by"]
+
+    @extend_schema_field(serializers.DecimalField(max_digits=16, decimal_places=2))
+    def get_cost_value(self, obj):
+        stems = abs(int(obj.quantity_stems or 0))
+        return str((Decimal(stems) * Decimal(obj.batch.cost_per_stem or 0)).quantize(Decimal("0.01")))
+
+    @extend_schema_field(serializers.DecimalField(max_digits=16, decimal_places=2))
+    def get_sale_value(self, obj):
+        stems = abs(int(obj.quantity_stems or 0))
+        return str((Decimal(stems) * Decimal(obj.batch.sale_price_per_stem or 0)).quantize(Decimal("0.01")))
 
 
 class PackagingSerializer(serializers.ModelSerializer):

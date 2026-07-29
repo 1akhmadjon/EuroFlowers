@@ -62,16 +62,26 @@ def catalog_component_total(item):
     return stock_total + material_total + florist_total
 
 
-def catalog_cost_total(item):
+def catalog_cost_breakdown(item):
+    """Katalog mahsuloti tannarxini uchga ajratadi: gul, material va florist haqi."""
     quantity = int(item.quantity_total or 1)
-    stock_total = Decimal("0")
+    flower_cost = Decimal("0")
     for row in item.composition.select_related("stock_batch"):
-        stock_total += Decimal(row.quantity_stems * quantity) * row.stock_batch.cost_per_stem
-    material_total = Decimal("0")
+        flower_cost += Decimal(row.quantity_stems * quantity) * row.stock_batch.cost_per_stem
+    material_cost = Decimal("0")
     for row in item.materials.select_related("packaging"):
-        material_total += Decimal(row.quantity * quantity) * row.packaging.cost_price
-    florist_total = Decimal(item.florist_fee or 0) * Decimal(quantity)
-    return stock_total + material_total + florist_total
+        material_cost += Decimal(row.quantity * quantity) * row.packaging.cost_price
+    florist_fee_cost = Decimal(item.florist_fee or 0) * Decimal(quantity)
+    return {
+        "flower_cost": flower_cost,
+        "material_cost": material_cost,
+        "florist_fee_cost": florist_fee_cost,
+        "total": flower_cost + material_cost + florist_fee_cost,
+    }
+
+
+def catalog_cost_total(item):
+    return catalog_cost_breakdown(item)["total"]
 
 
 def apply_volume_rate(item):

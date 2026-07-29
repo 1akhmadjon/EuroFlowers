@@ -107,6 +107,23 @@ class Supplier(TimeStampedModel):
         return self.name
 
 
+class SupplierPayment(TimeStampedModel):
+    METHOD_CHOICES = [("cash", "Naqd"), ("card", "Karta"), ("transfer", "O‘tkazma")]
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name="payments")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    paid_at = models.DateField(default=timezone.localdate)
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="cash")
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="supplier_payments")
+
+    class Meta:
+        ordering = ["-paid_at", "-id"]
+        indexes = [models.Index(fields=["supplier", "-paid_at"])]
+
+    def __str__(self):
+        return f"{self.supplier} · {self.amount}"
+
+
 class StockBatch(TimeStampedModel):
     variant = models.ForeignKey(FlowerVariant, on_delete=models.PROTECT, related_name="batches")
     supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_batches")

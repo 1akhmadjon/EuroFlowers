@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
-from .views import AccountingReportView, AdminFloristsExcelExportView, AdminProfitExcelExportView, AuditLogViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FloristAttendanceViewSet, FloristProfileViewSet, FloristSalaryEntryViewSet, FloristVolumeRateViewSet, FloristSelfExcelExportView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, InventoryMovementJournalView, LeadStatusViewSet, LeadViewSet, NotificationViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, SupplierViewSet, UserViewSet, ai_settings, analytics, backup_telegram_webhook, business_settings, change_password, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
+from .views import AccountingReportView, AdminFloristsExcelExportView, AdminProfitExcelExportView, AuditLogViewSet, CatalogItemViewSet, ConversationViewSet, CustomerViewSet, EuroFlowersTokenObtainPairView, FloristAttendanceViewSet, FloristProfileViewSet, FloristSalaryEntryViewSet, FloristVolumeRateViewSet, FloristSelfExcelExportView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, InventoryMovementJournalView, LeadStatusViewSet, LeadViewSet, NotificationViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, SocialPostViewSet, StockBatchViewSet, StockMovementViewSet, SupplierPaymentViewSet, SupplierViewSet, UserViewSet, ai_settings, analytics, backup_telegram_webhook, business_settings, change_password, dashboard, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
 
 router = DefaultRouter()
 router.register("users", UserViewSet)
@@ -9,6 +9,7 @@ router.register("permissions", PagePermissionViewSet)
 router.register("flowers", FlowerViewSet)
 router.register("flower-variants", FlowerVariantViewSet)
 router.register("suppliers", SupplierViewSet)
+router.register("supplier-payments", SupplierPaymentViewSet)
 router.register("stock-batches", StockBatchViewSet)
 router.register("stock-movements", StockMovementViewSet)
 router.register("packaging", PackagingViewSet)
