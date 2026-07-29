@@ -1308,6 +1308,49 @@ def ai_reply_asks_for_catalog_image(text):
     return any(phrase in compact for phrase in phrases)
 
 
+def customer_asks_for_image(text):
+    compact = compact_match_text(text)
+    phrases = [
+        "rasm",
+        "rasmi",
+        "rasmini",
+        "rasmlar",
+        "korsat",
+        "ko rsat",
+        "yubor",
+        "qani",
+    ]
+    return any(phrase in compact for phrase in phrases)
+
+
+def ai_reply_has_stock_results(result):
+    for tool_result in result.get("tool_results") or []:
+        if tool_result.get("name") == "get_stock" and tool_result.get("output", {}).get("stock"):
+            return True
+    return False
+
+
+def clean_stock_image_offer(text):
+    replacements = [
+        " yoki rasmni ko‘rmokchimisiz?",
+        " yoki rasmni ko‘rmoqchimisiz?",
+        " yoki rasmini ko‘rmokchimisiz?",
+        " yoki rasmini ko‘rmoqchimisiz?",
+        " yoki rasmni ko'rmokchimisiz?",
+        " yoki rasmni ko'rmoqchimisiz?",
+        " yoki rasmini ko'rmokchimisiz?",
+        " yoki rasmini ko'rmoqchimisiz?",
+        " yoki rasmni ko rmokchimisiz?",
+        " yoki rasmni ko rmoqchimisiz?",
+        " yoki rasmini ko rmokchimisiz?",
+        " yoki rasmini ko rmoqchimisiz?",
+    ]
+    cleaned = text or ""
+    for phrase in replacements:
+        cleaned = cleaned.replace(phrase, "?")
+    return cleaned
+
+
 def catalog_image_already_sent(conversation, item):
     if not item:
         return False
@@ -1327,6 +1370,34 @@ def catalog_items_from_ai_result(result):
             seen.add(item.id)
             items.append(item)
     return items
+
+
+def stock_image_already_sent(conversation, batch):
+    if not batch:
+        return False
+    for message in conversation.messages.exclude(metadata={}).order_by("-created_at", "-id")[:20]:
+        image_result = (message.metadata or {}).get("image_tool_result") or {}
+        if str(image_result.get("stock_batch_id") or "") == str(batch.id) and image_result.get("sent") is not None:
+            return True
+    return False
+
+
+def stock_batch_from_recent_ai_context(conversation):
+    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower")
+    for message in conversation.messages.exclude(metadata={}).order_by("-created_at", "-id")[:20]:
+        metadata = message.metadata or {}
+        for row in metadata.get("stock_items") or []:
+            batch = queryset.filter(id=row.get("batch_id")).first()
+            if batch and stock_image_url(batch):
+                return batch
+        for tool_result in metadata.get("tool_results") or []:
+            if tool_result.get("name") != "get_stock":
+                continue
+            for row in tool_result.get("output", {}).get("stock") or []:
+                batch = queryset.filter(id=row.get("batch_id")).first()
+                if batch and stock_image_url(batch):
+                    return batch
+    return None
 
 
 def single_catalog_item_from_ai_result(result, conversation):
@@ -1381,6 +1452,28 @@ def enforce_catalog_image_flow(result, conversation):
     return result
 
 
+def enforce_stock_image_flow(result, conversation):
+    if ai_reply_has_stock_results(result):
+        result["reply"] = clean_stock_image_offer(result.get("reply", ""))
+    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    if not latest_customer_message or not customer_asks_for_image(latest_customer_message.text):
+        return result
+    already_called = any(tool_result.get("name") in {"send_stock_image", "send_stock_images"} for tool_result in result.get("tool_results") or [])
+    if already_called:
+        return result
+    batch = stock_batch_from_recent_ai_context(conversation)
+    if not batch:
+        return result
+    tool_result = {"ok": False, "detail": "image_already_sent", "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}
+    if not stock_image_already_sent(conversation, batch):
+        tool_result = send_stock_batch_image(conversation, batch)
+    result.setdefault("tool_results", [])
+    result["tool_results"].append({"name": "send_stock_image", "arguments": {"query": flower_variant_display_name(batch.variant, "uz"), "batch_id": batch.id}, "output": tool_result})
+    result["stock_items"] = [{"batch_id": batch.id, "quantity_stems": 0, "quantity_bunches": 0}]
+    result["reply"] = f"{flower_variant_display_name(batch.variant, 'uz')} rasmi\nShu guldan nechta dona qilib buket yoki savat yasaymiz?"
+    return result
+
+
 def create_ai_reply_for_conversation(conversation):
     if conversation.status == "closed":
         return None
@@ -1418,6 +1511,7 @@ def create_ai_reply_for_conversation(conversation):
         result["phone"] = None
         result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
     result = enforce_catalog_image_flow(result, conversation)
+    result = enforce_stock_image_flow(result, conversation)
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
         Notification.objects.create(notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)

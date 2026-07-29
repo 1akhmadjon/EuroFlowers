@@ -393,6 +393,62 @@ class BusinessRulesTests(TestCase):
         image_mock.assert_any_call("ig-multi-catalog", "https://example.com/pushti-buket.jpg")
         self.assertEqual(reply.metadata["tool_results"][-1]["name"], "send_catalog_images")
 
+    def test_ai_stock_list_reply_removes_image_offer(self):
+        self.batch.image_url = "https://example.com/mondial.jpg"
+        self.batch.save(update_fields=["image_url", "updated_at"])
+        customer = Customer.objects.create(instagram_user_id="ig-stock-list")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="qanaqa gullar bor")
+        payload = {
+            "reply": "Skladimizda Atirgul Mondial bor\n\nQaysi biridan buket yoki savat yasaymiz yoki rasmni ko‘rmoqchimisiz?",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [{"batch_id": self.batch.id, "quantity_stems": 0, "quantity_bunches": 0}],
+            "tool_results": [{"name": "get_stock", "arguments": {"query": "all"}, "output": {"stock": [{"batch_id": self.batch.id, "display_name_uz": "Atirgul Mondial Oq", "has_image": True}]}}],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload), patch("core.services.instagram_send_image") as image_mock:
+            reply = create_ai_reply_for_conversation(conversation)
+        image_mock.assert_not_called()
+        self.assertNotIn("rasmni", reply.text.lower())
+        self.assertIn("Qaysi biridan buket yoki savat yasaymiz?", reply.text)
+
+    def test_ai_stock_image_request_sends_recent_stock_image_when_tool_missing(self):
+        self.batch.image_url = "https://example.com/mondial.jpg"
+        self.batch.save(update_fields=["image_url", "updated_at"])
+        customer = Customer.objects.create(instagram_user_id="telegram:44")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="qanaqa gullar bor")
+        conversation.messages.create(sender="ai", text="Skladimizda Atirgul Mondial bor", metadata={"tool_results": [{"name": "get_stock", "arguments": {"query": "all"}, "output": {"stock": [{"batch_id": self.batch.id, "display_name_uz": "Atirgul Mondial Oq", "has_image": True}]}}]})
+        conversation.messages.create(sender="customer", text="rasm korsatchi")
+        payload = {
+            "reply": "Rasmni yubordim.",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload), patch("core.services.telegram_send_image", return_value={"ok": True}) as image_mock:
+            reply = create_ai_reply_for_conversation(conversation)
+        image_mock.assert_called_once_with("44", "https://example.com/mondial.jpg")
+        self.assertEqual(reply.metadata["tool_results"][-1]["name"], "send_stock_image")
+        self.assertIn("Atirgul Mondial Oq rasmi", reply.text)
+        self.assertIn("Shu guldan nechta dona qilib buket yoki savat yasaymiz?", reply.text)
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
         customer = Customer.objects.create(instagram_user_id="ig-tools", name="Ahmad")
@@ -820,6 +876,14 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Ko'nglingiz xotirjam bo'lsin", rule)
         self.assertIn("so'lib qolgan gullar bilan hech qachon buket yoki savat yasalmaydi", rule)
         self.assertIn("o'zingdan generate qilma", rule)
+
+    def test_stock_image_tool_required_prompt_rule(self):
+        migration = importlib.import_module("core.migrations.0049_ai_prompt_stock_image_tool_required")
+        rule = migration.STOCK_IMAGE_TOOL_REQUIRED_RULE
+        self.assertIn("Sklad rasmi bo'yicha qat'iy qoida", rule)
+        self.assertIn("rasmni ko'rmoqchimisiz", rule)
+        self.assertIn("send_stock_image", rule)
+        self.assertIn("Tool chaqirmasdan hech qachon", rule)
 
     def test_location_reply_splits_into_two_messages(self):
         text = "Manzillarimiz:\n\n1. Ул. Мукими 1\nhttps://yandex.uz/maps/-/CTVJzD4O\n\n2. 1-й квартал, 1, массив Чиланзар, Чиланзарский район, Ташкент\nhttps://yandex.uz/maps/-/CTVJfPoq\n\nQaysi manzilga yo‘l ko‘rsatib beray?"
