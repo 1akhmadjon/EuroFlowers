@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -1355,6 +1355,30 @@ class ApiTests(TestCase):
         titles = [row["title_uz"] for row in response.json()["results"]]
         self.assertIn("Global", titles)
         self.assertNotIn("Target", titles)
+
+    def test_notification_mark_read_marks_single_notification(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="notifications", can_view=True, can_control=True)
+        first = Notification.objects.create(notification_type="lead", title_uz="First", title_ru="First", body_uz="", body_ru="")
+        second = Notification.objects.create(notification_type="lead", title_uz="Second", title_ru="Second", body_uz="", body_ru="")
+        self.client.force_authenticate(self.user)
+        response = self.client.post(f"/api/notifications/{first.id}/mark-read/")
+        self.assertEqual(response.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertTrue(first.is_read)
+        self.assertFalse(second.is_read)
+
+    def test_lead_status_api_does_not_expose_name_ru(self):
+        UserProfile.objects.create(user=self.user, role="admin")
+        PagePermission.objects.create(user=self.user, page="crm", can_view=True, can_control=True)
+        LeadStatus.objects.create(key="test-status", name_uz="Test status", color="#111111", order=1)
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/lead-statuses/")
+        self.assertEqual(response.status_code, 200)
+        row = response.json()["results"][0]
+        self.assertIn("name_uz", row)
+        self.assertNotIn("name_ru", row)
 
     def test_admin_gets_notification_when_florist_checks_in(self):
         UserProfile.objects.create(user=self.user, role="admin")

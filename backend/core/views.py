@@ -1254,7 +1254,7 @@ class LeadStatusViewSet(ScopedViewSet):
     queryset = LeadStatus.objects.all()
     serializer_class = LeadStatusSerializer
     filterset_fields = ["is_active"]
-    search_fields = ["key", "name_uz", "name_ru"]
+    search_fields = ["key", "name_uz"]
     ordering_fields = ["order", "created_at"]
 
 
@@ -1512,12 +1512,19 @@ class NotificationViewSet(ScopedViewSet):
         scoped_ids = notification_queryset_for_user(self.request.user).values("id")
         return super().get_queryset().filter(id__in=scoped_ids)
 
-    @action(detail=True, methods=["post"])
-    def read(self, request, pk=None):
+    def _mark_read_response(self):
         notification = self.get_object()
         notification.is_read = True
         notification.save(update_fields=["is_read", "updated_at"])
         return Response(self.get_serializer(notification).data)
+
+    @action(detail=True, methods=["post"])
+    def read(self, request, pk=None):
+        return self._mark_read_response()
+
+    @action(detail=True, methods=["post"], url_path="mark-read")
+    def mark_read(self, request, pk=None):
+        return self._mark_read_response()
 
     @action(detail=False, methods=["post"])
     def read_all(self, request):

@@ -24,14 +24,14 @@ class Command(BaseCommand):
         AISettings.objects.get_or_create(pk=1)
         IntegrationSettings.objects.get_or_create(pk=1)
         InstagramSettings.objects.get_or_create(pk=1, defaults={"account_username": "euroflowers.uz"})
-        for key, name_uz, name_ru, color, order in [
-            ("new", "Yangi", "Новый", "#2563eb", 10),
-            ("qualified", "Aniqlangan", "Квалифицирован", "#7c3aed", 20),
-            ("contacted", "Aloqa qilindi", "Связались", "#f59e0b", 30),
-            ("won", "Sotildi", "Продано", "#16a34a", 40),
-            ("lost", "Yo‘qotildi", "Потерян", "#dc2626", 50),
+        for key, name_uz, color, order in [
+            ("new", "Yangi", "#2563eb", 10),
+            ("qualified", "Aniqlangan", "#7c3aed", 20),
+            ("contacted", "Aloqa qilindi", "#f59e0b", 30),
+            ("won", "Sotildi", "#16a34a", 40),
+            ("lost", "Yo‘qotildi", "#dc2626", 50),
         ]:
-            LeadStatus.objects.update_or_create(key=key, defaults={"name_uz": name_uz, "name_ru": name_ru, "color": color, "order": order, "is_active": True})
+            LeadStatus.objects.update_or_create(key=key, defaults={"name_uz": name_uz, "color": color, "order": order, "is_active": True})
         for page, _ in PagePermission.PAGE_CHOICES:
             if page not in PagePermission.DEVELOPER_ONLY_PAGES:
                 PagePermission.objects.update_or_create(user=admin, page=page, defaults={"can_view": True, "can_control": True})

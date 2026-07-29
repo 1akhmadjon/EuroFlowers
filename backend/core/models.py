@@ -421,7 +421,6 @@ class Message(TimeStampedModel):
 class LeadStatus(TimeStampedModel):
     key = models.SlugField(max_length=40, unique=True)
     name_uz = models.CharField(max_length=120)
-    name_ru = models.CharField(max_length=120, blank=True)
     color = models.CharField(max_length=40, default="#64748b")
     order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
