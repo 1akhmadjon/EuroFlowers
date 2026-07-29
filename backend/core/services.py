@@ -237,6 +237,13 @@ def flower_variant_search_haystack(variant):
     ]))
 
 
+def haystack_has_term(haystack, term):
+    """So'z chegarasi bo'yicha moslik. 'all' so'zi 'podgallan' ichiga tushmasligi uchun."""
+    if len(term) < 4:
+        return any(word == term for word in haystack.split())
+    return any(word == term or word.startswith(term) or term.startswith(word) for word in haystack.split())
+
+
 def ai_search_terms(value):
     text = compact_match_text(value)
     replacements = {
@@ -345,9 +352,9 @@ def ai_stock_rows(query="", limit=24):
         ranked = []
         for variant in queryset:
             haystack = flower_variant_search_haystack(variant)
-            if color_terms and not any(term in haystack for term in color_terms):
+            if color_terms and not any(haystack_has_term(haystack, term) for term in color_terms):
                 continue
-            score = sum(1 for term in terms if term in haystack)
+            score = sum(1 for term in terms if haystack_has_term(haystack, term))
             if score:
                 ranked.append((score, variant))
         queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz, row[1].name_uz))]
@@ -379,9 +386,9 @@ def ai_flower_variant_rows(query="", limit=24):
         ranked = []
         for variant in queryset:
             haystack = flower_variant_search_haystack(variant)
-            if color_terms and not any(term in haystack for term in color_terms):
+            if color_terms and not any(haystack_has_term(haystack, term) for term in color_terms):
                 continue
-            score = sum(1 for term in terms if term in haystack)
+            score = sum(1 for term in terms if haystack_has_term(haystack, term))
             if score:
                 ranked.append((score, variant))
         queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz))]
@@ -648,10 +655,10 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_stock",
-            "description": "Skladdagi gul variantlari va narxlarini olish. Bu tool faqat gullar uchun, savat/qadoq/materiallarni qaytarmaydi.",
+            "description": "Skladdagi gul variantlari va narxlarini olish. Bu tool faqat gullar uchun, savat/qadoq/materiallarni qaytarmaydi. Butun sklad ro'yxati kerak bo'lsa query ni bo'sh string qoldiring; 'all', 'hammasi' kabi so'z yozmang. Aniq gul yoki rang qidirilsagina query ga o'sha nomni yozing.",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {"query": {"type": "string", "description": "Bo'sh string = butun sklad. Aks holda gul nomi yoki rangi."}},
                 "required": ["query"],
                 "additionalProperties": False,
             },
@@ -788,7 +795,7 @@ def _stock_batch_for_ai(query="", batch_id=None):
     ranked = []
     for batch in queryset:
         haystack = flower_variant_search_haystack(batch.variant)
-        score = sum(1 for term in terms if term in haystack)
+        score = sum(1 for term in terms if haystack_has_term(haystack, term))
         if score:
             ranked.append((score, batch))
     if ranked:

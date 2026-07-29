@@ -30,6 +30,16 @@ class BusinessRulesTests(TestCase):
         self.item = CatalogItem.objects.create(name_uz="Oq buket", arrangement_type="bouquet", price=500000)
         CatalogComposition.objects.create(catalog_item=self.item, stock_batch=self.batch, quantity_stems=15)
 
+    def test_stock_search_does_not_match_term_inside_another_word(self):
+        from .services import haystack_has_term
+        self.assertFalse(haystack_has_term("atirgul jumila podgallan pushti", "all"))
+        self.assertTrue(haystack_has_term("atirgul jumila podgallan pushti", "jumila"))
+        self.assertTrue(haystack_has_term("atirgul prut oq", "oq"))
+        flower = Flower.objects.create(name_uz="Atirgul2", slug="rose2")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="podgallan", color_uz="Pushti")
+        StockBatch.objects.create(variant=variant, batch_number="T-2", height_cm=50, stems_per_bunch=25, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=15000, sale_price_per_bunch=375000)
+        self.assertEqual(len(ai_stock_rows("", limit=50)), 2)
+
     def test_lead_tool_refuses_without_name_or_phone(self):
         customer = Customer.objects.create(instagram_user_id="ig-lead-guard")
         conversation = Conversation.objects.create(customer=customer)
