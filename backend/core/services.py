@@ -100,10 +100,13 @@ LATIN_DIGRAPHS = [
     ("Yu", "Ю"), ("YU", "Ю"), ("yu", "ю"),
     ("Ya", "Я"), ("YA", "Я"), ("ya", "я"),
 ]
-LATIN_APOSTROPHE = [
-    ("O‘", "Ў"), ("O'", "Ў"), ("O’", "Ў"), ("o‘", "ў"), ("o'", "ў"), ("o’", "ў"),
-    ("G‘", "Ғ"), ("G'", "Ғ"), ("G’", "Ғ"), ("g‘", "ғ"), ("g'", "ғ"), ("g’", "ғ"),
-]
+APOSTROPHES = "‘’'\u02bb\u02bc\u2018\u2019`\u00b4"
+LATIN_APOSTROPHE = (
+    [("O" + a, "Ў") for a in APOSTROPHES]
+    + [("o" + a, "ў") for a in APOSTROPHES]
+    + [("G" + a, "Ғ") for a in APOSTROPHES]
+    + [("g" + a, "ғ") for a in APOSTROPHES]
+)
 LATIN_SINGLE = {
     "a": "а", "b": "б", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "ҳ", "i": "и",
     "j": "ж", "k": "к", "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "q": "қ",
@@ -113,10 +116,10 @@ LATIN_SINGLE = {
     "J": "Ж", "K": "К", "L": "Л", "M": "М", "N": "Н", "O": "О", "P": "П", "Q": "Қ",
     "R": "Р", "S": "С", "T": "Т", "U": "У", "V": "В", "X": "Х", "Y": "Й", "Z": "З",
     "C": "К", "W": "В",
-    "'": "ъ", "’": "ъ", "‘": "ъ",
+    "'": "ъ", "’": "ъ", "‘": "ъ", "\u02bb": "ъ", "\u02bc": "ъ", "\u2018": "ъ", "\u2019": "ъ",
 }
 
-WORD_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ’‘'"
+WORD_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" + APOSTROPHES
 
 
 def _split_protected(text):
@@ -152,8 +155,8 @@ def _latin_chunk_to_cyril(chunk):
         value = value.replace(src, dst)
     value = re.sub(r"\bYe", "Е", value)
     value = re.sub(r"\bye", "е", value)
-    value = re.sub(r"\bE(?![‘'’])", "Э", value)
-    value = re.sub(r"\be(?![‘'’])", "э", value)
+    value = re.sub(r"\bE(?![" + APOSTROPHES + "])", "Э", value)
+    value = re.sub(r"\be(?![" + APOSTROPHES + "])", "э", value)
     for src, dst in LATIN_DIGRAPHS:
         value = value.replace(src, dst)
     return "".join(LATIN_SINGLE.get(ch, ch) for ch in value)
