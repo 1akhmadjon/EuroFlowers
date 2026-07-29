@@ -648,6 +648,13 @@ class FloristProfileViewSet(ScopedViewSet):
     filterset_fields = ["staff_type", "is_active"]
     search_fields = ["user__first_name", "user__last_name", "user__username", "phone"]
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(getattr(self.request.user, "profile", None), "role", None)
+        if role in ["florist", "apprentice"]:
+            return queryset.filter(user=self.request.user)
+        return queryset
+
     @action(detail=False, methods=["get"], url_path="me")
     def me_profile(self, request):
         profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
@@ -757,6 +764,14 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
     queryset = FloristSalaryEntry.objects.select_related("florist__user", "catalog_item", "attendance", "created_by").all()
     serializer_class = FloristSalaryEntrySerializer
     filterset_class = FloristSalaryEntryFilter
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        role = getattr(getattr(self.request.user, "profile", None), "role", None)
+        if role in ["florist", "apprentice"]:
+            profile = FloristProfile.objects.filter(user=self.request.user).first()
+            return queryset.filter(florist=profile) if profile else queryset.none()
+        return queryset
 
     def perform_create(self, serializer):
         entry = serializer.save(created_by=self.request.user)

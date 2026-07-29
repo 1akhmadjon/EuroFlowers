@@ -1362,6 +1362,26 @@ class ApiTests(TestCase):
         self.assertIn("Global", titles)
         self.assertNotIn("Target", titles)
 
+    def test_florist_can_only_see_own_profile_and_salary(self):
+        florist_user = User.objects.create_user("own-florist", password="password", first_name="Ali")
+        other_user = User.objects.create_user("other-florist", password="password", first_name="Vali")
+        UserProfile.objects.create(user=florist_user, role="florist")
+        UserProfile.objects.create(user=other_user, role="florist")
+        own_profile = FloristProfile.objects.create(user=florist_user, staff_type="florist")
+        other_profile = FloristProfile.objects.create(user=other_user, staff_type="florist")
+        FloristSalaryEntry.objects.create(florist=own_profile, amount=Decimal("100000"), work_date=timezone.localdate(), source="manual")
+        FloristSalaryEntry.objects.create(florist=other_profile, amount=Decimal("200000"), work_date=timezone.localdate(), source="manual")
+        PagePermission.objects.create(user=florist_user, page="florists", can_view=True, can_control=False)
+        self.client.force_authenticate(florist_user)
+        response = self.client.get("/api/florists/")
+        self.assertEqual(response.status_code, 200)
+        profile_ids = [row["id"] for row in response.json()["results"]]
+        self.assertEqual(profile_ids, [own_profile.id])
+        response = self.client.get("/api/florist-salary/")
+        self.assertEqual(response.status_code, 200)
+        salary_florist_ids = [row["florist"] for row in response.json()["results"]]
+        self.assertEqual(salary_florist_ids, [own_profile.id])
+
     def test_notification_mark_read_marks_single_notification(self):
         UserProfile.objects.create(user=self.user, role="admin")
         PagePermission.objects.create(user=self.user, page="notifications", can_view=True, can_control=True)
