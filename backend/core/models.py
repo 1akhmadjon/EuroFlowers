@@ -534,7 +534,9 @@ class BusinessSettings(TimeStampedModel):
 
 
 class AISettings(TimeStampedModel):
+    REASONING_CHOICES = [("minimal", "Minimal"), ("low", "Past"), ("medium", "O‘rta"), ("high", "Yuqori")]
     openai_model = models.CharField(max_length=80, default="gpt-5-mini")
+    reasoning_effort = models.CharField(max_length=10, choices=REASONING_CHOICES, default="low")
     system_prompt = models.TextField(default="")
     temperature = models.DecimalField(max_digits=3, decimal_places=2, default=Decimal("0.20"))
     is_active = models.BooleanField(default=True)

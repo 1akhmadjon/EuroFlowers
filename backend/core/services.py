@@ -1108,7 +1108,7 @@ def ai_reply(conversation):
         "instructions": ai_settings.system_prompt,
         "input": model_input,
         "max_output_tokens": 2000,
-        "reasoning": {"effort": "minimal"},
+        "reasoning": {"effort": ai_settings.reasoning_effort or "low"},
         "tools": ai_tool_definitions(),
         "parallel_tool_calls": False,
         "text": {"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
@@ -1141,7 +1141,7 @@ def ai_reply(conversation):
             previous_response_id=response.id,
             input=tool_outputs,
             max_output_tokens=2000,
-            reasoning={"effort": "minimal"},
+            reasoning={"effort": ai_settings.reasoning_effort or "low"},
             tools=ai_tool_definitions(),
             parallel_tool_calls=False,
             text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
@@ -1214,7 +1214,7 @@ def ai_follow_up_decision(conversation, expected_ai_message):
             *history,
         ],
         max_output_tokens=700,
-        reasoning={"effort": "minimal"},
+        reasoning={"effort": ai_settings.reasoning_effort or "low"},
         text={"format": {"type": "json_schema", "name": "follow_up_decision", "strict": True, "schema": ai_follow_up_schema()}},
     )
     try:
