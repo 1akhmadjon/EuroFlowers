@@ -1491,6 +1491,18 @@ def clean_stock_image_offer(text):
     return cleaned
 
 
+def clean_common_ai_typos(text):
+    replacements = {
+        "kechqurambil": "kechqurunmi",
+        "kechqurunbil": "kechqurunmi",
+        "кечқурунбил": "кечқурунми",
+    }
+    cleaned = text or ""
+    for source, target in replacements.items():
+        cleaned = cleaned.replace(source, target)
+    return cleaned
+
+
 def stock_rows_from_ai_result(result):
     rows = []
     for tool_result in result.get("tool_results") or []:
@@ -1832,6 +1844,7 @@ def create_ai_reply_for_conversation(conversation):
     result = enforce_stock_image_flow(result, conversation)
     result = enforce_lead_created_next_question(result, conversation)
     result = enforce_pickup_and_location_flow(result, conversation)
+    result["reply"] = clean_common_ai_typos(result.get("reply", ""))
     reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
     if result.get("handoff"):
         Notification.objects.create(notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)

@@ -638,6 +638,29 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(reply.text, "Rahmat, Ahmad. Yetkazib berish kerakmi yoki kelib olib ketasizmi?")
         self.assertNotIn("manzil", reply.text.lower())
 
+    def test_common_ai_typo_is_cleaned(self):
+        customer = Customer.objects.create(instagram_user_id="telegram:48")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="ertaga")
+        payload = {
+            "reply": "Ertaga qachon kerak bo‘ladi, ertalabmi yoki kechqurambil?",
+            "detected_language": "uz",
+            "customer_name": None,
+            "phone": None,
+            "lead_ready": False,
+            "lead_request": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "handoff": False,
+            "catalog_items": [],
+            "stock_items": [],
+        }
+        from unittest.mock import patch
+        with patch("core.services.ai_reply", return_value=payload):
+            reply = create_ai_reply_for_conversation(conversation)
+        self.assertIn("kechqurunmi", reply.text)
+        self.assertNotIn("kechqurambil", reply.text)
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_reply_sends_context_conversation_and_allowed_tools(self):
         customer = Customer.objects.create(instagram_user_id="ig-tools", name="Ahmad")
