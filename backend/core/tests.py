@@ -51,6 +51,23 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(known["desired_time"])
         self.assertEqual(context["conversation"]["open_lead"]["fulfillment"], "pickup")
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_ai_context_marks_returning_customer(self):
+        from unittest.mock import patch
+        customer = Customer.objects.create(instagram_user_id="ig-return", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        Lead.objects.create(customer=customer, request_uz="oldingi buyurtma")
+        conversation.messages.create(sender="customer", text="salom")
+        payload = {"reply": "Assalomu alaykum, Ahmad", "detected_language": "uz", "customer_name": None, "phone": None, "lead_ready": False, "lead_request": None, "arrangement_type": None, "estimated_price": None, "handoff": False, "catalog_items": [], "stock_items": []}
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="r2")
+            ai_reply(conversation)
+        context = json.loads(client.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
+        self.assertTrue(context["customer"]["is_returning"])
+        self.assertEqual(context["customer"]["previous_orders_count"], 1)
+        self.assertEqual(context["customer"]["name"], "Ahmad")
+
     def test_stock_row_exposes_pochka_fields(self):
         row = stock_batch_ai_row(self.batch)
         self.assertEqual(row["stems_per_pochka"], self.batch.stems_per_bunch)

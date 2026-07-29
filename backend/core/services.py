@@ -1050,6 +1050,8 @@ def ai_reply(conversation):
             "phone": customer.masked_phone,
             "has_phone": bool(customer.phone),
             "instagram_username": customer.instagram_username,
+            "previous_orders_count": customer.leads.count(),
+            "is_returning": bool(valid_customer_name(customer.name) and customer.phone),
         },
         "conversation": {
             "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
