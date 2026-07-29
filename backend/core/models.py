@@ -444,6 +444,9 @@ class Lead(TimeStampedModel):
     estimated_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     desired_date = models.DateField(null=True, blank=True)
+    desired_time = models.CharField(max_length=20, blank=True)
+    fulfillment = models.CharField(max_length=20, choices=[("delivery", "Yetkazib berish"), ("pickup", "Kelib olish")], blank=True)
+    delivery_address = models.CharField(max_length=255, blank=True)
     delivery_at = models.DateTimeField(null=True, blank=True)
     recall_at = models.DateTimeField(null=True, blank=True)
     recall_sent_at = models.DateTimeField(null=True, blank=True)
@@ -518,6 +521,15 @@ class BusinessSettings(TimeStampedModel):
     handoff_rules_uz = models.TextField(blank=True, default="Telefon raqam olingandan keyin lead yarating va operatorga o‘tkazing.")
     handoff_rules_ru = models.TextField(blank=True, default="После получения телефона создайте лид и передайте оператору.")
     working_hours = models.JSONField(default=dict, blank=True)
+    shop_address_uz = models.CharField(max_length=255, blank=True, default="Toshkent shahar, Yakkasaroy tumani, Bobur ko‘chasi 10")
+    shop_address_ru = models.CharField(max_length=255, blank=True, default="г. Ташкент, Яккасарайский район, улица Бобур 10")
+    shop_orientir_uz = models.CharField(max_length=255, blank=True, default="Next Mall dan o‘tgandan keyin o‘ng qo‘lda")
+    shop_orientir_ru = models.CharField(max_length=255, blank=True, default="После Next Mall, справа")
+    shop_location_link = models.CharField(max_length=255, blank=True, default="https://yandex.uz/maps/-/CTfQ6TMD")
+    shop_phone = models.CharField(max_length=64, blank=True, default="+998 88 009 33 30")
+    delivery_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("50000"))
+    delivery_area_uz = models.CharField(max_length=255, blank=True, default="Toshkent shahri ichida")
+    delivery_area_ru = models.CharField(max_length=255, blank=True, default="в пределах города Ташкента")
 
 
 class AISettings(TimeStampedModel):

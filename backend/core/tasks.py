@@ -3,46 +3,10 @@ from math import ceil
 import threading
 import time
 from .platform_services import instagram_send, instagram_sender_action, send_due_lead_recalls, send_lead_recall, telegram_send, telegram_sender_action
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, SHOP_LOCATION_LINK, ai_reply_wait_seconds_remaining, process_pending_customer_reply, process_stalled_conversation_follow_up, should_start_ai_reply
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_reply_wait_seconds_remaining, process_pending_customer_reply, process_stalled_conversation_follow_up, should_start_ai_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import send_backup_to_telegram
 
-
-LOCATION_LINKS = ["https://yandex.uz/maps/-/CTVJzD4O", "https://yandex.uz/maps/-/CTVJfPoq"]
-
-
-def split_location_reply(text):
-    if SHOP_LOCATION_LINK in text:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        address_index = None
-        for index, line in enumerate(lines):
-            lowered = line.lower()
-            if SHOP_LOCATION_LINK in line or "bobur" in lowered or "lokatsiya" in lowered or "manzil" in lowered:
-                address_index = index
-                break
-        if address_index and address_index > 0:
-            return ["\n".join(lines[:address_index]), "\n".join(lines[address_index:])]
-        return [text]
-    if not all(link in text for link in LOCATION_LINKS):
-        return [text]
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    first = []
-    second = []
-    current = first
-    trailing = []
-    for line in lines:
-        if line.lower().startswith("manzillar"):
-            continue
-        if line.startswith("2."):
-            current = second
-        if line.startswith("Qaysi "):
-            trailing.append(line)
-            continue
-        current.append(line)
-    messages = ["\n".join(part) for part in [first, second] if part]
-    if trailing and messages:
-        messages[-1] = messages[-1] + "\n\n" + "\n".join(trailing)
-    return messages if len(messages) > 1 else [text]
 
 
 def keep_typing(send_action, stop_event, error_label, interval=4):
@@ -79,8 +43,7 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        for text in split_location_reply(reply.text):
-            instagram_send(recipient_id, text)
+        instagram_send(recipient_id, reply.text)
         process_conversation_follow_up.apply_async(args=[conversation_id, reply.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
         return reply.id
     finally:
@@ -117,8 +80,7 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        for text in split_location_reply(reply.text):
-            telegram_send(chat_id, text)
+        telegram_send(chat_id, reply.text)
         process_conversation_follow_up.apply_async(args=[conversation_id, reply.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
         return reply.id
     finally:

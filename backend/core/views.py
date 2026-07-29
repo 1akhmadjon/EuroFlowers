@@ -1818,11 +1818,11 @@ def business_settings(request):
 @api_view(["GET", "PATCH"])
 @permission_classes([AllowAny])
 def instagram_status(request):
+    if not request.user or not request.user.is_authenticated:
+        return Response({"detail": "Authentication credentials were not provided."}, status=status.HTTP_401_UNAUTHORIZED)
     obj, _ = InstagramSettings.objects.get_or_create(pk=1)
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     context = {"instagram_access_token": integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN, "instagram_account_id": integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID}
-    if request.method == "PATCH" and (not request.user or not request.user.is_authenticated):
-        return Response({"detail": "Authentication credentials were not provided."}, status=status.HTTP_401_UNAUTHORIZED)
     if request.method == "PATCH" and not has_page_permission(request.user, "settings", True):
         return forbidden()
     if request.method == "PATCH":

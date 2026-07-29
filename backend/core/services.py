@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
@@ -11,13 +11,18 @@ from .models import AISettings, BusinessSettings, CatalogItem, Conversation, Flo
 from .platform_services import instagram_send_image, openai_api_key, telegram_send_image
 
 
-SHOP_ADDRESS = "Bobur ko‘chasi 10"
-SHOP_LOCATION_LINK = "https://yandex.uz/maps/-/CTfQ6TMD"
-SHOP_ORIENTIR = "Next Mall dan o'tgandan keyin o‘ng qo‘lda do‘konimiz"
-SHOP_WORKING_HOURS = "24/7"
-SHOP_PHONE = "+998 88 009 33 30"
 AI_REPLY_WAIT_SECONDS = 7
 AI_FOLLOW_UP_DELAY_SECONDS = 30 * 60
+
+
+def parse_lead_date(value):
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def normalize_phone(value):
@@ -34,85 +39,6 @@ def normalize_phone(value):
 def valid_customer_name(value):
     text = (value or "").strip()
     return bool(text) and compact_match_text(text) not in {"", "unknown", "nomalum", "noma lum"}
-
-
-def detect_customer_reply_script(text):
-    value = text or ""
-    compact = compact_match_text(value)
-    has_cyrillic = bool(re.search(r"[а-яёқўғҳ]", value.lower()))
-    if not has_cyrillic:
-        return "uz_latin"
-    uz_markers = {
-        "канча", "канчадан", "нечпул", "канака", "канакаси", "силада", "сизларда", "борми",
-        "бовотти", "кере", "керак", "керакми", "килиб", "бер", "беринг", "пушти", "кизил",
-        "қизил", "кок", "кўк", "ок", "оқ", "манга", "менга", "шуни", "бита", "битта",
-        "дона", "сават", "гулла", "гуллар", "бизда", "нарх", "нархи", "сум", "сўм",
-    }
-    if any(marker in compact for marker in uz_markers):
-        return "uz_cyril"
-    ru_markers = {
-        "сколько", "стоит", "продается", "продаете", "есть", "какие", "почему", "дорого",
-        "дешево", "доставка", "нужно", "цвет", "штук", "можно", "заказать",
-    }
-    if any(marker in compact for marker in ru_markers):
-        return "ru"
-    return "uz_cyril"
-
-
-def language_control_message(reply_script):
-    if reply_script == "uz_cyril":
-        return (
-            "LANGUAGE_CONTROL:\n"
-            "The latest customer message is Uzbek written in Cyrillic script.\n"
-            "Reply fully in Uzbek Cyrillic script only.\n"
-            "Do not reply in Russian.\n"
-            "Use detected_language = uz."
-        )
-    if reply_script == "ru":
-        return (
-            "LANGUAGE_CONTROL:\n"
-            "The latest customer message is Russian.\n"
-            "Reply fully in Russian only.\n"
-            "Use detected_language = ru."
-        )
-    return (
-        "LANGUAGE_CONTROL:\n"
-        "The latest customer message is Uzbek Latin.\n"
-        "Reply fully in Uzbek Latin only.\n"
-        "Use detected_language = uz."
-    )
-
-
-def customer_message_is_greeting(text):
-    compact = compact_match_text(text)
-    greeting_markers = {
-        "salom", "assalomu", "assalomalaykum", "assalomualaykum", "assalomu alaykum",
-        "ассалому", "ассаломуалайкум", "ассалому алайкум", "салом", "здравствуйте", "привет",
-    }
-    return any(marker in compact for marker in greeting_markers)
-
-
-def greeting_control_message(reply_script):
-    if reply_script == "uz_cyril":
-        return (
-            "GREETING_CONTROL:\n"
-            "This is the first AI reply in the session and the customer greeted in Uzbek Cyrillic before asking a question.\n"
-            "Start the reply with an Uzbek Cyrillic greeting, then answer the customer's business question in the same message.\n"
-            "Do not send greeting alone."
-        )
-    if reply_script == "ru":
-        return (
-            "GREETING_CONTROL:\n"
-            "This is the first AI reply in the session and the customer greeted before asking a question.\n"
-            "Start the reply with a Russian greeting, then answer the customer's business question in the same message.\n"
-            "Do not send greeting alone."
-        )
-    return (
-        "GREETING_CONTROL:\n"
-        "This is the first AI reply in the session and the customer greeted before asking a question.\n"
-        "Start the reply with an Uzbek Latin greeting, then answer the customer's business question in the same message.\n"
-        "Do not send greeting alone."
-    )
 
 
 def catalog_composition_summary(item):
@@ -405,8 +331,6 @@ def ai_catalog_rows(query="", limit=24, arrangement_type=""):
 
 def ai_stock_rows(query="", limit=24):
     query = (query or "").strip()
-    if generic_stock_query(query):
-        query = ""
     stock_batches = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("received_at", "id")
     queryset = (
         FlowerVariant.objects
@@ -655,7 +579,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "client_lead_create",
-            "description": "Mijoz aniq buyurtma qilmoqchi bo'lsa va ism-telefon olingan bo'lsa lead yaratish.",
+            "description": "Mijoz aniq buyurtma qilmoqchi bo'lsa va ism-telefon olingan bo'lsa lead yaratish. request_text faqat o'zbekcha, mijoz so'ragan narsani aniq yoz.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -664,11 +588,16 @@ def ai_tool_definitions():
                     "request_text": {"type": "string"},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
                     "estimated_price": {"type": ["number", "null"]},
+                    "florist_fee": {"type": ["number", "null"]},
+                    "fulfillment": {"type": ["string", "null"], "enum": ["delivery", "pickup", None]},
+                    "delivery_address": {"type": ["string", "null"]},
+                    "desired_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                    "desired_time": {"type": ["string", "null"], "description": "HH:MM"},
                     "catalog_items": {"type": "array", "items": lead_catalog_item_schema},
                     "stock_items": {"type": "array", "items": lead_stock_item_schema},
                     "note": {"type": ["string", "null"]},
                 },
-                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "catalog_items", "stock_items", "note"],
+                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "stock_items", "note"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -676,7 +605,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "client_lead_edit",
-            "description": "Shu mijozning mavjud leadini tahrirlash.",
+            "description": "Shu mijozning mavjud leadini tahrirlash. Mijoz yetkazib berish yoki kelib olishni tanlasa, manzil, sana yoki vaqt aytsa darhol shu tool bilan leadni yangila.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -687,11 +616,16 @@ def ai_tool_definitions():
                     "status": {"type": ["string", "null"]},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
                     "estimated_price": {"type": ["number", "null"]},
+                    "florist_fee": {"type": ["number", "null"]},
+                    "fulfillment": {"type": ["string", "null"], "enum": ["delivery", "pickup", None]},
+                    "delivery_address": {"type": ["string", "null"]},
+                    "desired_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                    "desired_time": {"type": ["string", "null"], "description": "HH:MM"},
                     "catalog_items": {"type": ["array", "null"], "items": lead_catalog_item_schema},
                     "stock_items": {"type": ["array", "null"], "items": lead_stock_item_schema},
                     "note": {"type": ["string", "null"]},
                 },
-                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "catalog_items", "stock_items", "note"],
+                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "stock_items", "note"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -807,17 +741,32 @@ def ai_tool_definitions():
     ]
 
 
+def send_image_to_customer(customer, image_url):
+    """Rasmni mijoz platformasiga yuboradi. (delivered, detail) qaytaradi, hech qachon exception ko'tarmaydi."""
+    try:
+        if customer.instagram_user_id.startswith("telegram:"):
+            result = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
+        elif customer.instagram_user_id:
+            result = instagram_send_image(customer.instagram_user_id, image_url)
+        else:
+            return False, "no_platform_id", None
+    except Exception as error:
+        print(f"IMAGE_SEND_FAILED customer={customer.id} url={image_url} error={error}", flush=True)
+        return False, "send_failed", None
+    if isinstance(result, dict) and result.get("mocked"):
+        return True, "mocked", result
+    return True, "sent", result
+
+
 def send_catalog_item_image(conversation, item):
     customer = conversation.customer
     image_url = item.image_url or (item.social_post.image_url if item.social_post_id else "")
     if not image_url:
         return {"ok": False, "detail": "image_not_found", "catalog_id": item.id, "catalog_name": item.name_uz}
-    sent = None
-    if customer.instagram_user_id.startswith("telegram:"):
-        sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
-    elif customer.instagram_user_id:
-        sent = instagram_send_image(customer.instagram_user_id, image_url)
-    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "sent": sent}})
+    delivered, detail, sent = send_image_to_customer(customer, image_url)
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
+    if not delivered:
+        return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item.name_uz}
     return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url}
 
 
@@ -852,12 +801,10 @@ def send_stock_batch_image(conversation, batch):
     image_url = stock_image_url(batch)
     if not image_url:
         return {"ok": False, "detail": "image_not_found", "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}
-    sent = None
-    if customer.instagram_user_id.startswith("telegram:"):
-        sent = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
-    elif customer.instagram_user_id:
-        sent = instagram_send_image(customer.instagram_user_id, image_url)
-    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"stock_batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz"), "image_url": image_url, "sent": sent}})
+    delivered, detail, sent = send_image_to_customer(customer, image_url)
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"stock_batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz"), "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
+    if not delivered:
+        return {"ok": False, "image_sent": False, "detail": detail, "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}
     return {"ok": True, "image_sent": True, "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz"), "image_url": image_url}
 
 
@@ -923,6 +870,11 @@ def execute_ai_tool(name, arguments, conversation):
     request_text = (arguments.get("request_text") or "").strip()
     estimated_price = arguments.get("estimated_price")
     arrangement_type = arguments.get("arrangement_type") or ""
+    florist_fee = arguments.get("florist_fee")
+    fulfillment = arguments.get("fulfillment") or ""
+    delivery_address = (arguments.get("delivery_address") or "").strip()
+    desired_date = parse_lead_date(arguments.get("desired_date"))
+    desired_time = (arguments.get("desired_time") or "").strip()
     details = {
         "catalog_items": arguments.get("catalog_items") or [],
         "stock_items": arguments.get("stock_items") or [],
@@ -934,10 +886,6 @@ def execute_ai_tool(name, arguments, conversation):
         if not lead:
             return {"ok": False, "detail": "lead_not_found"}
         fields = []
-        if not request_text:
-            latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-            if latest_customer_message and pickup_requested(latest_customer_message.text):
-                request_text = append_lead_request_text(lead.request_uz, "Mijoz kelib olib ketadi.")
         if request_text:
             lead.request_uz = request_text
             fields.append("request_uz")
@@ -950,6 +898,21 @@ def execute_ai_tool(name, arguments, conversation):
         if estimated_price is not None:
             lead.estimated_price = Decimal(str(estimated_price))
             fields.append("estimated_price")
+        if florist_fee is not None:
+            lead.florist_fee = Decimal(str(florist_fee))
+            fields.append("florist_fee")
+        if fulfillment in {"delivery", "pickup"}:
+            lead.fulfillment = fulfillment
+            fields.append("fulfillment")
+        if delivery_address:
+            lead.delivery_address = delivery_address[:255]
+            fields.append("delivery_address")
+        if desired_date:
+            lead.desired_date = desired_date
+            fields.append("desired_date")
+        if desired_time:
+            lead.desired_time = desired_time[:20]
+            fields.append("desired_time")
         if arguments.get("catalog_items") is not None or arguments.get("stock_items") is not None or arguments.get("note"):
             lead.details = details
             fields.append("details")
@@ -983,6 +946,11 @@ def execute_ai_tool(name, arguments, conversation):
         request_uz=request_text,
         arrangement_type=arrangement_type,
         estimated_price=Decimal(str(estimated_price)) if estimated_price is not None else None,
+        florist_fee=Decimal(str(florist_fee)) if florist_fee is not None else Decimal("0"),
+        fulfillment=fulfillment if fulfillment in {"delivery", "pickup"} else "",
+        delivery_address=delivery_address[:255],
+        desired_date=desired_date,
+        desired_time=desired_time[:20],
         details=details,
         source="telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
     )
@@ -1055,50 +1023,47 @@ def ai_reply(conversation):
     latest_ai_index = max((index for index, message in enumerate(history_messages) if message.sender == "ai"), default=-1)
     pending_customer_messages = [message.text for message in history_messages[latest_ai_index + 1:] if message.sender == "customer"]
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
-    reply_script = detect_customer_reply_script(last_customer_message)
-    must_greet = not has_ai_reply_in_session and any(customer_message_is_greeting(text) for text in pending_customer_messages)
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)
+    open_lead = conversation.leads.order_by("-created_at", "-id").first()
+    working_hours = business_settings.working_hours or {}
     context = {
+        "today": timezone.localdate().isoformat(),
+        "now": timezone.localtime().strftime("%Y-%m-%d %H:%M"),
         "customer": {
             "name": customer.name if valid_customer_name(customer.name) else "",
             "phone": customer.masked_phone,
             "has_phone": bool(customer.phone),
-            "language": customer.language,
             "instagram_username": customer.instagram_username,
         },
         "conversation": {
-            "id": conversation.id,
             "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
             "fresh_session": fresh_session,
             "has_ai_reply_in_session": has_ai_reply_in_session,
-            "ai_replies_count": ai_replies_count,
-            "last_customer_message": last_customer_message,
             "pending_customer_messages": pending_customer_messages,
-            "latest_reply_script": reply_script,
-            "language_control": language_control_message(reply_script),
-            "conversation_start_requires_greeting": must_greet,
             "social_post": ai_post_context(conversation),
+            "open_lead_id": open_lead.id if open_lead else None,
         },
         "business": {
             "florist_fee": str(business_settings.default_florist_fee),
-            "working_hours": SHOP_WORKING_HOURS,
-            "shop_address": SHOP_ADDRESS,
-            "shop_location_link": SHOP_LOCATION_LINK,
-            "shop_orientir": SHOP_ORIENTIR,
-            "shop_phone": SHOP_PHONE,
+            "delivery_fee": str(business_settings.delivery_fee),
+            "delivery_area_uz": business_settings.delivery_area_uz,
+            "delivery_area_ru": business_settings.delivery_area_ru,
+            "working_hours_uz": working_hours.get("uz", ""),
+            "working_hours_ru": working_hours.get("ru", ""),
+            "shop_address_uz": business_settings.shop_address_uz,
+            "shop_address_ru": business_settings.shop_address_ru,
+            "shop_orientir_uz": business_settings.shop_orientir_uz,
+            "shop_orientir_ru": business_settings.shop_orientir_ru,
+            "shop_location_link": business_settings.shop_location_link,
+            "shop_phone": business_settings.shop_phone,
         },
     }
     api_key = openai_api_key()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     client = OpenAI(api_key=api_key)
-    model_input = [
-        {"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)},
-        {"role": "user", "content": language_control_message(reply_script)},
-    ]
-    if must_greet:
-        model_input.append({"role": "user", "content": greeting_control_message(reply_script)})
+    model_input = [{"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)}]
     model_input += history
     response_kwargs = {
         "model": ai_settings.openai_model or settings.OPENAI_MODEL,
@@ -1154,10 +1119,6 @@ def ai_reply(conversation):
     result.setdefault("stock_items", [])
     if tool_results:
         result["tool_results"] = tool_results
-    if reply_script in ["uz_cyril", "uz_latin"]:
-        result["detected_language"] = "uz"
-    elif reply_script == "ru":
-        result["detected_language"] = "ru"
     created_leads = [row["output"].get("lead_id") for row in tool_results if row.get("name") == "client_lead_create" and row.get("output", {}).get("ok")]
     if created_leads:
         result["lead_created_id"] = created_leads[-1]
@@ -1169,7 +1130,6 @@ def ai_follow_up_decision(conversation, expected_ai_message):
     customer = conversation.customer
     history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
     latest_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
-    reply_script = detect_customer_reply_script(latest_customer_message)
     history = []
     for message in history_messages:
         content = message.text
@@ -1181,14 +1141,11 @@ def ai_follow_up_decision(conversation, expected_ai_message):
             "name": customer.name if valid_customer_name(customer.name) else "",
             "phone": customer.masked_phone,
             "has_phone": bool(customer.phone),
-            "language": customer.language,
         },
         "conversation": {
             "id": conversation.id,
             "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
             "latest_customer_message": latest_customer_message,
-            "latest_reply_script": reply_script,
-            "language_control": language_control_message(reply_script),
             "expected_ai_message_id": expected_ai_message.id,
             "expected_ai_message": expected_ai_message.text,
             "expected_ai_metadata": expected_ai_message.metadata or {},
@@ -1216,7 +1173,6 @@ def ai_follow_up_decision(conversation, expected_ai_message):
         instructions=instructions,
         input=[
             {"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False, default=str)},
-            {"role": "user", "content": language_control_message(reply_script)},
             *history,
         ],
         max_output_tokens=700,
@@ -1257,59 +1213,8 @@ def ai_reply_wait_seconds_remaining(conversation_id, expected_message_id):
     return max(0, AI_REPLY_WAIT_SECONDS - elapsed)
 
 
-def recent_catalog_item_for_conversation(conversation):
-    for message in conversation.messages.exclude(metadata={}).order_by("-created_at")[:20]:
-        for row in (message.metadata or {}).get("catalog_items") or []:
-            catalog_id = row.get("catalog_id")
-            quantity = int(row.get("quantity") or 0)
-            if catalog_id and quantity > 0:
-                item = available_catalog_queryset().filter(id=catalog_id).first()
-                if item:
-                    return item
-        media_key = (message.metadata or {}).get("media_image_key") or ""
-        match = re.search(r":catalog:(\d+):", media_key)
-        if match:
-            item = available_catalog_queryset().filter(id=match.group(1)).first()
-            if item:
-                return item
-    return None
-
-
 def compact_match_text(value):
     return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower()).strip()
-
-
-def generic_stock_query(query):
-    normalized = compact_match_text(query)
-    if not normalized:
-        return True
-    generic_terms = {
-        "bor",
-        "borlar",
-        "current",
-        "есть",
-        "gulla",
-        "gullar",
-        "gul",
-        "имеющиеся",
-        "mavjud",
-        "qanaqa",
-        "qanday",
-        "склад",
-        "складе",
-        "sklad",
-        "skladda",
-        "skladimizda",
-        "текущие",
-        "цвет",
-        "цветы",
-        "yasash",
-        "yasatish",
-        "yegdirish",
-        "yigdirish",
-        "yigish",
-    }
-    return set(normalized.split()).issubset(generic_terms)
 
 
 def _catalog_text_aliases(text):
@@ -1356,451 +1261,12 @@ def _catalog_item_for_ai(*values):
     return None
 
 
-def pickup_requested(text):
-    compact = compact_match_text(text)
-    phrases = [
-        "borib olaman",
-        "kelib olaman",
-        "olib ketaman",
-        "ozim olib ketaman",
-        "o zim olib ketaman",
-    ]
-    return any(phrase in compact for phrase in phrases)
-
-
-def delivery_requested(text):
-    compact = compact_match_text(text)
-    phrases = [
-        "dostafka",
-        "dastafka",
-        "yetkazib",
-        "етказиб",
-        "доставка",
-        "olib keling",
-        "олиб келинг",
-    ]
-    return any(phrase in compact for phrase in phrases)
-
-
-def location_requested(text):
-    compact = compact_match_text(text)
-    phrases = [
-        "адрес",
-        "lokatsiya",
-        "location",
-        "manzil",
-        "qayerda",
-        "qayoda",
-        "tashang",
-    ]
-    return any(phrase in compact for phrase in phrases)
-
-
-def shop_location_reply(include_final_thanks=False):
-    parts = [
-        f"Manzilimiz {SHOP_ADDRESS}",
-        SHOP_ORIENTIR,
-        "",
-        SHOP_LOCATION_LINK,
-        f"Telefon {SHOP_PHONE}",
-        f"Ish vaqti {SHOP_WORKING_HOURS}",
-    ]
-    if include_final_thanks:
-        parts.extend(["", "Rahmat, tez orada operatorlarimiz buyurtmangizni tasdiqlash uchun aloqaga chiqishadi."])
-    return "\n".join(parts)
-
-
-def append_lead_request_text(current, addition):
-    current = (current or "").strip()
-    addition = (addition or "").strip()
-    if not addition:
-        return current
-    if addition.lower() in current.lower():
-        return current
-    return f"{current}\n{addition}".strip() if current else addition
-
-
 def money_uz(value):
     try:
         amount = int(Decimal(str(value)))
     except Exception:
         return str(value or "")
     return f"{amount:,}".replace(",", " ")
-
-
-def catalog_type_label(value):
-    return {"basket": "savat", "bouquet": "buket", "box": "quti"}.get(value or "", "gul")
-
-
-def ai_reply_asks_for_catalog_image(text):
-    compact = compact_match_text(text)
-    phrases = [
-        "rasmni yuboraymi",
-        "rasmini yuboraymi",
-        "rasmni korsataman",
-        "rasmini korsataman",
-        "rasmlarini korsataman",
-        "rasmni ko rsataman",
-        "rasmini ko rsataman",
-        "rasmlarini ko rsataman",
-        "qaysini tanlaysiz",
-    ]
-    return any(phrase in compact for phrase in phrases)
-
-
-def customer_asks_for_image(text):
-    compact = compact_match_text(text)
-    phrases = [
-        "rasm",
-        "rasmi",
-        "rasmini",
-        "rasmlar",
-        "korsat",
-        "ko rsat",
-        "yubor",
-        "qani",
-    ]
-    return any(phrase in compact for phrase in phrases)
-
-
-def ai_reply_has_stock_results(result):
-    for tool_result in result.get("tool_results") or []:
-        if tool_result.get("name") == "get_stock" and tool_result.get("output", {}).get("stock"):
-            return True
-    return False
-
-
-def clean_stock_image_offer(text):
-    replacements = [
-        " yoki rasmni ko‘rmokchimisiz?",
-        " yoki rasmni ko‘rmoqchimisiz?",
-        " yoki rasmini ko‘rmokchimisiz?",
-        " yoki rasmini ko‘rmoqchimisiz?",
-        " yoki rasmni ko'rmokchimisiz?",
-        " yoki rasmni ko'rmoqchimisiz?",
-        " yoki rasmini ko'rmokchimisiz?",
-        " yoki rasmini ko'rmoqchimisiz?",
-        " yoki rasmni ko rmokchimisiz?",
-        " yoki rasmni ko rmoqchimisiz?",
-        " yoki rasmini ko rmokchimisiz?",
-        " yoki rasmini ko rmoqchimisiz?",
-    ]
-    cleaned = text or ""
-    for phrase in replacements:
-        cleaned = cleaned.replace(phrase, "?")
-    return cleaned
-
-
-def clean_common_ai_typos(text):
-    replacements = {
-        "kechqurambil": "kechqurunmi",
-        "kechqurunbil": "kechqurunmi",
-        "кечқурунбил": "кечқурунми",
-    }
-    cleaned = text or ""
-    for source, target in replacements.items():
-        cleaned = cleaned.replace(source, target)
-    return cleaned
-
-
-def stock_rows_from_ai_result(result):
-    rows = []
-    for tool_result in result.get("tool_results") or []:
-        if tool_result.get("name") != "get_stock":
-            continue
-        rows.extend(tool_result.get("output", {}).get("stock") or [])
-    unique = []
-    seen = set()
-    for row in rows:
-        batch_id = row.get("batch_id")
-        if not batch_id or batch_id in seen:
-            continue
-        seen.add(batch_id)
-        unique.append(row)
-    return unique
-
-
-def reply_has_stock_false_negative(text):
-    compact = compact_match_text(text)
-    phrases = [
-        "vitrinada tayyor gullar ro yxati bo sh",
-        "vitrinada yo q",
-        "yo q ekan",
-        "yok ekan",
-        "bo sh ekan",
-        "готовых цветов нет",
-        "в витрине нет",
-        "нет доступных цветов",
-        "рўйхати бўш",
-        "йўқ экан",
-        "бўш экан",
-    ]
-    return any(phrase in compact for phrase in phrases)
-
-
-def latest_message_asks_stock_list(text):
-    compact = compact_match_text(text)
-    if not compact:
-        return False
-    stock_words = ["gullar", "gulla", "gul", "цветы", "цвет", "гулла", "гул"]
-    availability_words = ["bor", "bormi", "есть", "бор", "борми", "qanaqa", "qanday", "какие", "канака", "қанақа"]
-    return any(word in compact for word in stock_words) and any(word in compact for word in availability_words)
-
-
-def latest_message_asks_stock_availability(text):
-    compact = compact_match_text(text)
-    phrases = ["bormi", "bor mi", "борми", "бор ми", "есть", "продаете", "sotasiz", "sotasilami"]
-    return any(phrase in compact for phrase in phrases)
-
-
-def stock_query_subject(text):
-    compact = compact_match_text(text)
-    removable = {
-        "bormi",
-        "bor",
-        "mi",
-        "борми",
-        "бор",
-        "ми",
-        "есть",
-        "ли",
-        "продаете",
-        "sotasiz",
-        "sotasilami",
-        "sizlarda",
-        "силада",
-        "у",
-        "вас",
-    }
-    words = [word for word in compact.split() if word not in removable]
-    return " ".join(words).strip()
-
-
-def format_stock_not_found_reply(latest_customer_text):
-    script = detect_customer_reply_script(latest_customer_text)
-    subject = stock_query_subject(latest_customer_text)
-    if script == "ru":
-        name = subject or "этого цветка"
-        return f"Сейчас в складе {name} нет."
-    if script == "uz_cyril":
-        name = uz_latin_to_cyril(subject) if re.search(r"[a-z]", subject) else subject
-        return f"Ҳозир складимизда {name or 'бу гул'} қолмаган экан."
-    return f"Hozir skladimizda {subject or 'bu gul'} qolmagan ekan."
-
-
-def format_stock_rows_reply(rows, latest_customer_text):
-    script = detect_customer_reply_script(latest_customer_text)
-    if script == "ru":
-        lines = ["Сейчас в складе есть такие цветы", ""]
-        for index, row in enumerate(rows, start=1):
-            name = row.get("display_name_uz_cyril") or row.get("display_name_uz") or ""
-            lines.append(f"{index} {name} — за штуку {money_uz(row.get('price_per_stem'))} сум")
-        lines.extend(["", "Из какого цветка соберём букет или корзину?"])
-        return "\n".join(lines)
-    if script == "uz_cyril":
-        lines = ["Ҳозир складимизда қуйидаги гуллар бор", ""]
-        for index, row in enumerate(rows, start=1):
-            name = row.get("display_name_uz_cyril") or uz_latin_to_cyril(row.get("display_name_uz") or "")
-            lines.append(f"{index} {name} — дона {money_uz(row.get('price_per_stem'))} сўм")
-        lines.extend(["", "Қайси биридан букет ёки сават ясаймиз?"])
-        return "\n".join(lines)
-    lines = ["Skladimizda hozir quyidagi gullar bor", ""]
-    for index, row in enumerate(rows, start=1):
-        name = row.get("display_name_uz") or ""
-        lines.append(f"{index} {name} — dona {money_uz(row.get('price_per_stem'))} so'm")
-    lines.extend(["", "Qaysi biridan buket yoki savat yasaymiz?"])
-    return "\n".join(lines)
-
-
-def catalog_image_already_sent(conversation, item):
-    if not item:
-        return False
-    for message in conversation.messages.exclude(metadata={}).order_by("-created_at", "-id")[:20]:
-        image_result = (message.metadata or {}).get("image_tool_result") or {}
-        if str(image_result.get("catalog_id") or "") == str(item.id) and image_result.get("sent") is not None:
-            return True
-    return False
-
-
-def catalog_items_from_ai_result(result):
-    items = []
-    seen = set()
-    for row in result.get("catalog_items") or []:
-        item = _catalog_item_for_ai(row.get("catalog_name"))
-        if item and item.id not in seen:
-            seen.add(item.id)
-            items.append(item)
-    return items
-
-
-def stock_image_already_sent(conversation, batch):
-    if not batch:
-        return False
-    for message in conversation.messages.exclude(metadata={}).order_by("-created_at", "-id")[:20]:
-        image_result = (message.metadata or {}).get("image_tool_result") or {}
-        if str(image_result.get("stock_batch_id") or "") == str(batch.id) and image_result.get("sent") is not None:
-            return True
-    return False
-
-
-def stock_batch_from_recent_ai_context(conversation):
-    queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower")
-    for message in conversation.messages.exclude(metadata={}).order_by("-created_at", "-id")[:20]:
-        metadata = message.metadata or {}
-        for row in metadata.get("stock_items") or []:
-            batch = queryset.filter(id=row.get("batch_id")).first()
-            if batch and stock_image_url(batch):
-                return batch
-        for tool_result in metadata.get("tool_results") or []:
-            if tool_result.get("name") != "get_stock":
-                continue
-            for row in tool_result.get("output", {}).get("stock") or []:
-                batch = queryset.filter(id=row.get("batch_id")).first()
-                if batch and stock_image_url(batch):
-                    return batch
-    return None
-
-
-def single_catalog_item_from_ai_result(result, conversation):
-    for tool_result in result.get("tool_results") or []:
-        if tool_result.get("name") != "get_catalog":
-            continue
-        catalog = tool_result.get("output", {}).get("catalog") or []
-        if len(catalog) == 1:
-            item = _catalog_item_for_ai(catalog[0].get("name_uz"))
-            if item:
-                return item, "catalog_filter"
-    catalog_rows = result.get("catalog_items") or []
-    if len(catalog_rows) == 1:
-        item = _catalog_item_for_ai(catalog_rows[0].get("catalog_name"))
-        if item:
-            return item, "selected_item"
-    if conversation.social_post_id:
-        post_items = list(available_catalog_queryset().filter(social_post=conversation.social_post)[:2])
-        if len(post_items) == 1:
-            return post_items[0], "social_post"
-    return None, ""
-
-
-def enforce_catalog_image_flow(result, conversation):
-    selected_items = catalog_items_from_ai_result(result)
-    if len(selected_items) > 1 and ai_reply_asks_for_catalog_image(result.get("reply", "")):
-        outputs = []
-        for item in selected_items:
-            if catalog_image_already_sent(conversation, item):
-                outputs.append({"ok": False, "detail": "image_already_sent", "catalog_id": item.id, "catalog_name": item.name_uz})
-            else:
-                outputs.append(send_catalog_item_image(conversation, item))
-        result.setdefault("tool_results", [])
-        result["tool_results"].append({"name": "send_catalog_images", "arguments": {"queries": [item.name_uz for item in selected_items]}, "output": {"ok": True, "images": outputs}})
-        return result
-    item, source = single_catalog_item_from_ai_result(result, conversation)
-    if not item or not ai_reply_asks_for_catalog_image(result.get("reply", "")):
-        return result
-    tool_result = {"ok": False, "detail": "image_already_sent", "catalog_name": item.name_uz}
-    if not catalog_image_already_sent(conversation, item):
-        tool_result = send_catalog_item_image(conversation, item)
-    result.setdefault("tool_results", [])
-    result["tool_results"].append({"name": "send_catalog_image", "arguments": {"query": item.name_uz}, "output": tool_result})
-    result["catalog_items"] = [{"catalog_name": item.name_uz, "quantity": 1}]
-    result["arrangement_type"] = item.arrangement_type
-    result["estimated_price"] = str(item.price)
-    type_label = "savat" if item.arrangement_type == "basket" else "buket"
-    if source == "catalog_filter":
-        result["reply"] = f"Katalogimizda hozir faqat {item.name_uz} {type_label} bor ekan\nNarxi {money_uz(item.price)} so'm\nSizga qachonga kerak edi?"
-    else:
-        result["reply"] = f"{item.name_uz} {type_label}\nNarxi {money_uz(item.price)} so'm\nSizga qachonga kerak edi?"
-    return result
-
-
-def enforce_stock_image_flow(result, conversation):
-    if ai_reply_has_stock_results(result):
-        result["reply"] = clean_stock_image_offer(result.get("reply", ""))
-    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    if not latest_customer_message or not customer_asks_for_image(latest_customer_message.text):
-        return result
-    already_called = any(tool_result.get("name") in {"send_stock_image", "send_stock_images"} for tool_result in result.get("tool_results") or [])
-    if already_called:
-        return result
-    batch = stock_batch_from_recent_ai_context(conversation)
-    if not batch:
-        return result
-    tool_result = {"ok": False, "detail": "image_already_sent", "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}
-    if not stock_image_already_sent(conversation, batch):
-        tool_result = send_stock_batch_image(conversation, batch)
-    result.setdefault("tool_results", [])
-    result["tool_results"].append({"name": "send_stock_image", "arguments": {"query": flower_variant_display_name(batch.variant, "uz"), "batch_id": batch.id}, "output": tool_result})
-    result["stock_items"] = [{"batch_id": batch.id, "quantity_stems": 0, "quantity_bunches": 0}]
-    result["reply"] = f"{flower_variant_display_name(batch.variant, 'uz')} rasmi\nShu guldan nechta dona qilib buket yoki savat yasaymiz?"
-    return result
-
-
-def enforce_stock_list_reply(result, conversation):
-    rows = stock_rows_from_ai_result(result)
-    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    latest_text = latest_customer_message.text if latest_customer_message else ""
-    if latest_message_asks_stock_list(latest_text):
-        rows = ai_stock_rows("", limit=100)
-    if not rows:
-        if any(tool_result.get("name") == "get_stock" for tool_result in result.get("tool_results") or []) and latest_message_asks_stock_availability(latest_text):
-            result["reply"] = format_stock_not_found_reply(latest_text)
-        return result
-    tool_names = {tool_result.get("name") for tool_result in result.get("tool_results") or []}
-    if tool_names & {"calculate_custom_arrangement_price", "send_stock_image", "send_stock_images", "client_lead_create", "client_lead_edit"}:
-        return result
-    if reply_has_stock_false_negative(result.get("reply", "")) or latest_message_asks_stock_list(latest_text):
-        result["reply"] = format_stock_rows_reply(rows, latest_text)
-        result["stock_items"] = [{"batch_id": row["batch_id"], "quantity_stems": 0, "quantity_bunches": 0} for row in rows]
-    return result
-
-
-def enforce_pickup_and_location_flow(result, conversation):
-    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    if not latest_customer_message:
-        return result
-    latest_text = latest_customer_message.text or ""
-    if location_requested(latest_text) and not pickup_requested(latest_text):
-        result["reply"] = shop_location_reply()
-        return result
-    if not pickup_requested(latest_text):
-        return result
-    latest_lead = conversation.leads.order_by("-created_at", "-id").first()
-    if not latest_lead:
-        return result
-    already_edited = any(tool_result.get("name") == "client_lead_edit" for tool_result in result.get("tool_results") or [])
-    if not already_edited:
-        tool_result = execute_ai_tool("client_lead_edit", {
-            "lead_id": latest_lead.id,
-            "customer_name": None,
-            "phone": None,
-            "request_text": None,
-            "status": None,
-            "arrangement_type": None,
-            "estimated_price": None,
-            "catalog_items": None,
-            "stock_items": None,
-            "note": None,
-        }, conversation)
-        result.setdefault("tool_results", [])
-        result["tool_results"].append({"name": "client_lead_edit", "arguments": {"lead_id": latest_lead.id, "pickup_auto": True}, "output": tool_result})
-    result["reply"] = shop_location_reply(include_final_thanks=True)
-    return result
-
-
-def enforce_lead_created_next_question(result, conversation):
-    if not result.get("lead_created_id"):
-        return result
-    latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
-    latest_text = latest_customer_message.text if latest_customer_message else ""
-    if pickup_requested(latest_text) or delivery_requested(latest_text):
-        return result
-    compact_reply = compact_match_text(result.get("reply", ""))
-    if "manzil" not in compact_reply and "манзил" not in compact_reply and "адрес" not in compact_reply:
-        return result
-    customer_name = result.get("customer_name") or conversation.customer.name or ""
-    name_part = f", {customer_name}" if valid_customer_name(customer_name) else ""
-    result["reply"] = f"Rahmat{name_part}. Yetkazib berish kerakmi yoki kelib olib ketasizmi?"
-    return result
 
 
 def create_ai_reply_for_conversation(conversation):
@@ -1832,20 +1298,7 @@ def create_ai_reply_for_conversation(conversation):
         customer.save(update_fields=list(set(changed)) + ["updated_at"])
     if result.get("lead_created_id"):
         result["lead_ready"] = False
-    if result.get("lead_ready") and not valid_customer_name(customer.name):
-        result["lead_ready"] = False
-        result["reply"] = "Buyurtmani rasmiylashtirish uchun ismingizni yozib yuborasizmi?"
-    elif result.get("lead_ready") and not customer.phone:
-        result["lead_ready"] = False
-        result["phone"] = None
-        result["reply"] = "Telefon raqamingizni to‘liq yuborasizmi?\nMasalan: 90 123 45 67"
-    result = enforce_catalog_image_flow(result, conversation)
-    result = enforce_stock_list_reply(result, conversation)
-    result = enforce_stock_image_flow(result, conversation)
-    result = enforce_lead_created_next_question(result, conversation)
-    result = enforce_pickup_and_location_flow(result, conversation)
-    result["reply"] = clean_common_ai_typos(result.get("reply", ""))
-    reply = Message.objects.create(conversation=conversation, sender="ai", text=result["reply"], metadata=result)
+    reply = Message.objects.create(conversation=conversation, sender="ai", text=result.get("reply", ""), metadata=result)
     if result.get("handoff"):
         Notification.objects.create(notification_type="handoff", title_uz=f"Operator aloqasi kerak: {customer}", title_ru=f"Нужна связь оператора: {customer}", body_uz=result.get("lead_request") or result.get("reply", ""), body_ru=result.get("lead_request") or result.get("reply", ""), reference_type="conversation", reference_id=conversation.id)
     return reply
