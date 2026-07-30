@@ -1043,6 +1043,16 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             item.social_post.save(update_fields=["image_url", "updated_at"])
 
 
+def backdate_record(instance, created_at=None):
+    """auto_now_add tufayli created_at yozilmaydi. Tarixiy ma'lumot kiritish uchun
+    yozuv yaratilgandan keyin to'g'ridan-to'g'ri UPDATE qilamiz."""
+    if not created_at:
+        return instance
+    type(instance).objects.filter(pk=instance.pk).update(created_at=created_at)
+    instance.created_at = created_at
+    return instance
+
+
 def resolve_or_create_customer(customer=None, name="", phone="", external_id=""):
     """Mijozni topadi yoki yaratadi. Tayyor customer berilsa o'shani qaytaradi.
     Telefon bo'yicha mavjud mijoz topilsa yangi yaratmaydi, ismini to'ldiradi."""
@@ -1161,6 +1171,7 @@ class LeadSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
     customer_instagram_user_id = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=100)
+    created_at = serializers.DateTimeField(required=False, help_text="Tarixiy ma'lumot uchun. Berilmasa hozirgi vaqt.")
 
     class Meta:
         model = Lead
@@ -1237,8 +1248,10 @@ class LeadSerializer(serializers.ModelSerializer):
         stock_rows = validated_data.pop("stock_usage_input", None)
         packaging_rows = validated_data.pop("packaging_usage_input", None)
         catalog_rows = validated_data.pop("catalog_usage_input", None)
+        created_at = validated_data.pop("created_at", None)
         customer = self._customer_from_attrs(validated_data)
         lead = Lead.objects.create(customer=customer, **validated_data)
+        backdate_record(lead, created_at)
         self._save_usage(lead, stock_rows, packaging_rows, catalog_rows)
         return lead
 
@@ -1407,6 +1420,7 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     discount_reason = serializers.CharField(required=False, allow_blank=True)
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False)
+    sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
 
 
 class SimulateResponseSerializer(serializers.Serializer):
@@ -1418,6 +1432,7 @@ class MovementRequestSerializer(serializers.Serializer):
     quantity_stems = serializers.IntegerField(min_value=1, required=False)
     quantity_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
     reason = serializers.CharField(required=False, allow_blank=True)
+    created_at = serializers.DateTimeField(required=False, help_text="Tarixiy ma'lumot uchun. Berilmasa hozirgi vaqt.")
 
     def validate(self, attrs):
         if not attrs.get("quantity_stems") and not attrs.get("quantity_bunches"):
@@ -1429,6 +1444,7 @@ class PackagingMovementRequestSerializer(serializers.Serializer):
     movement_type = serializers.ChoiceField(choices=PackagingMovement.TYPE_CHOICES)
     quantity = serializers.IntegerField()
     reason = serializers.CharField(required=False, allow_blank=True)
+    created_at = serializers.DateTimeField(required=False, help_text="Tarixiy ma'lumot uchun. Berilmasa hozirgi vaqt.")
 
     def validate(self, attrs):
         if attrs["movement_type"] == "adjustment":

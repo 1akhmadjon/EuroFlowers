@@ -31,7 +31,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from .inventory_services import catalog_cost_breakdown, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -1138,6 +1138,7 @@ class StockBatchViewSet(ScopedViewSet):
         serializer.is_valid(raise_exception=True)
         try:
             movement = apply_stock_movement(batch, serializer.validated_data["movement_type"], serializer.validated_data.get("quantity_stems"), serializer.validated_data.get("reason", ""), request.user, serializer.validated_data.get("quantity_bunches"))
+            backdate_record(movement, serializer.validated_data.get("created_at"))
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(StockMovementSerializer(movement).data)
@@ -1182,6 +1183,7 @@ class PackagingViewSet(ScopedViewSet):
         serializer.is_valid(raise_exception=True)
         try:
             movement = apply_packaging_movement(packaging, serializer.validated_data["movement_type"], serializer.validated_data["quantity"], serializer.validated_data.get("reason", ""), request.user)
+            backdate_record(movement, serializer.validated_data.get("created_at"))
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(PackagingMovementSerializer(movement).data)
@@ -1337,6 +1339,7 @@ class CatalogItemViewSet(ScopedViewSet):
                 serializer.validated_data.get("sale_price"),
                 serializer.validated_data.get("discount_reason", ""),
                 serializer.validated_data.get("payment_type", ""),
+                serializer.validated_data.get("sold_at"),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2077,22 +2080,42 @@ def dashboard(request):
     period_catalog_sold = apply_updated_range(catalog.filter(quantity_sold__gt=0), period_start, period_end)
     catalog_financials = catalog_sale_financials(period_catalog_sold)
     catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end)
+    today_start = timezone.make_aware(datetime.combine(today, time.min))
+    today_end = timezone.make_aware(datetime.combine(today, time.max))
+    week_start_dt = timezone.make_aware(datetime.combine(week_start, time.min))
+    catalog_today = catalog_sales_totals(catalog_sales_queryset(today_start, today_end))
+    catalog_week = catalog_sales_totals(catalog_sales_queryset(week_start_dt, today_end))
+    catalog_period_rows = list(catalog_sales_queryset(period_start, period_end))
+    catalog_period = catalog_sales_totals(catalog_period_rows)
+    lead_revenue_today = won_leads.filter(updated_at__date=today).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
+    lead_revenue_7d = won_leads.filter(updated_at__date__gte=week_start).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
+    lead_revenue_period = period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
     leads_total = leads.count()
     conversations_total = conversations.count()
     conversion_base = conversations_total or leads_total
     data = {
         "active_leads": leads.exclude(status__in=["won", "lost"]).count(),
         "new_leads_today": leads.filter(created_at__date=today).count(),
-        "orders_today": won_leads.filter(updated_at__date=today).count(),
-        "revenue_today": won_leads.filter(updated_at__date=today).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
-        "revenue_7d": won_leads.filter(updated_at__date__gte=week_start).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
+        "orders_today": won_leads.filter(updated_at__date=today).count() + catalog_today["orders"],
+        "revenue_today": lead_revenue_today + catalog_today["revenue"],
+        "revenue_7d": lead_revenue_7d + catalog_week["revenue"],
+        "lead_revenue_today": lead_revenue_today,
+        "lead_revenue_7d": lead_revenue_7d,
+        "catalog_sales_revenue_today": catalog_today["revenue"],
+        "catalog_sales_revenue_7d": catalog_week["revenue"],
+        "catalog_sales_orders_today": catalog_today["orders"],
+        "catalog_sales_quantity_today": catalog_today["quantity"],
         "period": {"from": period_start, "to": period_end},
-        "period_orders": period_won_leads.count(),
-        "period_revenue": period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
+        "period_orders": period_won_leads.count() + catalog_period["orders"],
+        "period_revenue": lead_revenue_period + catalog_period["revenue"],
+        "period_lead_revenue": lead_revenue_period,
+        "period_catalog_sales_revenue": catalog_period["revenue"],
+        "period_catalog_sales_orders": catalog_period["orders"],
+        "period_catalog_sales_quantity": catalog_period["quantity"],
         "period_leads": period_leads.count(),
         "period_customers": period_customers.count(),
         "period_conversations": period_conversations.count(),
-        "daily_stats": dashboard_daily_stats(period_leads, period_conversations, period_start, period_end),
+        "daily_stats": dashboard_daily_stats(period_leads, period_conversations, period_start, period_end, catalog_period_rows),
         "top_selling_flowers": top_selling_flowers(period_won_leads)[:5],
         "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
         "florist_salary_total": apply_created_range(FloristSalaryEntry.objects.all(), period_start, period_end).aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
@@ -2155,14 +2178,23 @@ def analytics(request):
     period_catalog_sold = apply_updated_range(CatalogItem.objects.filter(quantity_sold__gt=0), period_start, period_end)
     catalog_financials = catalog_sale_financials(period_catalog_sold)
     catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end)
+    catalog_rows = list(catalog_sales_queryset(period_start, period_end))
+    catalog_sales = catalog_sales_totals(catalog_rows)
+    lead_revenue = period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
+    total_orders = period_won_leads.count() + catalog_sales["orders"]
     data = {
         "period": {"from": period_start, "to": period_end},
         "summary": {
             "leads": period_leads.count(),
             "customers": period_customers.count(),
             "conversations": period_conversations.count(),
-            "orders": period_won_leads.count(),
-            "revenue": period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"],
+            "orders": total_orders,
+            "revenue": lead_revenue + catalog_sales["revenue"],
+            "lead_orders": period_won_leads.count(),
+            "lead_revenue": lead_revenue,
+            "catalog_sales_orders": catalog_sales["orders"],
+            "catalog_sales_revenue": catalog_sales["revenue"],
+            "catalog_sales_quantity": catalog_sales["quantity"],
             "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
             "florist_salary_total": apply_created_range(FloristSalaryEntry.objects.all(), period_start, period_end).aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
             "flowers_sold_stems": abs(int(flowers_sold)),
@@ -2175,16 +2207,16 @@ def analytics(request):
             "net_profit": catalog_financials["profit"],
             "conversion_rate": round((period_won_leads.count() / (period_conversations.count() or period_leads.count())) * 100, 2) if (period_conversations.count() or period_leads.count()) else 0,
         },
-        "daily_stats": analytics_daily_stats(period_leads, period_conversations, period_won_leads, period_start, period_end),
+        "daily_stats": analytics_daily_stats(period_leads, period_conversations, period_won_leads, period_start, period_end, catalog_rows),
         "top_selling_flowers": top_selling_flowers(period_won_leads),
-        "top_catalog_items": top_catalog_items(period_won_leads),
-        "recent_top_catalog_items": recent_top_catalog_items(period_won_leads),
+        "top_catalog_items": top_catalog_items(period_won_leads, catalog_rows),
+        "recent_top_catalog_items": recent_top_catalog_items(period_won_leads, catalog_rows),
         "batch_inventory_stats": batch_inventory_stats(period_start, period_end),
         "florist_production_stats": florist_production_stats(period_start, period_end),
         "lead_statuses": list(period_leads.values("status").annotate(count=Count("id")).order_by("status")),
         "arrangement_types": list(period_leads.values("arrangement_type").annotate(count=Count("id")).order_by("arrangement_type")),
         "conversation_sources": conversation_source_breakdown(period_conversations),
-        "revenue_by_source": revenue_by_source(period_won_leads),
+        "revenue_by_source": revenue_by_source(period_won_leads, catalog_rows),
     }
     return Response(data)
 
@@ -2255,7 +2287,7 @@ def dashboard_period(request):
     return start, end
 
 
-def dashboard_daily_stats(leads, conversations, start, end):
+def dashboard_daily_stats(leads, conversations, start, end, catalog_rows=None):
     start_date = timezone.localtime(start).date()
     end_date = timezone.localtime(end).date()
     lead_counts = {
@@ -2266,15 +2298,24 @@ def dashboard_daily_stats(leads, conversations, start, end):
         row["day"]: row["count"]
         for row in conversations.annotate(day=TruncDate("created_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"))
     }
+    catalog_days = catalog_sales_by_day(catalog_rows or [])
     days = []
     current = start_date
     while current <= end_date:
-        days.append({"date": current.isoformat(), "leads": lead_counts.get(current, 0), "conversations": conversation_counts.get(current, 0)})
+        catalog_day = catalog_days.get(current, {})
+        days.append({
+            "date": current.isoformat(),
+            "leads": lead_counts.get(current, 0),
+            "conversations": conversation_counts.get(current, 0),
+            "catalog_revenue": catalog_day.get("revenue", Decimal("0")),
+            "catalog_orders": catalog_day.get("orders", 0),
+            "catalog_quantity": catalog_day.get("quantity", 0),
+        })
         current += timedelta(days=1)
     return days
 
 
-def analytics_daily_stats(leads, conversations, won_leads, start, end):
+def analytics_daily_stats(leads, conversations, won_leads, start, end, catalog_rows=None):
     start_date = timezone.localtime(start).date()
     end_date = timezone.localtime(end).date()
     lead_counts = {
@@ -2288,12 +2329,79 @@ def analytics_daily_stats(leads, conversations, won_leads, start, end):
     order_rows = won_leads.annotate(day=TruncDate("updated_at", tzinfo=timezone.get_current_timezone())).values("day").annotate(count=Count("id"), revenue=Coalesce(Sum("estimated_price"), Decimal("0")))
     order_counts = {row["day"]: row["count"] for row in order_rows}
     revenue_counts = {row["day"]: row["revenue"] for row in order_rows}
+    catalog_days = catalog_sales_by_day(catalog_rows or [])
     days = []
     current = start_date
     while current <= end_date:
-        days.append({"date": current.isoformat(), "leads": lead_counts.get(current, 0), "conversations": conversation_counts.get(current, 0), "orders": order_counts.get(current, 0), "revenue": revenue_counts.get(current, Decimal("0"))})
+        catalog_day = catalog_days.get(current, {})
+        lead_revenue = revenue_counts.get(current, Decimal("0"))
+        catalog_revenue = catalog_day.get("revenue", Decimal("0"))
+        days.append({
+            "date": current.isoformat(),
+            "leads": lead_counts.get(current, 0),
+            "conversations": conversation_counts.get(current, 0),
+            "orders": order_counts.get(current, 0) + catalog_day.get("orders", 0),
+            "revenue": lead_revenue + catalog_revenue,
+            "lead_orders": order_counts.get(current, 0),
+            "lead_revenue": lead_revenue,
+            "catalog_revenue": catalog_revenue,
+            "catalog_orders": catalog_day.get("orders", 0),
+            "catalog_quantity": catalog_day.get("quantity", 0),
+        })
         current += timedelta(days=1)
     return days
+
+
+def catalog_sales_queryset(start=None, end=None):
+    """Katalogdan haqiqiy sotuvlar. /api/accounting/ bilan bir xil manba."""
+    return apply_created_range(CatalogHistory.objects.filter(action="sold").select_related("catalog_item"), start, end)
+
+
+def catalog_sales_totals(rows):
+    revenue = Decimal("0")
+    quantity = 0
+    orders = 0
+    for history in rows:
+        revenue += catalog_history_sale_total(history)
+        quantity += int(history.quantity or 0)
+        orders += 1
+    return {"revenue": revenue, "orders": orders, "quantity": quantity}
+
+
+def catalog_sales_by_day(rows):
+    days = {}
+    for history in rows:
+        day = timezone.localtime(history.created_at).date()
+        row = days.setdefault(day, {"revenue": Decimal("0"), "orders": 0, "quantity": 0})
+        row["revenue"] += catalog_history_sale_total(history)
+        row["orders"] += 1
+        row["quantity"] += int(history.quantity or 0)
+    return days
+
+
+def catalog_sales_top_items(rows, limit=20):
+    items = {}
+    for history in rows:
+        item = history.catalog_item
+        if not item:
+            continue
+        row = items.setdefault(item.id, {
+            "catalog_item_id": item.id,
+            "catalog_item__name_uz": item.name_uz,
+            "catalog_item__arrangement_type": item.arrangement_type,
+            "catalog_item__image_url": item.image_url,
+            "catalog_kind": item.catalog_kind,
+            "quantity": 0,
+            "orders": 0,
+            "revenue": Decimal("0"),
+            "last_sold_at": None,
+        })
+        row["quantity"] += int(history.quantity or 0)
+        row["orders"] += 1
+        row["revenue"] += catalog_history_sale_total(history)
+        if not row["last_sold_at"] or history.created_at > row["last_sold_at"]:
+            row["last_sold_at"] = history.created_at
+    return sorted(items.values(), key=lambda row: (-row["quantity"], row["last_sold_at"] or timezone.now()))[:limit]
 
 
 def top_selling_flowers(won_leads):
@@ -2323,12 +2431,26 @@ def top_selling_flowers(won_leads):
     return sorted([dict(row, bunches=str(row["bunches"])) for row in rows.values()], key=lambda row: row["stems"], reverse=True)[:20]
 
 
-def top_catalog_items(won_leads):
-    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-quantity", "-last_sold_at")[:20])
+def top_catalog_items(won_leads, catalog_rows=None):
+    """Katalogdan sotilgan mahsulotlar reytingi. Lead orqali sotilganlar ham qo'shiladi."""
+    rows = catalog_sales_top_items(catalog_rows if catalog_rows is not None else [])
+    merged = {row["catalog_item_id"]: row for row in rows}
+    for lead_row in LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")):
+        key = lead_row["catalog_item_id"]
+        if key in merged:
+            merged[key]["quantity"] += lead_row["quantity"]
+            merged[key]["orders"] += lead_row["orders"]
+            merged[key]["revenue"] += lead_row["revenue"]
+            if lead_row["last_sold_at"] and (not merged[key]["last_sold_at"] or lead_row["last_sold_at"] > merged[key]["last_sold_at"]):
+                merged[key]["last_sold_at"] = lead_row["last_sold_at"]
+        else:
+            merged[key] = {**lead_row, "catalog_kind": ""}
+    return sorted(merged.values(), key=lambda row: (-row["quantity"], -(row["revenue"] or Decimal("0"))))[:20]
 
 
-def recent_top_catalog_items(won_leads):
-    return list(LeadCatalogUsage.objects.filter(lead__in=won_leads).select_related("catalog_item").values("catalog_item_id", "catalog_item__name_uz", "catalog_item__arrangement_type", "catalog_item__image_url").annotate(quantity=Coalesce(Sum("quantity"), 0), orders=Count("lead", distinct=True), revenue=Coalesce(Sum("lead__estimated_price"), Decimal("0")), last_sold_at=Max("lead__updated_at")).order_by("-last_sold_at", "-quantity")[:20])
+def recent_top_catalog_items(won_leads, catalog_rows=None):
+    rows = top_catalog_items(won_leads, catalog_rows)
+    return sorted(rows, key=lambda row: (row["last_sold_at"] or timezone.now(), row["quantity"]), reverse=True)[:20]
 
 
 def conversation_source_breakdown(conversations):
@@ -2344,9 +2466,23 @@ def conversation_source_breakdown(conversations):
     return [{"source": key, "count": value} for key, value in rows.items()]
 
 
-def revenue_by_source(won_leads):
+def revenue_by_source(won_leads, catalog_rows=None):
     rows = list(won_leads.values("source").annotate(orders=Count("id"), revenue=Coalesce(Sum("estimated_price"), Decimal("0"))).order_by("source"))
-    return [{"source": row["source"] or "unknown", "orders": row["orders"], "revenue": row["revenue"]} for row in rows]
+    result = [{"source": row["source"] or "unknown", "source_label": SOURCE_LABELS.get(row["source"] or "unknown", row["source"] or "unknown"), "orders": row["orders"], "revenue": row["revenue"]} for row in rows]
+    if catalog_rows is not None:
+        totals = catalog_sales_totals(catalog_rows)
+        if totals["orders"]:
+            result.append({"source": "catalog", "source_label": SOURCE_LABELS["catalog"], "orders": totals["orders"], "revenue": totals["revenue"]})
+    return sorted(result, key=lambda row: -row["revenue"])
+
+
+SOURCE_LABELS = {
+    "instagram": "Instagram",
+    "telegram": "Telegram",
+    "mini_app": "Mini app",
+    "catalog": "Katalogdan sotuv",
+    "unknown": "Aniqlanmagan",
+}
 
 
 def catalog_sale_financials(queryset):

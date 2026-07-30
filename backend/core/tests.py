@@ -1284,6 +1284,99 @@ class ApiTests(TestCase):
         batch.refresh_from_db()
         self.assertEqual(batch.supplier_id, supplier.id)
 
+    def _sell_catalog(self, price="6700000", quantity=1, sold_at=None):
+        item = CatalogItem.objects.create(name_uz="Sotuv buketi", arrangement_type="bouquet", price=Decimal(price), quantity_total=quantity, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        payload = {"quantity": quantity}
+        if sold_at:
+            payload["sold_at"] = sold_at
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", payload, format="json")
+        self.assertEqual(response.status_code, 200)
+        return item
+
+    def test_dashboard_revenue_includes_catalog_sales(self):
+        self._sell_catalog()
+        response = self.client.get("/api/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        data = response.data
+        self.assertEqual(Decimal(data["revenue_today"]), Decimal("6700000.00"))
+        self.assertEqual(Decimal(data["catalog_sales_revenue_today"]), Decimal("6700000.00"))
+        self.assertEqual(Decimal(data["lead_revenue_today"]), Decimal("0"))
+        self.assertEqual(data["catalog_sales_orders_today"], 1)
+        self.assertEqual(data["orders_today"], 1)
+
+    def test_dashboard_revenue_matches_accounting_total_sales(self):
+        self._sell_catalog()
+        dashboard = self.client.get("/api/dashboard/").data
+        accounting = self.client.get("/api/accounting/").data
+        self.assertEqual(Decimal(dashboard["catalog_sales_revenue_today"]), Decimal(accounting["summary"]["total_sales"]))
+
+    def test_analytics_summary_and_daily_stats_include_catalog(self):
+        self._sell_catalog()
+        response = self.client.get("/api/analytics/")
+        self.assertEqual(response.status_code, 200)
+        summary = response.data["summary"]
+        self.assertEqual(Decimal(summary["revenue"]), Decimal("6700000.00"))
+        self.assertEqual(Decimal(summary["catalog_sales_revenue"]), Decimal("6700000.00"))
+        self.assertEqual(Decimal(summary["lead_revenue"]), Decimal("0"))
+        self.assertEqual(summary["catalog_sales_orders"], 1)
+        today = timezone.localdate().isoformat()
+        row = next(day for day in response.data["daily_stats"] if day["date"] == today)
+        self.assertEqual(Decimal(row["catalog_revenue"]), Decimal("6700000.00"))
+        self.assertEqual(row["catalog_orders"], 1)
+        self.assertEqual(row["catalog_quantity"], 1)
+        self.assertEqual(Decimal(row["revenue"]), Decimal("6700000.00"))
+
+    def test_dashboard_daily_stats_include_catalog_series(self):
+        self._sell_catalog()
+        response = self.client.get("/api/dashboard/")
+        today = timezone.localdate().isoformat()
+        row = next(day for day in response.data["daily_stats"] if day["date"] == today)
+        self.assertEqual(Decimal(row["catalog_revenue"]), Decimal("6700000.00"))
+        self.assertEqual(row["catalog_orders"], 1)
+
+    def test_top_catalog_items_and_revenue_by_source_use_catalog_sales(self):
+        item = self._sell_catalog()
+        response = self.client.get("/api/analytics/")
+        top = response.data["top_catalog_items"]
+        self.assertTrue(top)
+        self.assertEqual(top[0]["catalog_item_id"], item.id)
+        self.assertEqual(Decimal(top[0]["revenue"]), Decimal("6700000.00"))
+        self.assertTrue(response.data["recent_top_catalog_items"])
+        sources = {row["source"]: row for row in response.data["revenue_by_source"]}
+        self.assertIn("catalog", sources)
+        self.assertEqual(Decimal(sources["catalog"]["revenue"]), Decimal("6700000.00"))
+        self.assertEqual(sources["catalog"]["source_label"], "Katalogdan sotuv")
+
+    def test_catalog_sale_accepts_historical_sold_at(self):
+        item = self._sell_catalog(sold_at="2026-07-10T12:00:00+05:00")
+        item.refresh_from_db()
+        self.assertEqual(item.sold_at.isoformat()[:10], "2026-07-10")
+        history = CatalogHistory.objects.get(catalog_item=item, action="sold")
+        self.assertEqual(timezone.localtime(history.created_at).date().isoformat(), "2026-07-10")
+        response = self.client.get("/api/analytics/?from=2026-07-01&to=2026-07-31")
+        row = next(day for day in response.data["daily_stats"] if day["date"] == "2026-07-10")
+        self.assertEqual(Decimal(row["catalog_revenue"]), Decimal("6700000.00"))
+
+    def test_stock_movement_accepts_historical_created_at(self):
+        response = self.client.post(f"/api/stock-batches/{self.batch.id}/movement/", {"movement_type": "waste", "quantity_stems": 3, "reason": "test", "created_at": "2026-07-05T10:00:00+05:00"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        movement = StockMovement.objects.get(id=response.data["id"])
+        self.assertEqual(timezone.localtime(movement.created_at).date().isoformat(), "2026-07-05")
+
+    def test_lead_accepts_historical_created_at(self):
+        response = self.client.post("/api/leads/", {"customer_name": "Tarixiy", "customer_phone": "901110009", "request_uz": "Test", "created_at": "2026-07-03T09:00:00+05:00"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        lead = Lead.objects.get(id=response.data["id"])
+        self.assertEqual(timezone.localtime(lead.created_at).date().isoformat(), "2026-07-03")
+
+    def test_packaging_movement_accepts_historical_created_at(self):
+        packaging = Packaging.objects.create(packaging_type="wrap", name_uz="Test qog‘oz", cost_price=Decimal("1000"), sale_price=Decimal("2000"), quantity=50)
+        response = self.client.post(f"/api/materials/{packaging.id}/movement/", {"movement_type": "in", "quantity": 10, "created_at": "2026-07-04T08:00:00+05:00"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        movement = PackagingMovement.objects.get(id=response.data["id"])
+        self.assertEqual(timezone.localtime(movement.created_at).date().isoformat(), "2026-07-04")
+
     def test_supplier_payment_crud_and_rollups(self):
         supplier = Supplier.objects.create(name="Gul Import")
         variant = self.batch.variant
@@ -2147,13 +2240,20 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(len(data["daily_stats"]), 30)
-        self.assertEqual(data["summary"]["orders"], 1)
+        # orders endi lead va katalog sotuvini jamlaydi: 1 won lead + 1 katalog sotuvi
+        self.assertEqual(data["summary"]["orders"], 2)
+        self.assertEqual(data["summary"]["lead_orders"], 1)
+        self.assertEqual(data["summary"]["catalog_sales_orders"], 1)
+        self.assertEqual(Decimal(str(data["summary"]["lead_revenue"])), Decimal("600000.00"))
+        self.assertEqual(Decimal(str(data["summary"]["catalog_sales_revenue"])), Decimal("250000.00"))
+        self.assertEqual(Decimal(str(data["summary"]["revenue"])), Decimal("850000.00"))
         self.assertEqual(data["top_selling_flowers"][0]["name_uz"], "Atirgul API")
         self.assertEqual(data["top_selling_flowers"][0]["stems"], 8)
         self.assertEqual(data["top_catalog_items"][0]["catalog_item__name_uz"], "Analytics buket")
-        self.assertEqual(data["top_catalog_items"][0]["quantity"], 2)
+        # katalogdan 1 ta + lead orqali 2 ta
+        self.assertEqual(data["top_catalog_items"][0]["quantity"], 3)
         self.assertEqual(data["recent_top_catalog_items"][0]["catalog_item__name_uz"], "Analytics buket")
-        self.assertEqual(data["recent_top_catalog_items"][0]["orders"], 1)
+        self.assertEqual(data["recent_top_catalog_items"][0]["orders"], 2)
         self.assertEqual(data["summary"]["discounted_catalog_sales_count"], 1)
         self.assertEqual(data["summary"]["discounted_catalog_quantity"], 1)
         self.assertEqual(Decimal(str(data["summary"]["discounted_catalog_amount"])), Decimal("50000.00"))

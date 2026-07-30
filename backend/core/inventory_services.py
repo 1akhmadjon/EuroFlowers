@@ -285,7 +285,7 @@ def restore_catalog_inventory(item, user, quantity=None):
     return item
 
 
-def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type=""):
+def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type="", sold_at=None):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
         quantity = int(quantity or 1)
@@ -302,13 +302,16 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
         item.quantity_sold += quantity
         if item.quantity_sold >= item.quantity_total:
             item.status = "sold"
-            item.sold_at = timezone.now()
+            item.sold_at = sold_at or timezone.now()
         elif item.status == "draft":
             item.status = "available"
         item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
         snapshot = catalog_snapshot(item)
         snapshot["payment_type"] = payment_type or ""
         history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason, snapshot=snapshot)
+        if sold_at:
+            CatalogHistory.objects.filter(pk=history.pk).update(created_at=sold_at)
+            history.created_at = sold_at
         notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
         AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "payment_type": payment_type or "", "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason})
     return item
