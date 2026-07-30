@@ -32,6 +32,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
 from .serializers import backdate_record, AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from . import face_services
 from .inventory_services import catalog_cost_breakdown, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -1099,6 +1100,108 @@ class FloristDayOffViewSet(ScopedViewSet):
     def perform_create(self, serializer):
         instance = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
         write_audit(self.request.user, "floristdayoff_created", instance, before={}, after=instance_snapshot(instance), request=self.request)
+
+
+class FloristFaceSampleViewSet(viewsets.ModelViewSet):
+    """Floristning yuz namunalari. Ro'yxatdan o'tkazish uchun."""
+
+    permission_classes = [RolePermission]
+    permission_page = "attendance"
+    queryset = FloristFaceSample.objects.select_related("florist__user").all()
+    serializer_class = FloristFaceSampleSerializer
+    filterset_fields = ["florist", "is_active"]
+
+    def create(self, request, *args, **kwargs):
+        if not has_page_permission(request.user, "attendance", True):
+            return forbidden()
+        florist_id = request.data.get("florist")
+        profile = FloristProfile.objects.filter(id=florist_id).first()
+        if not profile:
+            return Response({"florist": ["Florist topilmadi"]}, status=status.HTTP_400_BAD_REQUEST)
+        source = request.FILES.get("image") or request.data.get("image_base64")
+        if not source:
+            return Response({"image": ["Rasm yuboring: image fayli yoki image_base64"]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            face = face_services.face_from_source(source)
+        except face_services.FaceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        image_url = ""
+        uploaded = request.FILES.get("image")
+        if uploaded:
+            uploaded.seek(0)
+            _, media_url = face_services.save_face_image(uploaded, profile.id)
+            image_url = f"{settings.PUBLIC_BASE_URL}{media_url}" if settings.PUBLIC_BASE_URL else request.build_absolute_uri(media_url)
+        sample = FloristFaceSample.objects.create(
+            florist=profile, image_url=image_url,
+            descriptor=face_services.encode_face(face),
+            created_by=request.user if request.user.is_authenticated else None,
+        )
+        face_services.invalidate_cache()
+        write_audit(request.user, "floristfacesample_created", sample, before={}, after={"florist": str(profile)}, request=request)
+        return Response(self.get_serializer(sample).data, status=status.HTTP_201_CREATED)
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        face_services.invalidate_cache()
+
+
+class AttendanceDeviceView(APIView):
+    """Do'kondagi qurilma uchun. Yuz rasmidan floristni tanib keldi-ketdi qiladi.
+    Lokatsiya so'ralmaydi."""
+
+    permission_classes = [RolePermission]
+    permission_page = "attendance"
+
+    @extend_schema(
+        request=inline_serializer(name="AttendanceDeviceRequest", fields={
+            "image_base64": serializers.CharField(required=False),
+            "action": serializers.ChoiceField(choices=["auto", "check_in", "check_out"], required=False),
+        }),
+        responses=OpenApiResponse(description="Tanilgan florist va keldi-ketdi holati"),
+    )
+    def post(self, request):
+        if not has_page_permission(request.user, "attendance", True):
+            return forbidden()
+        source = request.FILES.get("image") or request.data.get("image_base64")
+        if not source:
+            return Response({"detail": "Rasm yuboring: image fayli yoki image_base64"}, status=status.HTTP_400_BAD_REQUEST)
+        samples = list(FloristFaceSample.objects.filter(is_active=True))
+        try:
+            florist_id, confidence = face_services.recognize(source, samples)
+        except face_services.FaceError as exc:
+            return Response({"detail": str(exc), "recognized": False}, status=status.HTTP_400_BAD_REQUEST)
+        profile = FloristProfile.objects.select_related("user").filter(id=florist_id, is_active=True).first()
+        if not profile:
+            return Response({"detail": "Florist topilmadi yoki faol emas", "recognized": False}, status=status.HTTP_404_NOT_FOUND)
+        now = timezone.now()
+        work_date = timezone.localtime(now).date()
+        if FloristDayOff.objects.filter(florist=profile, work_date=work_date).exists():
+            return Response({"detail": f"{profile} bugun dam olish kunida", "recognized": True, "florist": {"id": profile.id, "name": str(profile)}}, status=status.HTTP_400_BAD_REQUEST)
+        row, _ = FloristAttendance.objects.get_or_create(florist=profile, work_date=work_date, defaults={"source": "device"})
+        requested = (request.data.get("action") or "auto").lower()
+        if requested == "auto":
+            requested = "check_out" if row.check_in_at else "check_in"
+        if requested == "check_in":
+            if row.check_in_at:
+                return Response({"detail": f"{profile} bugun allaqachon ishga kelgan", "recognized": True, "action": "check_in", "already": True, "florist": {"id": profile.id, "name": str(profile)}, "check_in_at": row.check_in_at}, status=status.HTTP_200_OK)
+            row.check_in_at = now
+        else:
+            if not row.check_in_at:
+                return Response({"detail": f"{profile} bugun hali ishga kelmagan", "recognized": True, "action": "check_out"}, status=status.HTTP_400_BAD_REQUEST)
+            row.check_out_at = now
+        row.source = "device"
+        row.save(update_fields=["check_in_at", "check_out_at", "source", "updated_at"])
+        write_audit(request.user, f"attendance_{requested}", row, before={}, after=instance_snapshot(row), request=request, summary=f"{profile} qurilmadan {requested}")
+        create_user_notification(profile.user, "attendance", "Ish vaqti belgilandi", f"{timezone.localtime(now).strftime('%H:%M')} da {'ishga kelish' if requested == 'check_in' else 'ishdan ketish'} belgilandi.", "attendance", row.id)
+        return Response({
+            "recognized": True,
+            "confidence": confidence,
+            "action": requested,
+            "florist": {"id": profile.id, "name": str(profile), "staff_type": profile.staff_type},
+            "work_date": work_date,
+            "check_in_at": row.check_in_at,
+            "check_out_at": row.check_out_at,
+        })
 
 
 class FloristAttendanceViewSet(ScopedViewSet):

@@ -335,11 +335,19 @@ def recent_customer_orders(customer):
     return orders
 
 
-def ai_catalog_rows(query="", limit=24, arrangement_type=""):
+def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=None):
     query = (query or "").strip()
     queryset = available_catalog_queryset().select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
     if arrangement_type in ["bouquet", "basket", "box"]:
         queryset = queryset.filter(arrangement_type=arrangement_type)
+    if made_from_batch_id:
+        # Skladdagi gul rasmi aslida buket rasmi. Mijoz "shu guldan bormi" desa
+        # o'sha guldan yasalgan tayyor katalog mahsulotlarini qaytaramiz.
+        batch = StockBatch.objects.filter(id=made_from_batch_id).select_related("variant").first()
+        if batch:
+            queryset = queryset.filter(composition__stock_batch__variant=batch.variant).distinct()
+        else:
+            queryset = queryset.none()
     generic_query_terms = {"vitrina", "katalog", "catalog", "tayyor", "mahsulot", "gulla", "buketlar", "savatlar"}
     normalized_query = compact_match_text(query)
     is_generic_query = bool(normalized_query) and any(term in normalized_query for term in generic_query_terms)
@@ -671,14 +679,15 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish.",
+            "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish. Mijoz skladdagi aniq guldan yasalgan tayyor mahsulotni so'rasa, o'sha gulning batch_id sini made_from_batch_id ga yuboring.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "box", None]},
+                    "made_from_batch_id": {"type": ["integer", "null"], "description": "Shu sklad partiyasidan yasalgan katalog mahsulotlari"},
                 },
-                "required": ["query", "arrangement_type"],
+                "required": ["query", "arrangement_type", "made_from_batch_id"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -852,7 +861,7 @@ def execute_ai_tool(name, arguments, conversation):
         limit = max(1, min(int(arguments.get("limit") or 5), 20))
         return {"leads": recent_customer_orders(customer)[:limit]}
     if name == "get_catalog":
-        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "")}
+        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "", made_from_batch_id=arguments.get("made_from_batch_id"))}
     if name == "get_stock":
         return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100)}
     if name == "get_flower_variant_info":

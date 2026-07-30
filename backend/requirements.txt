@@ -16,3 +16,5 @@ gunicorn==23.0.0
 channels==4.2.2
 channels-redis==4.2.1
 uvicorn[standard]==0.35.0
+numpy==2.2.1
+opencv-contrib-python-headless==4.11.0.86
