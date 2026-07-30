@@ -1240,6 +1240,50 @@ class ApiTests(TestCase):
         self.assertIn("Floristga qo‘shilgan", header)
         self.assertIn("Buket yoki savat", header)
 
+    def test_supplier_with_payments_is_archived_not_deleted(self):
+        supplier = Supplier.objects.create(name="To‘lovli postavshik")
+        SupplierPayment.objects.create(supplier=supplier, amount=Decimal("100000"), paid_at="2026-07-29", method="cash")
+        SupplierPayment.objects.create(supplier=supplier, amount=Decimal("50000"), paid_at="2026-07-30", method="card")
+        response = self.client.delete(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["archived"])
+        self.assertFalse(response.data["deleted"])
+        self.assertFalse(response.data["is_active"])
+        self.assertEqual(response.data["id"], supplier.id)
+        self.assertEqual(response.data["blocked_by"], [{"model": "supplierpayment", "label": "To‘lovlar", "count": 2}])
+        self.assertIn("To‘lovlar (2 ta)", response.data["detail"])
+        supplier.refresh_from_db()
+        self.assertFalse(supplier.is_active)
+        self.assertTrue(AuditLog.objects.filter(action="supplier_archived").exists())
+
+    def test_supplier_without_relations_is_deleted_with_204(self):
+        supplier = Supplier.objects.create(name="Bo‘sh postavshik")
+        response = self.client.delete(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Supplier.objects.filter(id=supplier.id).exists())
+        self.assertTrue(AuditLog.objects.filter(action="supplier_deleted").exists())
+
+    def test_supplier_with_only_batches_is_deleted_and_batches_lose_supplier(self):
+        """StockBatch.supplier SET_NULL, shuning uchun faqat partiyasi bor postavshik
+        o'chib ketadi va partiyalar egasiz qoladi. Hozirgi xatti-harakat shunday."""
+        supplier = Supplier.objects.create(name="Partiyali postavshik")
+        batch = StockBatch.objects.create(variant=self.batch.variant, supplier=supplier, batch_number="ARCH-1", height_cm=50, stems_per_bunch=25, received_stems=10, remaining_stems=10, cost_per_stem=1000, sale_price_per_stem=2000, sale_price_per_bunch=50000)
+        response = self.client.delete(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Supplier.objects.filter(id=supplier.id).exists())
+        batch.refresh_from_db()
+        self.assertIsNone(batch.supplier_id)
+
+    def test_supplier_with_payment_and_batches_is_archived_and_keeps_batches(self):
+        supplier = Supplier.objects.create(name="To‘lovli va partiyali")
+        batch = StockBatch.objects.create(variant=self.batch.variant, supplier=supplier, batch_number="ARCH-2", height_cm=50, stems_per_bunch=25, received_stems=10, remaining_stems=10, cost_per_stem=1000, sale_price_per_stem=2000, sale_price_per_bunch=50000)
+        SupplierPayment.objects.create(supplier=supplier, amount=Decimal("100000"), paid_at="2026-07-29", method="cash")
+        response = self.client.delete(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["archived"])
+        batch.refresh_from_db()
+        self.assertEqual(batch.supplier_id, supplier.id)
+
     def test_supplier_payment_crud_and_rollups(self):
         supplier = Supplier.objects.create(name="Gul Import")
         variant = self.batch.variant

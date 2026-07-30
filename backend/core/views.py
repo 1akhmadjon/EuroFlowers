@@ -513,6 +513,37 @@ def write_audit(user, action, instance, before=None, after=None, request=None, s
     )
 
 
+PROTECTED_LABELS = {
+    "supplierpayment": "To‘lovlar",
+    "stockbatch": "Sklad partiyalari",
+    "stockmovement": "Sklad harakatlari",
+    "catalogitem": "Katalog mahsulotlari",
+    "catalogcomposition": "Katalog tarkibi",
+    "catalogmaterialusage": "Katalog materiallari",
+    "leadstockusage": "Lead gullari",
+    "leadpackagingusage": "Lead qadoqlari",
+    "leadcatalogusage": "Lead katalogi",
+    "lead": "Leadlar",
+    "packagingmovement": "Qadoq harakatlari",
+    "floristsalaryentry": "Florist ish haqi",
+    "floristattendance": "Keldi-ketdi",
+    "flowervariant": "Gul navlari",
+    "conversation": "Suhbatlar",
+}
+
+
+def protected_blockers(error):
+    """ProtectedError ichidagi bog'liq yozuvlarni model bo'yicha sanaydi."""
+    counts = {}
+    for obj in getattr(error, "protected_objects", []) or []:
+        key = obj._meta.model_name
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {"model": key, "label": PROTECTED_LABELS.get(key, key), "count": value}
+        for key, value in sorted(counts.items(), key=lambda row: -row[1])
+    ]
+
+
 class ScopedViewSet(viewsets.ModelViewSet):
     permission_classes = [RolePermission]
 
@@ -535,11 +566,12 @@ class ScopedViewSet(viewsets.ModelViewSet):
             write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_updated", instance, before=before_changed, after=after_changed, request=self.request)
 
     def perform_destroy(self, instance):
+        self._archive_blockers = None
         before = instance_snapshot(instance)
         try:
             instance.delete()
             write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_deleted", instance, before=before, after={}, request=self.request)
-        except ProtectedError:
+        except ProtectedError as error:
             field_names = {field.name for field in instance._meta.fields}
             if "is_active" not in field_names:
                 raise
@@ -547,6 +579,29 @@ class ScopedViewSet(viewsets.ModelViewSet):
             instance.save(update_fields=["is_active", "updated_at"])
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(instance))
             write_audit(self.request.user, f"{instance.__class__.__name__.lower()}_archived", instance, before=before_changed, after=after_changed, request=self.request)
+            self._archive_blockers = protected_blockers(error)
+
+    def destroy(self, request, *args, **kwargs):
+        """Bog'liq yozuvlari bor obyekt o'chirilmaydi, arxivga olinadi.
+        O'chirilganda 204, arxivlanganda 200 va tushuntirish qaytadi."""
+        instance = self.get_object()
+        label = str(instance)
+        self.perform_destroy(instance)
+        blockers = getattr(self, "_archive_blockers", None)
+        if blockers is None:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        reason = ", ".join(f"{row['label']} ({row['count']} ta)" for row in blockers)
+        return Response(
+            {
+                "detail": f"{label} bog'liq yozuvlari borligi uchun o'chirilmadi, arxivga olindi. Sabab: {reason}.",
+                "archived": True,
+                "deleted": False,
+                "id": instance.pk,
+                "is_active": False,
+                "blocked_by": blockers,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class UserViewSet(viewsets.ModelViewSet):
