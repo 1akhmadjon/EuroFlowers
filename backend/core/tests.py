@@ -304,7 +304,8 @@ class BusinessRulesTests(TestCase):
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
         florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
-        FloristVolumeRate.objects.create(arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
+        # Tarif aniq floristga biriktiriladi, umumiy tarif endi ishlatilmaydi
+        FloristVolumeRate.objects.create(florist=florist, arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
         packaging = Packaging.objects.create(packaging_type="wrap", name_uz="Test qogoz", cost_price=10000, sale_price=20000, quantity=5)
         serializer = CatalogItemSerializer(data={
             "name_uz": "Custom buket",
@@ -1376,6 +1377,67 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         movement = PackagingMovement.objects.get(id=response.data["id"])
         self.assertEqual(timezone.localtime(movement.created_at).date().isoformat(), "2026-07-04")
+
+    def test_volume_rate_requires_florist(self):
+        response = self.client.post("/api/florist-volume-rates/", {"arrangement_type": "bouquet", "volume": "M", "default_stems": 25, "florist_fee": "60000"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("florist", response.data)
+
+    def test_volume_rate_is_per_florist(self):
+        user_a = User.objects.create_user("fl-a", password="p")
+        user_b = User.objects.create_user("fl-b", password="p")
+        a = FloristProfile.objects.create(user=user_a, staff_type="florist")
+        b = FloristProfile.objects.create(user=user_b, staff_type="florist")
+        for profile, fee, stems in [(a, "60000", 25), (b, "90000", 35)]:
+            response = self.client.post("/api/florist-volume-rates/", {"florist": profile.id, "arrangement_type": "bouquet", "volume": "M", "default_stems": stems, "florist_fee": fee}, format="json")
+            self.assertEqual(response.status_code, 201)
+        item_a = CatalogItem.objects.create(name_uz="A buket", arrangement_type="bouquet", volume="M", florist=a, price=Decimal("500000"), quantity_total=1, status="available")
+        item_b = CatalogItem.objects.create(name_uz="B buket", arrangement_type="bouquet", volume="M", florist=b, price=Decimal("500000"), quantity_total=1, status="available")
+        from .inventory_services import apply_volume_rate
+        self.assertEqual(apply_volume_rate(item_a).florist_salary_amount, Decimal("60000"))
+        self.assertEqual(apply_volume_rate(item_b).florist_salary_amount, Decimal("90000"))
+
+    def test_catalog_detail_returns_unit_profit(self):
+        item = CatalogItem.objects.create(name_uz="Foyda buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=2, status="available", florist_fee=Decimal("20000"))
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        sync_catalog_financials(item)
+        response = self.client.get(f"/api/catalog/{item.id}/")
+        self.assertEqual(response.status_code, 200)
+        profit = response.data["profit"]
+        # 2 dona uchun tannarx: 2*5*10000 + 2*20000 = 140000, bittasiga 70000
+        self.assertEqual(Decimal(profit["unit_cost"]), Decimal("70000.00"))
+        self.assertEqual(Decimal(profit["unit_price"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(profit["unit_profit"]), Decimal("230000.00"))
+        self.assertEqual(Decimal(profit["total_potential_profit"]), Decimal("460000.00"))
+        self.assertEqual(Decimal(profit["realized_profit"]), Decimal("0.00"))
+
+    def test_florist_own_dashboard_hides_sales_and_profit(self):
+        profile = self._florist_with_history()
+        UserProfile.objects.update_or_create(user=profile.user, defaults={"role": "florist"})
+        PagePermission.objects.create(user=profile.user, page="florists", can_view=True, can_control=False)
+        client = APIClient()
+        client.force_authenticate(profile.user)
+        response = client.get("/api/florists/me/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        summary = response.data["summary"]
+        # Florist faqat nechta yasagani va qancha ish haqi olganini ko'radi
+        self.assertIn("salary_total", summary)
+        self.assertIn("catalog_count", summary)
+        self.assertNotIn("sale_revenue", summary)
+        self.assertNotIn("sold_quantity", summary)
+        self.assertNotIn("unsold_quantity", summary)
+        for row in response.data["salary_entries"]:
+            self.assertNotIn("sale_revenue", row)
+            self.assertNotIn("listed_price", row)
+            self.assertNotIn("is_sold", row)
+        for row in response.data["by_volume"]:
+            self.assertNotIn("sale_revenue", row)
+
+    def test_admin_florist_stats_still_shows_sales(self):
+        profile = self._florist_with_history()
+        response = self.client.get(f"/api/florists/{profile.id}/stats/")
+        self.assertIn("sale_revenue", response.data["summary"])
+        self.assertIn("sold_quantity", response.data["summary"])
 
     def test_supplier_payment_crud_and_rollups(self):
         supplier = Supplier.objects.create(name="Gul Import")

@@ -87,11 +87,9 @@ def catalog_cost_total(item):
 def apply_volume_rate(item):
     if not item.volume or not item.arrangement_type or item.florist_salary_amount:
         return item
-    rate = None
-    if item.florist_id:
-        rate = FloristVolumeRate.objects.filter(florist=item.florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
-    if not rate:
-        rate = FloristVolumeRate.objects.filter(florist__isnull=True, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
+    if not item.florist_id:
+        return item
+    rate = FloristVolumeRate.objects.filter(florist=item.florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
     if rate:
         item.florist_salary_amount = rate.florist_fee
     return item

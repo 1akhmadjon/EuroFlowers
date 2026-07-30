@@ -353,6 +353,18 @@ class FloristVolumeRateSerializer(serializers.ModelSerializer):
         model = FloristVolumeRate
         fields = "__all__"
 
+    def validate_florist(self, value):
+        if value is None:
+            raise serializers.ValidationError("Tarif aniq floristga biriktirilishi kerak. Umumiy tarif ishlatilmaydi.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        florist = attrs.get("florist", getattr(self.instance, "florist", None))
+        if florist is None:
+            raise serializers.ValidationError({"florist": "Tarif aniq floristga biriktirilishi kerak. Umumiy tarif ishlatilmaydi."})
+        return attrs
+
     @extend_schema_field(serializers.CharField())
     def get_florist_name(self, obj):
         if not obj.florist_id:
@@ -625,14 +637,13 @@ def apply_volume_rate_to_attrs(attrs, initial_data=None):
     arrangement_type = attrs.get("arrangement_type")
     volume = attrs.get("volume")
     florist = attrs.get("florist")
-    if arrangement_type and volume:
-        rate = None
-        if florist:
-            rate = FloristVolumeRate.objects.filter(florist=florist, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
-        if not rate:
-            rate = FloristVolumeRate.objects.filter(florist__isnull=True, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
+    if arrangement_type and volume and florist:
+        rate = FloristVolumeRate.objects.filter(florist=florist, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
         if rate:
             attrs["florist_salary_amount"] = rate.florist_fee
+            if rate.default_stems:
+                attrs.setdefault("_volume_default_stems", rate.default_stems)
+                attrs.pop("_volume_default_stems", None)
     return attrs
 
 
@@ -863,6 +874,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
     customer_detail = serializers.SerializerMethodField(read_only=True)
+    profit = serializers.SerializerMethodField(read_only=True)
     customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False, write_only=True)
@@ -870,6 +882,29 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         model = CatalogItem
         fields = "__all__"
         read_only_fields = ["created_by", "sold_at", "stock_deducted_at", "calculated_component_price", "discount_amount", "discount_percent"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_profit(self, obj):
+        """Bitta dona uchun va jami bo'yicha sof foyda."""
+        total = Decimal(obj.quantity_total or 1)
+        if total <= 0:
+            total = Decimal("1")
+        cost_total = Decimal(obj.calculated_cost_price or 0)
+        price = Decimal(obj.price or 0)
+        unit_cost = (cost_total / total).quantize(Decimal("0.01"))
+        unit_profit = (price - unit_cost).quantize(Decimal("0.01"))
+        margin = (unit_profit / price * 100).quantize(Decimal("0.01")) if price else Decimal("0")
+        sold = Decimal(obj.quantity_sold or 0)
+        return {
+            "unit_price": str(price),
+            "unit_cost": str(unit_cost),
+            "unit_profit": str(unit_profit),
+            "unit_margin_percent": str(margin),
+            "total_cost": str(cost_total),
+            "total_potential_profit": str((unit_profit * total).quantize(Decimal("0.01"))),
+            "sold_quantity": int(sold),
+            "realized_profit": str((unit_profit * sold).quantize(Decimal("0.01"))),
+        }
 
     @extend_schema_field(serializers.DictField(allow_null=True))
     def get_customer_detail(self, obj):

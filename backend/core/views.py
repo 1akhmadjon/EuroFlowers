@@ -806,8 +806,9 @@ def florist_item_revenue_map(item_ids):
     return revenue
 
 
-def florist_stats_data(profile, request):
-    """Florist bo'yicha to'liq statistika. Detail API, florist dashboard va Excel eksport shundan foydalanadi."""
+def florist_stats_data(profile, request, include_sales=True):
+    """Florist bo'yicha to'liq statistika. Detail API, florist dashboard va Excel eksport shundan foydalanadi.
+    include_sales=False bo'lsa sotuv narxi, tushum va foyda chiqarilmaydi — florist o'zi ko'rgan holat."""
     date_from, date_to = parse_date_range_params(request)
     salary = list(florist_salary_queryset(profile, date_from, date_to))
     item_ids = [row.catalog_item_id for row in salary if row.catalog_item_id]
@@ -916,6 +917,17 @@ def florist_stats_data(profile, request):
     if summary["catalog_count"]:
         summary["avg_fee_per_item"] = (summary["catalog_salary_total"] / Decimal(summary["catalog_count"])).quantize(Decimal("0.01"))
 
+    if not include_sales:
+        for key in ["sold_quantity", "sale_revenue", "unsold_quantity"]:
+            summary.pop(key, None)
+        for row in entries:
+            for key in ["listed_price", "sold_quantity", "sale_revenue", "last_sold_at", "is_sold", "quantity_sold"]:
+                row.pop(key, None)
+        for bucket in (by_arrangement, by_volume, by_day):
+            for row in bucket.values():
+                for key in ["sold_quantity", "sale_revenue"]:
+                    row.pop(key, None)
+
     attendance = FloristAttendance.objects.filter(florist=profile)
     if date_from:
         attendance = attendance.filter(work_date__gte=date_from)
@@ -923,7 +935,8 @@ def florist_stats_data(profile, request):
         attendance = attendance.filter(work_date__lte=date_to)
     attendance = list(attendance.order_by("-work_date", "-id"))
     summary["attendance_days"] = len(attendance)
-    summary["unsold_quantity"] = max(summary["catalog_count"] - summary["sold_quantity"], 0)
+    if include_sales:
+        summary["unsold_quantity"] = max(summary["catalog_count"] - summary["sold_quantity"], 0)
 
     return {
         "florist": {
@@ -990,7 +1003,9 @@ class FloristProfileViewSet(ScopedViewSet):
         profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
         if not profile:
             return Response({"detail": "Florist profili topilmadi"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(json_safe(florist_stats_data(profile, request)))
+        # Florist o'z sahifasida sotuv narxi, tushum va foydani ko'rmaydi.
+        # Faqat nechta yasagani va ish haqiga qancha qo'shilgani ko'rinadi.
+        return Response(json_safe(florist_stats_data(profile, request, include_sales=False)))
 
 
 class FloristAttendanceViewSet(ScopedViewSet):
@@ -1282,7 +1297,7 @@ class FloristSelfExcelExportView(APIView):
         profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
         if not profile:
             return Response({"detail": "Florist profile topilmadi"}, status=status.HTTP_404_NOT_FOUND)
-        return export_florist_workbook(profile, request)
+        return export_florist_workbook(profile, request, include_sales=False)
 
 
 class AdminFloristsExcelExportView(APIView):
@@ -1377,8 +1392,8 @@ def _style_header(sheet):
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
-def export_florist_workbook(profile, request):
-    data = florist_stats_data(profile, request)
+def export_florist_workbook(profile, request, include_sales=True):
+    data = florist_stats_data(profile, request, include_sales=include_sales)
     summary = data["summary"]
     period = data["period"]
     florist = data["florist"]
@@ -1398,11 +1413,11 @@ def export_florist_workbook(profile, request):
             row["arrangement_label"],
             row["volume"],
             row["quantity_total"] or "",
-            row["sold_quantity"] or "",
-            money_label(row["listed_price"]) if row["listed_price"] else "",
-            money_label(row["sale_revenue"]) if row["sale_revenue"] else "",
+            row.get("sold_quantity") or "",
+            money_label(row["listed_price"]) if row.get("listed_price") else "",
+            money_label(row["sale_revenue"]) if row.get("sale_revenue") else "",
             money_label(row["amount"]),
-            local_datetime_label(row["last_sold_at"]),
+            local_datetime_label(row.get("last_sold_at")),
             row["note"],
             row["added_by"],
         ])
@@ -1431,9 +1446,9 @@ def export_florist_workbook(profile, request):
         ("Savat", summary["basket_count"]),
         ("Standart", summary["standard_count"]),
         ("Custom", summary["custom_count"]),
-        ("Sotilgan dona", summary["sold_quantity"]),
-        ("Sotilmagan", summary["unsold_quantity"]),
-        ("Sotuvdan tushgan", money_label(summary["sale_revenue"])),
+        ("Sotilgan dona", summary.get("sold_quantity", "")),
+        ("Sotilmagan", summary.get("unsold_quantity", "")),
+        ("Sotuvdan tushgan", money_label(summary["sale_revenue"]) if "sale_revenue" in summary else ""),
         ("Bitta mahsulotga o‘rtacha haq", money_label(summary["avg_fee_per_item"])),
         ("Ishlagan kunlar", summary["attendance_days"]),
     ]:
@@ -1445,8 +1460,8 @@ def export_florist_workbook(profile, request):
     for row in data["by_day"]:
         daily_sheet.append([
             row["work_date"].isoformat() if row["work_date"] else "",
-            row["count"], row["bouquets"], row["baskets"], row["sold_quantity"],
-            money_label(row["sale_revenue"]), money_label(row["amount"]),
+            row["count"], row["bouquets"], row["baskets"], row.get("sold_quantity", ""),
+            money_label(row["sale_revenue"]) if "sale_revenue" in row else "", money_label(row["amount"]),
         ])
 
     volume_sheet = workbook.create_sheet("Hajm bo‘yicha")
@@ -1454,8 +1469,8 @@ def export_florist_workbook(profile, request):
     _style_header(volume_sheet)
     for row in data["by_volume"]:
         volume_sheet.append([
-            row["arrangement_label"], row["volume"], row["count"], row["sold_quantity"],
-            money_label(row["sale_revenue"]), money_label(row["amount"]),
+            row["arrangement_label"], row["volume"], row["count"], row.get("sold_quantity", ""),
+            money_label(row["sale_revenue"]) if "sale_revenue" in row else "", money_label(row["amount"]),
         ])
 
     source_sheet = workbook.create_sheet("Manba bo‘yicha")
