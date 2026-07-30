@@ -724,6 +724,185 @@ class FloristVolumeRateViewSet(ScopedViewSet):
     filterset_fields = ["arrangement_type", "volume", "is_active"]
 
 
+ARRANGEMENT_LABELS = {"bouquet": "Buket", "basket": "Savat", "box": "Quti"}
+CATALOG_KIND_LABELS = {"standard": "Standart", "custom": "Custom"}
+
+
+def florist_salary_queryset(profile, date_from, date_to):
+    rows = FloristSalaryEntry.objects.filter(florist=profile).select_related("catalog_item__florist", "created_by", "attendance")
+    if date_from:
+        rows = rows.filter(work_date__gte=date_from)
+    if date_to:
+        rows = rows.filter(work_date__lte=date_to)
+    return rows.order_by("-work_date", "-id")
+
+
+def florist_item_revenue_map(item_ids):
+    """Har bir katalog mahsuloti bo'yicha sotuvdan tushgan real summa va sotilgan soni."""
+    revenue = {}
+    if not item_ids:
+        return revenue
+    for history in CatalogHistory.objects.filter(action="sold", catalog_item_id__in=item_ids):
+        row = revenue.setdefault(history.catalog_item_id, {"revenue": Decimal("0"), "sold_quantity": 0, "last_sold_at": None})
+        row["revenue"] += catalog_history_sale_total(history)
+        row["sold_quantity"] += int(history.quantity or 0)
+        if not row["last_sold_at"] or history.created_at > row["last_sold_at"]:
+            row["last_sold_at"] = history.created_at
+    return revenue
+
+
+def florist_stats_data(profile, request):
+    """Florist bo'yicha to'liq statistika. Detail API, florist dashboard va Excel eksport shundan foydalanadi."""
+    date_from, date_to = parse_date_range_params(request)
+    salary = list(florist_salary_queryset(profile, date_from, date_to))
+    item_ids = [row.catalog_item_id for row in salary if row.catalog_item_id]
+    revenue_map = florist_item_revenue_map(item_ids)
+
+    summary = {
+        "salary_total": Decimal("0"),
+        "salary_entries_count": len(salary),
+        "catalog_salary_total": Decimal("0"),
+        "daily_salary_total": Decimal("0"),
+        "manual_salary_total": Decimal("0"),
+        "catalog_count": 0,
+        "bouquet_count": 0,
+        "basket_count": 0,
+        "standard_count": 0,
+        "custom_count": 0,
+        "sold_quantity": 0,
+        "sale_revenue": Decimal("0"),
+        "avg_fee_per_item": Decimal("0"),
+    }
+    by_source, by_arrangement, by_volume, by_day, entries = {}, {}, {}, {}, []
+
+    for row in salary:
+        item = row.catalog_item
+        amount = Decimal(row.amount or 0)
+        arrangement = item.arrangement_type if item else ""
+        volume = (item.volume if item else "") or "Belgilanmagan"
+        kind = (item.catalog_kind if item else "") or ""
+        sold = revenue_map.get(row.catalog_item_id, {}) if row.catalog_item_id else {}
+        sold_quantity = int(sold.get("sold_quantity") or 0)
+        sale_revenue = Decimal(sold.get("revenue") or 0)
+
+        summary["salary_total"] += amount
+        if row.source == "daily":
+            summary["daily_salary_total"] += amount
+        elif row.source == "manual":
+            summary["manual_salary_total"] += amount
+        else:
+            summary["catalog_salary_total"] += amount
+        summary["sold_quantity"] += sold_quantity
+        summary["sale_revenue"] += sale_revenue
+        if item:
+            summary["catalog_count"] += 1
+            if arrangement == "bouquet":
+                summary["bouquet_count"] += 1
+            elif arrangement == "basket":
+                summary["basket_count"] += 1
+            if kind == "custom":
+                summary["custom_count"] += 1
+            else:
+                summary["standard_count"] += 1
+
+        source_row = by_source.setdefault(row.source, {"source": row.source, "source_label": row.get_source_display(), "count": 0, "amount": Decimal("0")})
+        source_row["count"] += 1
+        source_row["amount"] += amount
+
+        if arrangement:
+            arr_row = by_arrangement.setdefault(arrangement, {"arrangement_type": arrangement, "arrangement_label": ARRANGEMENT_LABELS.get(arrangement, arrangement), "count": 0, "amount": Decimal("0"), "sold_quantity": 0, "sale_revenue": Decimal("0")})
+            arr_row["count"] += 1
+            arr_row["amount"] += amount
+            arr_row["sold_quantity"] += sold_quantity
+            arr_row["sale_revenue"] += sale_revenue
+
+            vol_key = (arrangement, volume)
+            vol_row = by_volume.setdefault(vol_key, {"arrangement_type": arrangement, "arrangement_label": ARRANGEMENT_LABELS.get(arrangement, arrangement), "volume": volume, "count": 0, "amount": Decimal("0"), "sold_quantity": 0, "sale_revenue": Decimal("0")})
+            vol_row["count"] += 1
+            vol_row["amount"] += amount
+            vol_row["sold_quantity"] += sold_quantity
+            vol_row["sale_revenue"] += sale_revenue
+
+        day_row = by_day.setdefault(row.work_date, {"work_date": row.work_date, "count": 0, "amount": Decimal("0"), "bouquets": 0, "baskets": 0, "sold_quantity": 0, "sale_revenue": Decimal("0")})
+        day_row["count"] += 1
+        day_row["amount"] += amount
+        day_row["sold_quantity"] += sold_quantity
+        day_row["sale_revenue"] += sale_revenue
+        if arrangement == "bouquet":
+            day_row["bouquets"] += 1
+        elif arrangement == "basket":
+            day_row["baskets"] += 1
+
+        entries.append({
+            "id": row.id,
+            "work_date": row.work_date,
+            "created_at": row.created_at,
+            "source": row.source,
+            "source_label": row.get_source_display(),
+            "amount": amount,
+            "note": row.note,
+            "added_by": user_full_name(row.created_by),
+            "catalog_item_id": row.catalog_item_id,
+            "catalog_name": item.name_uz if item else "",
+            "catalog_kind": kind,
+            "catalog_kind_label": CATALOG_KIND_LABELS.get(kind, kind),
+            "arrangement_type": arrangement,
+            "arrangement_label": ARRANGEMENT_LABELS.get(arrangement, ""),
+            "volume": item.volume if item else "",
+            "quantity_total": int(item.quantity_total or 0) if item else 0,
+            "quantity_sold": int(item.quantity_sold or 0) if item else 0,
+            "listed_price": Decimal(item.price or 0) if item else Decimal("0"),
+            "sold_quantity": sold_quantity,
+            "sale_revenue": sale_revenue,
+            "last_sold_at": sold.get("last_sold_at"),
+            "is_sold": bool(sold_quantity),
+        })
+
+    if summary["catalog_count"]:
+        summary["avg_fee_per_item"] = (summary["catalog_salary_total"] / Decimal(summary["catalog_count"])).quantize(Decimal("0.01"))
+
+    attendance = FloristAttendance.objects.filter(florist=profile)
+    if date_from:
+        attendance = attendance.filter(work_date__gte=date_from)
+    if date_to:
+        attendance = attendance.filter(work_date__lte=date_to)
+    attendance = list(attendance.order_by("-work_date", "-id"))
+    summary["attendance_days"] = len(attendance)
+    summary["unsold_quantity"] = max(summary["catalog_count"] - summary["sold_quantity"], 0)
+
+    return {
+        "florist": {
+            "id": profile.id,
+            "name": profile.user.get_full_name() or profile.user.username,
+            "username": profile.user.username,
+            "staff_type": profile.staff_type,
+            "staff_type_label": profile.get_staff_type_display(),
+            "phone": profile.phone,
+            "daily_pay": Decimal(profile.daily_pay or 0),
+            "is_active": profile.is_active,
+        },
+        "period": {"date_from": date_from.isoformat() if date_from else None, "date_to": date_to.isoformat() if date_to else None},
+        "summary": summary,
+        "by_source": sorted(by_source.values(), key=lambda row: -row["amount"]),
+        "by_arrangement": sorted(by_arrangement.values(), key=lambda row: -row["count"]),
+        "by_volume": sorted(by_volume.values(), key=lambda row: (row["arrangement_type"], row["volume"])),
+        "by_day": sorted(by_day.values(), key=lambda row: row["work_date"], reverse=True),
+        "salary_entries": entries,
+        "attendance": [
+            {
+                "id": row.id,
+                "work_date": row.work_date,
+                "check_in_at": row.check_in_at,
+                "check_out_at": row.check_out_at,
+                "source": row.source,
+                "source_label": row.get_source_display(),
+                "note": row.note,
+            }
+            for row in attendance
+        ],
+    }
+
+
 class FloristProfileViewSet(ScopedViewSet):
     permission_page = "florists"
     write_roles = ["admin", "supervisor"]
@@ -746,26 +925,17 @@ class FloristProfileViewSet(ScopedViewSet):
             return Response({"detail": "Florist profili topilmadi"}, status=status.HTTP_404_NOT_FOUND)
         return Response(self.get_serializer(profile).data)
 
+    @action(detail=True, methods=["get"], url_path="stats")
+    def florist_stats(self, request, pk=None):
+        profile = self.get_object()
+        return Response(json_safe(florist_stats_data(profile, request)))
+
     @action(detail=False, methods=["get"], url_path="me/dashboard")
     def me_dashboard(self, request):
-        profile = FloristProfile.objects.filter(user=request.user).first()
+        profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
         if not profile:
             return Response({"detail": "Florist profili topilmadi"}, status=status.HTTP_404_NOT_FOUND)
-        start, end = dashboard_period(request)
-        salary = apply_created_range(profile.salary_entries.all(), start, end)
-        attendance = apply_created_range(profile.attendance.all(), start, end)
-        catalog = apply_created_range(profile.catalog_items.all(), start, end)
-        return Response({
-            "florist": FloristProfileSerializer(profile).data,
-            "period": {"from": start, "to": end},
-            "salary_total": salary.aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
-            "salary_entries_count": salary.count(),
-            "catalog_count": catalog.count(),
-            "custom_catalog_count": catalog.filter(catalog_kind="custom").count(),
-            "attendance_days": attendance.count(),
-            "latest_salary_entries": FloristSalaryEntrySerializer(salary.select_related("catalog_item", "florist__user")[:20], many=True).data,
-            "latest_attendance": FloristAttendanceSerializer(attendance[:20], many=True).data,
-        })
+        return Response(json_safe(florist_stats_data(profile, request)))
 
 
 class FloristAttendanceViewSet(ScopedViewSet):
@@ -1039,10 +1209,19 @@ class InventoryMovementJournalView(APIView):
 
 
 class FloristSelfExcelExportView(APIView):
+    """Florist o'z hisobotini yuklaydi. florists sahifasiga ruxsati bor foydalanuvchi
+    ?florist=<id> bilan boshqa floristning hisobotini ham yuklashi mumkin."""
+
     permission_classes = [RolePermission]
     permission_page = None
 
     def get(self, request):
+        requested_id = request.query_params.get("florist")
+        if requested_id and has_page_permission(request.user, "florists", False):
+            profile = FloristProfile.objects.select_related("user").filter(id=requested_id).first()
+            if not profile:
+                return Response({"detail": "Florist topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+            return export_florist_workbook(profile, request)
         profile = FloristProfile.objects.select_related("user").filter(user=request.user).first()
         if not profile:
             return Response({"detail": "Florist profile topilmadi"}, status=status.HTTP_404_NOT_FOUND)
@@ -1133,63 +1312,115 @@ class CatalogItemViewSet(ScopedViewSet):
                 write_audit(self.request.user, "catalog_archived", item, before=before, after=instance_snapshot(item), request=self.request)
 
 
-def export_florist_workbook(profile, request):
-    date_from, date_to = parse_date_range_params(request)
-    workbook, sheet = styled_workbook("Florist hisoboti", ["Sana", "Manba", "Katalog", "Hajm", "Arrangement", "Ish haqi", "Izoh", "Kim qo‘shdi"])
-    salary = FloristSalaryEntry.objects.filter(florist=profile).select_related("catalog_item", "created_by")
-    if date_from:
-        salary = salary.filter(work_date__gte=date_from)
-    if date_to:
-        salary = salary.filter(work_date__lte=date_to)
-    for row in salary.order_by("-work_date", "-id"):
-        item = row.catalog_item
-        sheet.append([
-            row.work_date.isoformat(),
-            row.get_source_display(),
-            item.name_uz if item else "",
-            item.volume if item else "",
-            item.get_arrangement_type_display() if item else "",
-            money_label(row.amount),
-            row.note,
-            user_full_name(row.created_by),
-        ])
-    daily_sheet = workbook.create_sheet("Kunlik hajm")
-    daily_sheet.append(["Sana", "Katalog turi", "Arrangement", "Hajm", "Yasalgan soni", "Floristga qo‘shilgan summa"])
-    for cell in daily_sheet[1]:
+def _style_header(sheet):
+    for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="0F172A")
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
-    daily_rows = {}
-    for row in salary:
-        item = row.catalog_item
-        key = (row.work_date, item.catalog_kind if item else "", item.arrangement_type if item else "", item.volume if item else "")
-        current = daily_rows.setdefault(key, {"count": 0, "amount": Decimal("0")})
-        current["count"] += int(item.quantity_total or 1) if item else 1
-        current["amount"] += Decimal(row.amount or 0)
-    for key, value in sorted(daily_rows.items(), key=lambda row: row[0], reverse=True):
-        work_date, catalog_kind, arrangement_type, volume = key
-        daily_sheet.append([work_date.isoformat(), catalog_kind, arrangement_type, volume or "Belgilanmagan", value["count"], money_label(value["amount"])])
+
+
+def export_florist_workbook(profile, request):
+    data = florist_stats_data(profile, request)
+    summary = data["summary"]
+    period = data["period"]
+    florist = data["florist"]
+
+    workbook, sheet = styled_workbook("Ish haqi tarixi", [
+        "Sana", "Qo‘shilgan vaqt", "Manba", "Katalog mahsuloti", "Turi",
+        "Buket yoki savat", "Hajm", "Soni", "Sotilgan", "Narxi",
+        "Sotuvdan tushgan", "Floristga qo‘shilgan", "Sotilgan vaqti", "Izoh", "Kim qo‘shdi",
+    ])
+    for row in data["salary_entries"]:
+        sheet.append([
+            row["work_date"].isoformat() if row["work_date"] else "",
+            local_datetime_label(row["created_at"]),
+            row["source_label"],
+            row["catalog_name"],
+            row["catalog_kind_label"],
+            row["arrangement_label"],
+            row["volume"],
+            row["quantity_total"] or "",
+            row["sold_quantity"] or "",
+            money_label(row["listed_price"]) if row["listed_price"] else "",
+            money_label(row["sale_revenue"]) if row["sale_revenue"] else "",
+            money_label(row["amount"]),
+            local_datetime_label(row["last_sold_at"]),
+            row["note"],
+            row["added_by"],
+        ])
     total_row = sheet.max_row + 2
-    sheet.cell(total_row, 5, "Jami")
-    sheet.cell(total_row, 6, money_label(salary.aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"]))
-    sheet.cell(total_row, 5).font = Font(bold=True)
-    sheet.cell(total_row, 6).font = Font(bold=True)
+    sheet.cell(total_row, 11, "Jami")
+    sheet.cell(total_row, 11).font = Font(bold=True)
+    sheet.cell(total_row, 12, money_label(summary["salary_total"]))
+    sheet.cell(total_row, 12).font = Font(bold=True)
+
+    info = workbook.create_sheet("Umumiy")
+    info.append(["Ko‘rsatkich", "Qiymat"])
+    _style_header(info)
+    for label, value in [
+        ("Florist", florist["name"]),
+        ("Lavozim", florist["staff_type_label"]),
+        ("Telefon", florist["phone"]),
+        ("Davr boshi", period["date_from"] or "Boshidan"),
+        ("Davr oxiri", period["date_to"] or "Bugungacha"),
+        ("Jami ish haqi", money_label(summary["salary_total"])),
+        ("Katalog uchun", money_label(summary["catalog_salary_total"])),
+        ("Kunlik ish haqi", money_label(summary["daily_salary_total"])),
+        ("Qo‘lda qo‘shilgan", money_label(summary["manual_salary_total"])),
+        ("Yozuvlar soni", summary["salary_entries_count"]),
+        ("Yasagan mahsulot", summary["catalog_count"]),
+        ("Buket", summary["bouquet_count"]),
+        ("Savat", summary["basket_count"]),
+        ("Standart", summary["standard_count"]),
+        ("Custom", summary["custom_count"]),
+        ("Sotilgan dona", summary["sold_quantity"]),
+        ("Sotilmagan", summary["unsold_quantity"]),
+        ("Sotuvdan tushgan", money_label(summary["sale_revenue"])),
+        ("Bitta mahsulotga o‘rtacha haq", money_label(summary["avg_fee_per_item"])),
+        ("Ishlagan kunlar", summary["attendance_days"]),
+    ]:
+        info.append([label, value])
+
+    daily_sheet = workbook.create_sheet("Kunlar bo‘yicha")
+    daily_sheet.append(["Sana", "Yozuvlar", "Buket", "Savat", "Sotilgan dona", "Sotuvdan tushgan", "Floristga qo‘shilgan"])
+    _style_header(daily_sheet)
+    for row in data["by_day"]:
+        daily_sheet.append([
+            row["work_date"].isoformat() if row["work_date"] else "",
+            row["count"], row["bouquets"], row["baskets"], row["sold_quantity"],
+            money_label(row["sale_revenue"]), money_label(row["amount"]),
+        ])
+
+    volume_sheet = workbook.create_sheet("Hajm bo‘yicha")
+    volume_sheet.append(["Buket yoki savat", "Hajm", "Soni", "Sotilgan dona", "Sotuvdan tushgan", "Floristga qo‘shilgan"])
+    _style_header(volume_sheet)
+    for row in data["by_volume"]:
+        volume_sheet.append([
+            row["arrangement_label"], row["volume"], row["count"], row["sold_quantity"],
+            money_label(row["sale_revenue"]), money_label(row["amount"]),
+        ])
+
+    source_sheet = workbook.create_sheet("Manba bo‘yicha")
+    source_sheet.append(["Manba", "Yozuvlar", "Summa"])
+    _style_header(source_sheet)
+    for row in data["by_source"]:
+        source_sheet.append([row["source_label"], row["count"], money_label(row["amount"])])
+
     attendance_sheet = workbook.create_sheet("Keldi-ketdi")
     attendance_sheet.append(["Sana", "Keldi", "Ketdi", "Manba", "Izoh"])
-    for cell in attendance_sheet[1]:
-        cell.fill = PatternFill("solid", fgColor="0F172A")
-        cell.font = Font(color="FFFFFF", bold=True)
-    attendance = FloristAttendance.objects.filter(florist=profile)
-    if date_from:
-        attendance = attendance.filter(work_date__gte=date_from)
-    if date_to:
-        attendance = attendance.filter(work_date__lte=date_to)
-    for row in attendance.order_by("-work_date", "-id"):
-        attendance_sheet.append([row.work_date.isoformat(), local_datetime_label(row.check_in_at), local_datetime_label(row.check_out_at), row.get_source_display(), row.note])
-    autosize_sheet(sheet)
-    autosize_sheet(daily_sheet)
-    autosize_sheet(attendance_sheet)
-    return excel_response(workbook, f"florist_{profile.id}_export.xlsx")
+    _style_header(attendance_sheet)
+    for row in data["attendance"]:
+        attendance_sheet.append([
+            row["work_date"].isoformat() if row["work_date"] else "",
+            local_datetime_label(row["check_in_at"]),
+            local_datetime_label(row["check_out_at"]),
+            row["source_label"], row["note"],
+        ])
+
+    for current in [sheet, info, daily_sheet, volume_sheet, source_sheet, attendance_sheet]:
+        autosize_sheet(current)
+    suffix = f"_{period['date_from'] or 'boshidan'}_{period['date_to'] or 'bugun'}"
+    return excel_response(workbook, f"florist_{profile.id}{suffix}.xlsx")
 
 
 def export_all_florists_workbook(request):

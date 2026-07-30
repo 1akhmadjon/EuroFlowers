@@ -1112,6 +1112,85 @@ class ApiTests(TestCase):
         variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
         self.batch = StockBatch.objects.create(variant=variant, batch_number="API-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=20000, sale_price_per_bunch=400000)
 
+    def _florist_with_history(self):
+        user = User.objects.create_user("florist-stats", password="password", first_name="Dilnoza", last_name="F")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist", phone="+998901112233")
+        bouquet = CatalogItem.objects.create(name_uz="Katta buket", arrangement_type="bouquet", volume="Katta", catalog_kind="standard", price=Decimal("900000"), quantity_total=1, status="available", florist=profile, florist_fee=Decimal("60000"))
+        basket = CatalogItem.objects.create(name_uz="Mini savat", arrangement_type="basket", volume="Kichik", catalog_kind="custom", price=Decimal("400000"), quantity_total=1, status="available", florist=profile, florist_fee=Decimal("30000"))
+        CatalogComposition.objects.create(catalog_item=bouquet, stock_batch=self.batch, quantity_stems=20)
+        CatalogComposition.objects.create(catalog_item=basket, stock_batch=self.batch, quantity_stems=10)
+        FloristSalaryEntry.objects.create(florist=profile, amount=Decimal("60000"), source="catalog", work_date="2026-07-20", catalog_item=bouquet)
+        FloristSalaryEntry.objects.create(florist=profile, amount=Decimal("30000"), source="custom_catalog", work_date="2026-07-21", catalog_item=basket)
+        FloristSalaryEntry.objects.create(florist=profile, amount=Decimal("15000"), source="manual", work_date="2026-07-21", note="Qo‘shimcha")
+        mark_catalog_sold(bouquet, self.user)
+        FloristAttendance.objects.create(florist=profile, work_date="2026-07-20")
+        return profile
+
+    def test_florist_stats_endpoint_returns_full_breakdown(self):
+        profile = self._florist_with_history()
+        response = self.client.get(f"/api/florists/{profile.id}/stats/")
+        self.assertEqual(response.status_code, 200)
+        data = response.data
+        summary = data["summary"]
+        self.assertEqual(Decimal(summary["salary_total"]), Decimal("105000.00"))
+        self.assertEqual(Decimal(summary["catalog_salary_total"]), Decimal("90000.00"))
+        self.assertEqual(Decimal(summary["manual_salary_total"]), Decimal("15000.00"))
+        self.assertEqual(summary["catalog_count"], 2)
+        self.assertEqual(summary["bouquet_count"], 1)
+        self.assertEqual(summary["basket_count"], 1)
+        self.assertEqual(summary["standard_count"], 1)
+        self.assertEqual(summary["custom_count"], 1)
+        self.assertEqual(summary["attendance_days"], 1)
+        self.assertEqual(summary["sold_quantity"], 1)
+        self.assertEqual(Decimal(summary["sale_revenue"]), Decimal("900000.00"))
+        self.assertEqual(Decimal(summary["avg_fee_per_item"]), Decimal("45000.00"))
+        self.assertEqual({row["arrangement_type"] for row in data["by_arrangement"]}, {"bouquet", "basket"})
+        self.assertEqual({(row["arrangement_type"], row["volume"]) for row in data["by_volume"]}, {("bouquet", "Katta"), ("basket", "Kichik")})
+        self.assertEqual({row["source"] for row in data["by_source"]}, {"catalog", "custom_catalog", "manual"})
+        self.assertEqual(len(data["by_day"]), 2)
+        sold_row = next(row for row in data["salary_entries"] if row["catalog_name"] == "Katta buket")
+        self.assertEqual(sold_row["arrangement_label"], "Buket")
+        self.assertEqual(sold_row["volume"], "Katta")
+        self.assertEqual(Decimal(sold_row["amount"]), Decimal("60000.00"))
+        self.assertEqual(Decimal(sold_row["sale_revenue"]), Decimal("900000.00"))
+        self.assertTrue(sold_row["is_sold"])
+        unsold_row = next(row for row in data["salary_entries"] if row["catalog_name"] == "Mini savat")
+        self.assertFalse(unsold_row["is_sold"])
+        self.assertEqual(Decimal(unsold_row["sale_revenue"]), Decimal("0"))
+
+    def test_florist_stats_respects_date_range(self):
+        profile = self._florist_with_history()
+        response = self.client.get(f"/api/florists/{profile.id}/stats/?date_from=2026-07-21&date_to=2026-07-21")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["summary"]["salary_entries_count"], 2)
+        self.assertEqual(Decimal(response.data["summary"]["salary_total"]), Decimal("45000.00"))
+        self.assertEqual(response.data["period"]["date_from"], "2026-07-21")
+
+    def test_florist_me_dashboard_returns_own_stats(self):
+        profile = self._florist_with_history()
+        PagePermission.objects.create(user=profile.user, page="florists", can_view=True, can_control=False)
+        UserProfile.objects.update_or_create(user=profile.user, defaults={"role": "florist"})
+        client = APIClient()
+        client.force_authenticate(profile.user)
+        response = client.get("/api/florists/me/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["florist"]["id"], profile.id)
+        self.assertEqual(Decimal(response.data["summary"]["salary_total"]), Decimal("105000.00"))
+        self.assertTrue(response.data["salary_entries"])
+
+    def test_florist_excel_export_has_all_sheets(self):
+        import io
+        from openpyxl import load_workbook
+        profile = self._florist_with_history()
+        response = self.client.get(f"/api/exports/florist/?florist={profile.id}&date_from=2026-07-01&date_to=2026-07-31")
+        self.assertEqual(response.status_code, 200)
+        workbook = load_workbook(io.BytesIO(response.content))
+        self.assertEqual(workbook.sheetnames, ["Ish haqi tarixi", "Umumiy", "Kunlar bo‘yicha", "Hajm bo‘yicha", "Manba bo‘yicha", "Keldi-ketdi"])
+        header = [cell.value for cell in workbook["Ish haqi tarixi"][1]]
+        self.assertIn("Sotuvdan tushgan", header)
+        self.assertIn("Floristga qo‘shilgan", header)
+        self.assertIn("Buket yoki savat", header)
+
     def test_supplier_payment_crud_and_rollups(self):
         supplier = Supplier.objects.create(name="Gul Import")
         variant = self.batch.variant
