@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -306,6 +306,9 @@ class BusinessRulesTests(TestCase):
         florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
         # Tarif aniq floristga biriktiriladi, umumiy tarif endi ishlatilmaydi
         FloristVolumeRate.objects.create(florist=florist, arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
+        # Florist tanlangan katalog gulni floristning qo'lidagi qoldiqdan oladi
+        from .inventory_services import issue_stock_to_florist
+        issue_stock_to_florist(florist, self.batch, 10, "test", self.user)
         packaging = Packaging.objects.create(packaging_type="wrap", name_uz="Test qogoz", cost_price=10000, sale_price=20000, quantity=5)
         serializer = CatalogItemSerializer(data={
             "name_uz": "Custom buket",
@@ -344,6 +347,8 @@ class BusinessRulesTests(TestCase):
     def test_custom_catalog_accepts_custom_volume_and_manual_salary_amount(self):
         florist_user = User.objects.create_user("custom-florist", password="password", first_name="Ali")
         florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
+        from .inventory_services import issue_stock_to_florist
+        issue_stock_to_florist(florist, self.batch, 12, "test", self.user)
         serializer = CatalogItemSerializer(data={
             "name_uz": "Juda katta custom buket",
             "arrangement_type": "bouquet",
@@ -1377,6 +1382,98 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         movement = PackagingMovement.objects.get(id=response.data["id"])
         self.assertEqual(timezone.localtime(movement.created_at).date().isoformat(), "2026-07-04")
+
+    def _florist(self, username="fl-stock"):
+        user = User.objects.create_user(username, password="p", first_name="Stock")
+        return FloristProfile.objects.create(user=user, staff_type="florist")
+
+    def test_issue_stock_to_florist_moves_balance(self):
+        florist = self._florist()
+        before = self.batch.remaining_stems
+        response = self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 30, "reason": "Ish uchun"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["kind_label"], "Chiqarildi")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before - 30)
+        balance = FloristStockBalance.objects.get(florist=florist, batch=self.batch)
+        self.assertEqual(balance.remaining_stems, 30)
+        self.assertTrue(StockMovement.objects.filter(reference_type="florist_issue").exists())
+
+    def test_issue_rejects_more_than_stock(self):
+        florist = self._florist()
+        response = self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 99999}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("qolgan", response.data["detail"])
+
+    def test_florist_can_return_unused_stock(self):
+        florist = self._florist()
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 30}, format="json")
+        self.batch.refresh_from_db()
+        before = self.batch.remaining_stems
+        response = self.client.post("/api/florist-stock-issues/return/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 10, "kind": "return"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before + 10)
+        self.assertEqual(FloristStockBalance.objects.get(florist=florist, batch=self.batch).remaining_stems, 20)
+
+    def test_florist_waste_does_not_return_to_stock(self):
+        florist = self._florist()
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 30}, format="json")
+        self.batch.refresh_from_db()
+        before = self.batch.remaining_stems
+        response = self.client.post("/api/florist-stock-issues/return/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 5, "kind": "waste", "reason": "so‘ldi"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before)
+        self.assertEqual(FloristStockBalance.objects.get(florist=florist, batch=self.batch).remaining_stems, 25)
+
+    def test_return_rejects_more_than_florist_has(self):
+        florist = self._florist()
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 10}, format="json")
+        response = self.client.post("/api/florist-stock-issues/return/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 50}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_catalog_with_florist_consumes_florist_stock_not_warehouse(self):
+        florist = self._florist()
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 30}, format="json")
+        self.batch.refresh_from_db()
+        stock_before = self.batch.remaining_stems
+        response = self.client.post("/api/catalog/", {"name_uz": "Florist buketi", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "florist": florist.id, "composition": [{"stock_batch": self.batch.id, "quantity_stems": 20}]}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, stock_before)
+        self.assertEqual(FloristStockBalance.objects.get(florist=florist, batch=self.batch).remaining_stems, 10)
+
+    def test_catalog_with_florist_rejects_when_florist_lacks_stock(self):
+        florist = self._florist()
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 5}, format="json")
+        response = self.client.post("/api/catalog/", {"name_uz": "Yetmaydi", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "florist": florist.id, "composition": [{"stock_batch": self.batch.id, "quantity_stems": 20}]}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_catalog_without_florist_still_uses_warehouse(self):
+        before = self.batch.remaining_stems
+        response = self.client.post("/api/catalog/", {"name_uz": "Skladdan", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}]}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before - 10)
+
+    def test_florist_stock_balance_list_filters_by_florist(self):
+        florist = self._florist()
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 12}, format="json")
+        response = self.client.get(f"/api/florist-stock-balances/?florist={florist.id}")
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["remaining_stems"], 12)
+        self.assertEqual(response.data["results"][0]["batch_detail"]["batch_number"], self.batch.batch_number)
+
+    def test_florist_day_off_crud(self):
+        florist = self._florist()
+        response = self.client.post("/api/florist-days-off/", {"florist": florist.id, "work_date": "2026-08-02", "kind": "weekend", "note": "Yakshanba"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["kind_label"], "Dam kuni")
+        listed = self.client.get(f"/api/florist-days-off/?florist={florist.id}")
+        self.assertEqual(listed.data["count"], 1)
+        duplicate = self.client.post("/api/florist-days-off/", {"florist": florist.id, "work_date": "2026-08-02", "kind": "sick"}, format="json")
+        self.assertEqual(duplicate.status_code, 400)
 
     def test_volume_rate_requires_florist(self):
         response = self.client.post("/api/florist-volume-rates/", {"arrangement_type": "bouquet", "volume": "M", "default_stems": 25, "florist_fee": "60000"}, format="json")

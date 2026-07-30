@@ -268,6 +268,72 @@ class FloristAttendance(TimeStampedModel):
         ordering = ["-work_date", "-id"]
 
 
+class FloristStockIssue(TimeStampedModel):
+    """Skladdan floristga chiqarilgan yoki undan qaytarilgan gul."""
+
+    KIND_CHOICES = [("issue", "Chiqarildi"), ("return", "Qaytarildi"), ("waste", "Chiqit")]
+    florist = models.ForeignKey("FloristProfile", on_delete=models.PROTECT, related_name="stock_issues")
+    batch = models.ForeignKey("StockBatch", on_delete=models.PROTECT, related_name="florist_issues")
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default="issue")
+    quantity_stems = models.PositiveIntegerField()
+    reason = models.CharField(max_length=255, blank=True)
+    performed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="florist_stock_issues")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["florist", "batch"])]
+
+    def __str__(self):
+        return f"{self.florist} · {self.batch} · {self.get_kind_display()} {self.quantity_stems}"
+
+
+class FloristStockBalance(TimeStampedModel):
+    """Floristda hozir turgan gul qoldig'i. Chiqarish va qaytarishdan avtomatik yangilanadi."""
+
+    florist = models.ForeignKey("FloristProfile", on_delete=models.CASCADE, related_name="stock_balances")
+    batch = models.ForeignKey("StockBatch", on_delete=models.PROTECT, related_name="florist_balances")
+    remaining_stems = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["florist", "batch"], name="unique_florist_batch_balance")]
+        ordering = ["florist_id", "batch_id"]
+
+    def __str__(self):
+        return f"{self.florist} · {self.batch} · {self.remaining_stems}"
+
+
+class FloristDayOff(TimeStampedModel):
+    """Floristning dam olish kuni."""
+
+    KIND_CHOICES = [("weekend", "Dam kuni"), ("vacation", "Ta'til"), ("sick", "Kasallik"), ("other", "Boshqa")]
+    florist = models.ForeignKey("FloristProfile", on_delete=models.CASCADE, related_name="days_off")
+    work_date = models.DateField()
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default="weekend")
+    is_paid = models.BooleanField(default=False)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_days_off")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["florist", "work_date"], name="unique_florist_day_off")]
+        ordering = ["-work_date", "-id"]
+
+    def __str__(self):
+        return f"{self.florist} · {self.work_date}"
+
+
+class FloristFaceSample(TimeStampedModel):
+    """Floristni yuzidan tanish uchun saqlangan namuna."""
+
+    florist = models.ForeignKey("FloristProfile", on_delete=models.CASCADE, related_name="face_samples")
+    image_url = models.URLField(blank=True)
+    descriptor = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_face_samples")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
 class FloristSalaryEntry(TimeStampedModel):
     SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("daily", "Kunlik"), ("manual", "Qo‘lda")]
     florist = models.ForeignKey(FloristProfile, on_delete=models.CASCADE, related_name="salary_entries")

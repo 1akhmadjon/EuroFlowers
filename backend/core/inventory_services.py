@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, CatalogHistory, CatalogItem, FloristSalaryEntry, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+from .models import AuditLog, CatalogHistory, CatalogItem, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
 
 
 def money(value):
@@ -184,6 +184,101 @@ def ensure_catalog_materials_available(item, quantity=None):
         raise ValueError("Katalog uchun yetarli material qoldig‘i yo‘q: " + "; ".join(shortages))
 
 
+
+def florist_balance_row(florist, batch, lock=False):
+    queryset = FloristStockBalance.objects.select_for_update() if lock else FloristStockBalance.objects
+    row = queryset.filter(florist=florist, batch=batch).first()
+    if row:
+        return row
+    return FloristStockBalance.objects.create(florist=florist, batch=batch, remaining_stems=0)
+
+
+def issue_stock_to_florist(florist, batch, quantity_stems, reason="", user=None):
+    """Skladdan floristga gul chiqaradi. Sklad qoldig'i kamayadi, floristda ko'payadi."""
+    quantity_stems = int(quantity_stems or 0)
+    if quantity_stems < 1:
+        raise ValueError("Chiqariladigan gul soni 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        batch = StockBatch.objects.select_for_update().get(pk=batch.pk)
+        if batch.remaining_stems < quantity_stems:
+            raise ValueError(f"{batch.batch_number} partiyasida atigi {batch.remaining_stems} dona qolgan")
+        batch.remaining_stems -= quantity_stems
+        batch.save(update_fields=["remaining_stems", "updated_at"])
+        balance = florist_balance_row(florist, batch, lock=True)
+        balance.remaining_stems += quantity_stems
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+        issue = FloristStockIssue.objects.create(
+            florist=florist, batch=batch, kind="issue", quantity_stems=quantity_stems,
+            reason=reason, performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        StockMovement.objects.create(
+            batch=batch, movement_type="out", quantity_stems=-quantity_stems,
+            quantity_bunches=Decimal(quantity_stems) / Decimal(batch.stems_per_bunch or 1),
+            reference_type="florist_issue", reference_id=issue.id,
+            reason=reason or f"{florist} ga chiqarildi",
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+    return issue
+
+
+def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=None, kind="return"):
+    """Floristdan gulni skladga qaytaradi yoki chiqitga chiqaradi."""
+    quantity_stems = int(quantity_stems or 0)
+    if quantity_stems < 1:
+        raise ValueError("Qaytariladigan gul soni 1 dan kam bo‘lmasligi kerak")
+    if kind not in ["return", "waste"]:
+        raise ValueError("Noto‘g‘ri amal turi")
+    with transaction.atomic():
+        batch = StockBatch.objects.select_for_update().get(pk=batch.pk)
+        balance = florist_balance_row(florist, batch, lock=True)
+        if balance.remaining_stems < quantity_stems:
+            raise ValueError(f"{florist} qo‘lida bu guldan atigi {balance.remaining_stems} dona bor")
+        balance.remaining_stems -= quantity_stems
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+        if kind == "return":
+            batch.remaining_stems += quantity_stems
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+        issue = FloristStockIssue.objects.create(
+            florist=florist, batch=batch, kind=kind, quantity_stems=quantity_stems,
+            reason=reason, performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        StockMovement.objects.create(
+            batch=batch,
+            movement_type="in" if kind == "return" else "waste",
+            quantity_stems=quantity_stems if kind == "return" else -quantity_stems,
+            quantity_bunches=Decimal(quantity_stems) / Decimal(batch.stems_per_bunch or 1),
+            reference_type=f"florist_{kind}", reference_id=issue.id,
+            reason=reason or (f"{florist} qaytardi" if kind == "return" else f"{florist} chiqitga chiqardi"),
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+    return issue
+
+
+def consume_florist_stock(florist, rows, quantity, reason="", user=None):
+    """Katalog yasalganda floristning qo'lidagi guldan minus qiladi."""
+    shortages = []
+    balances = {}
+    for row in rows:
+        needed = row.quantity_stems * quantity
+        balance = florist_balance_row(florist, row.stock_batch, lock=True)
+        if balance.remaining_stems < needed:
+            shortages.append(f"{row.stock_batch.batch_number} ({balance.remaining_stems} dona bor, {needed} kerak)")
+        balances[row.id] = (balance, needed)
+    if shortages:
+        raise ValueError(f"{florist} qo‘lida yetarli gul yo‘q: " + ", ".join(shortages))
+    for balance, needed in balances.values():
+        balance.remaining_stems -= needed
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+
+
+def restore_florist_stock(florist, rows, quantity):
+    """Katalog bekor qilinganda gulni floristning qo'liga qaytaradi."""
+    for row in rows:
+        balance = florist_balance_row(florist, row.stock_batch, lock=True)
+        balance.remaining_stems += row.quantity_stems * quantity
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+
+
 def deduct_catalog_inventory(item, user, quantity=None):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
@@ -194,11 +289,30 @@ def deduct_catalog_inventory(item, user, quantity=None):
             raise ValueError("Katalog sklad qoldig‘i umumiy katalog sonidan oshib ketdi")
         rows = list(item.composition.select_related("stock_batch").select_for_update())
         material_rows = list(item.materials.select_related("packaging").select_for_update())
-        stock_shortages = [row for row in rows if row.stock_batch.remaining_stems < row.quantity_stems * quantity]
         material_shortages = [row for row in material_rows if row.packaging.quantity < row.quantity * quantity]
-        if stock_shortages or material_shortages:
-            parts = [row.stock_batch.batch_number for row in stock_shortages] + [row.packaging.name_uz for row in material_shortages]
-            raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + ", ".join(parts))
+        if material_shortages:
+            raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + ", ".join(row.packaging.name_uz for row in material_shortages))
+        # Florist tanlangan bo'lsa gul skladdan emas, floristning qo'lidagi qoldiqdan olinadi.
+        if item.florist_id and rows:
+            consume_florist_stock(item.florist, rows, quantity, user=user)
+            item.quantity_stock_deducted += quantity
+            item.stock_deducted_at = timezone.now()
+            item.save(update_fields=["quantity_stock_deducted", "stock_deducted_at", "updated_at"])
+            for row in material_rows:
+                packaging = row.packaging
+                units = row.quantity * quantity
+                packaging.quantity -= units
+                packaging.save(update_fields=["quantity", "updated_at"])
+                PackagingMovement.objects.create(
+                    packaging=packaging, movement_type="out", quantity=-units,
+                    reference_type="catalog_item", reference_id=item.id,
+                    reason=f"{item.name_uz} uchun ishlatildi",
+                    performed_by=user if getattr(user, "is_authenticated", False) else None,
+                )
+            return item
+        stock_shortages = [row for row in rows if row.stock_batch.remaining_stems < row.quantity_stems * quantity]
+        if stock_shortages:
+            raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + ", ".join(row.stock_batch.batch_number for row in stock_shortages))
         for row in rows:
             batch = row.stock_batch
             stems = row.quantity_stems * quantity
@@ -246,6 +360,9 @@ def restore_catalog_inventory(item, user, quantity=None):
             return item
         rows = list(item.composition.select_related("stock_batch").select_for_update())
         material_rows = list(item.materials.select_related("packaging").select_for_update())
+        if item.florist_id and rows:
+            restore_florist_stock(item.florist, rows, quantity)
+            rows = []
         for row in rows:
             batch = row.stock_batch
             stems = row.quantity_stems * quantity

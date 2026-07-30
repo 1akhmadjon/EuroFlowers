@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -312,6 +312,112 @@ class FloristAttendanceSerializer(serializers.ModelSerializer):
                 if value not in [None, ""]:
                     data[field] = str(Decimal(str(value)).quantize(Decimal("0.0000000001")))
         return super().to_internal_value(data)
+
+
+class FloristStockIssueSerializer(serializers.ModelSerializer):
+    florist_name = serializers.SerializerMethodField(read_only=True)
+    batch_detail = serializers.SerializerMethodField(read_only=True)
+    kind_label = serializers.SerializerMethodField(read_only=True)
+    performed_by_detail = UserSerializer(source="performed_by", read_only=True)
+
+    class Meta:
+        model = FloristStockIssue
+        fields = "__all__"
+        read_only_fields = ["performed_by"]
+
+    @extend_schema_field(serializers.CharField())
+    def get_florist_name(self, obj):
+        return str(obj.florist)
+
+    @extend_schema_field(serializers.CharField())
+    def get_kind_label(self, obj):
+        return obj.get_kind_display()
+
+    @extend_schema_field(serializers.DictField())
+    def get_batch_detail(self, obj):
+        batch = obj.batch
+        variant = batch.variant
+        return {
+            "id": batch.id,
+            "batch_number": batch.batch_number,
+            "flower": variant.flower.name_uz,
+            "variant": variant.name_uz,
+            "color": variant.color_uz,
+            "height_label": batch.height_label,
+            "image_url": batch.image_url or variant.image_url or variant.flower.image_url or "",
+            "cost_per_stem": str(batch.cost_per_stem),
+        }
+
+
+class FloristStockBalanceSerializer(serializers.ModelSerializer):
+    florist_name = serializers.SerializerMethodField(read_only=True)
+    batch_detail = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = FloristStockBalance
+        fields = "__all__"
+
+    @extend_schema_field(serializers.CharField())
+    def get_florist_name(self, obj):
+        return str(obj.florist)
+
+    @extend_schema_field(serializers.DictField())
+    def get_batch_detail(self, obj):
+        batch = obj.batch
+        variant = batch.variant
+        return {
+            "id": batch.id,
+            "batch_number": batch.batch_number,
+            "flower": variant.flower.name_uz,
+            "variant": variant.name_uz,
+            "color": variant.color_uz,
+            "height_label": batch.height_label,
+            "image_url": batch.image_url or variant.image_url or variant.flower.image_url or "",
+            "cost_per_stem": str(batch.cost_per_stem),
+            "stems_per_bunch": batch.stems_per_bunch,
+        }
+
+
+class FloristStockIssueRequestSerializer(serializers.Serializer):
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    quantity_stems = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class FloristStockReturnRequestSerializer(FloristStockIssueRequestSerializer):
+    kind = serializers.ChoiceField(choices=["return", "waste"], required=False, default="return")
+
+
+class FloristDayOffSerializer(serializers.ModelSerializer):
+    florist_name = serializers.SerializerMethodField(read_only=True)
+    kind_label = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = FloristDayOff
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.CharField())
+    def get_florist_name(self, obj):
+        return str(obj.florist)
+
+    @extend_schema_field(serializers.CharField())
+    def get_kind_label(self, obj):
+        return obj.get_kind_display()
+
+
+class FloristFaceSampleSerializer(serializers.ModelSerializer):
+    florist_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = FloristFaceSample
+        fields = ["id", "florist", "florist_name", "image_url", "is_active", "created_at", "updated_at"]
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.CharField())
+    def get_florist_name(self, obj):
+        return str(obj.florist)
 
 
 class FloristSalaryEntrySerializer(serializers.ModelSerializer):
