@@ -1261,10 +1261,10 @@ class AccountingReportView(APIView):
 class CatalogItemViewSet(ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
-    queryset = CatalogItem.objects.select_related("social_post", "florist__user").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
+    queryset = CatalogItem.objects.select_related("social_post", "florist__user", "customer").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
     serializer_class = CatalogItemSerializer
-    filterset_fields = ["status", "arrangement_type"]
-    search_fields = ["name_uz", "description_uz", "description_ru"]
+    filterset_fields = ["status", "arrangement_type", "catalog_kind", "florist", "customer"]
+    search_fields = ["name_uz", "description_uz", "description_ru", "customer__name", "customer__phone"]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)

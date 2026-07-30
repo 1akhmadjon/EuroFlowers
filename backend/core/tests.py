@@ -1126,6 +1126,55 @@ class ApiTests(TestCase):
         FloristAttendance.objects.create(florist=profile, work_date="2026-07-20")
         return profile
 
+    def test_catalog_item_can_be_created_without_customer(self):
+        response = self.client.post("/api/catalog/", {"name_uz": "Mijozsiz buket", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(response.data["customer"])
+        self.assertIsNone(response.data["customer_detail"])
+
+    def test_catalog_item_can_attach_existing_customer(self):
+        customer = Customer.objects.create(name="Ahmad", phone="+998901112233", instagram_user_id="ig-cat-1")
+        response = self.client.post("/api/catalog/", {"name_uz": "Ahmad buketi", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "customer": customer.id}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["customer"], customer.id)
+        self.assertEqual(response.data["customer_detail"]["name"], "Ahmad")
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_catalog_item_creates_new_customer_from_name_and_phone(self):
+        response = self.client.post("/api/catalog/", {"name_uz": "Yangi mijoz buketi", "arrangement_type": "basket", "catalog_kind": "custom", "price": "450000", "quantity_total": 1, "customer_name": "Dilnoza", "customer_phone": "901119988"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        customer = Customer.objects.get(name="Dilnoza")
+        self.assertEqual(customer.phone, "+998901119988")
+        self.assertTrue(customer.instagram_user_id.startswith("manual:"))
+        self.assertEqual(response.data["customer_detail"]["phone"], "+998901119988")
+
+    def test_catalog_item_reuses_customer_by_phone(self):
+        existing = Customer.objects.create(name="", phone="+998901119988", instagram_user_id="ig-cat-2")
+        response = self.client.post("/api/catalog/", {"name_uz": "Takror mijoz", "arrangement_type": "bouquet", "price": "200000", "quantity_total": 1, "status": "available", "customer_name": "Dilnoza", "customer_phone": "+998901119988"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["customer"], existing.id)
+        existing.refresh_from_db()
+        self.assertEqual(existing.name, "Dilnoza")
+        self.assertEqual(Customer.objects.count(), 1)
+
+    def test_catalog_item_customer_can_be_changed_and_cleared(self):
+        first = Customer.objects.create(name="Birinchi", phone="+998901110001", instagram_user_id="ig-cat-3")
+        item = CatalogItem.objects.create(name_uz="O‘zgaruvchi", arrangement_type="bouquet", price=Decimal("200000"), quantity_total=1, status="available", customer=first)
+        changed = self.client.patch(f"/api/catalog/{item.id}/", {"customer_name": "Ikkinchi", "customer_phone": "901110002"}, format="json")
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.data["customer_detail"]["name"], "Ikkinchi")
+        cleared = self.client.patch(f"/api/catalog/{item.id}/", {"customer": None}, format="json")
+        self.assertEqual(cleared.status_code, 200)
+        self.assertIsNone(cleared.data["customer"])
+
+    def test_catalog_can_be_filtered_by_customer(self):
+        customer = Customer.objects.create(name="Filtr", phone="+998901110003", instagram_user_id="ig-cat-4")
+        CatalogItem.objects.create(name_uz="Filtr buketi", arrangement_type="bouquet", price=Decimal("200000"), quantity_total=1, status="available", customer=customer)
+        CatalogItem.objects.create(name_uz="Boshqa", arrangement_type="bouquet", price=Decimal("200000"), quantity_total=1, status="available")
+        response = self.client.get(f"/api/catalog/?customer={customer.id}")
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["name_uz"], "Filtr buketi")
+
     def test_florist_stats_endpoint_returns_full_breakdown(self):
         profile = self._florist_with_history()
         response = self.client.get(f"/api/florists/{profile.id}/stats/")

@@ -348,6 +348,7 @@ class CatalogItem(TimeStampedModel):
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti")])
     catalog_kind = models.CharField(max_length=20, choices=CATALOG_KIND_CHOICES, default="standard")
     volume = models.CharField(max_length=80, blank=True)
+    customer = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     height_cm = models.PositiveIntegerField(null=True, blank=True)
     diameter_cm = models.PositiveIntegerField(null=True, blank=True)

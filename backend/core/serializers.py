@@ -862,11 +862,28 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     history = CatalogHistorySerializer(many=True, read_only=True)
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    customer_detail = serializers.SerializerMethodField(read_only=True)
+    customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
+    customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False, write_only=True)
     class Meta:
         model = CatalogItem
         fields = "__all__"
         read_only_fields = ["created_by", "sold_at", "stock_deducted_at", "calculated_component_price", "discount_amount", "discount_percent"]
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_customer_detail(self, obj):
+        if not obj.customer_id:
+            return None
+        customer = obj.customer
+        return {
+            "id": customer.id,
+            "name": customer.name,
+            "phone": customer.phone,
+            "masked_phone": customer.masked_phone,
+            "instagram_username": customer.instagram_username,
+            "instagram_user_id": customer.instagram_user_id,
+        }
 
     def validate(self, attrs):
         composition = attrs.get("composition")
@@ -910,6 +927,11 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, sync_catalog_financials, sync_catalog_florist_salary
         payment_type = validated_data.pop("payment_type", "")
+        validated_data["customer"] = resolve_or_create_customer(
+            customer=validated_data.pop("customer", None),
+            name=validated_data.pop("customer_name", ""),
+            phone=validated_data.pop("customer_phone", ""),
+        )
         composition = normalize_catalog_composition_rows(validated_data.pop("composition", []))
         materials = normalize_catalog_material_rows(validated_data.pop("materials", []))
         validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
@@ -946,6 +968,15 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
         payment_type = validated_data.pop("payment_type", "")
+        customer_name = validated_data.pop("customer_name", "")
+        customer_phone = validated_data.pop("customer_phone", "")
+        if "customer" in validated_data or customer_name or customer_phone:
+            resolved = resolve_or_create_customer(
+                customer=validated_data.pop("customer", None),
+                name=customer_name,
+                phone=customer_phone,
+            )
+            validated_data["customer"] = resolved
         old_florist_id = instance.florist_id
         composition = validated_data.pop("composition", None)
         materials = validated_data.pop("materials", None)
@@ -1010,6 +1041,36 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         if item.social_post_id and item.image_url and item.social_post.image_url != item.image_url:
             item.social_post.image_url = item.image_url
             item.social_post.save(update_fields=["image_url", "updated_at"])
+
+
+def resolve_or_create_customer(customer=None, name="", phone="", external_id=""):
+    """Mijozni topadi yoki yaratadi. Tayyor customer berilsa o'shani qaytaradi.
+    Telefon bo'yicha mavjud mijoz topilsa yangi yaratmaydi, ismini to'ldiradi."""
+    if customer:
+        return customer
+    from .services import normalize_phone
+    name = (name or "").strip()
+    normalized = normalize_phone(phone) or (phone or "").strip()
+    if not normalized and not name and not external_id:
+        return None
+    existing = Customer.objects.filter(phone=normalized).first() if normalized else None
+    if not existing and external_id:
+        existing = Customer.objects.filter(instagram_user_id=external_id).first()
+    if existing:
+        updates = []
+        if name and not existing.name:
+            existing.name = name[:160]
+            updates.append("name")
+        if normalized and not existing.phone:
+            existing.phone = normalized
+            updates.append("phone")
+        if updates:
+            existing.save(update_fields=updates + ["updated_at"])
+        return existing
+    external = external_id or f"manual:{normalized or name}"
+    if Customer.objects.filter(instagram_user_id=external).exists():
+        external = f"{external}:{timezone.now().timestamp():.0f}"
+    return Customer.objects.create(name=name[:160], phone=normalized, language="uz", instagram_user_id=external)
 
 
 class CustomerSerializer(serializers.ModelSerializer):
@@ -1154,26 +1215,12 @@ class LeadSerializer(serializers.ModelSerializer):
         return attrs
 
     def _customer_from_attrs(self, attrs):
-        customer = attrs.pop("customer", None)
-        name = attrs.pop("customer_name", "")
-        phone = attrs.pop("customer_phone", "")
-        external_id = attrs.pop("customer_instagram_user_id", "")
-        if customer:
-            return customer
-        from .services import normalize_phone
-        normalized = normalize_phone(phone) or phone
-        customer = Customer.objects.filter(phone=normalized).first() if normalized else None
-        if customer:
-            updates = []
-            if name and not customer.name:
-                customer.name = name
-                updates.append("name")
-            if updates:
-                customer.save(update_fields=updates + ["updated_at"])
-            return customer
-        external = external_id or f"manual:{normalized or name}"
-        customer = Customer.objects.create(name=name, phone=normalized, language="uz", instagram_user_id=external)
-        return customer
+        return resolve_or_create_customer(
+            customer=attrs.pop("customer", None),
+            name=attrs.pop("customer_name", ""),
+            phone=attrs.pop("customer_phone", ""),
+            external_id=attrs.pop("customer_instagram_user_id", ""),
+        )
 
     def _save_usage(self, lead, stock_rows=None, packaging_rows=None, catalog_rows=None):
         if stock_rows is not None:
