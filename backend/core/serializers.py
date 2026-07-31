@@ -666,19 +666,36 @@ class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["quantity_sold", "quantity_stock_deducted", "calculated_component_price", "discount_amount", "discount_percent"]
 
 
-def catalog_stock_error(batch, needed):
-    remaining = batch.remaining_stems
+def catalog_stock_error(batch, needed, florist=None):
+    """Florist tanlangan bo'lsa gul uning qo'lidagi qoldiqdan olinadi, skladdan emas."""
+    if florist is not None:
+        row = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
+        remaining = row.remaining_stems if row else 0
+        source = f"{florist} qo‘lida"
+        header = "Katalogni saqlash uchun floristdagi gul yetarli emas."
+    else:
+        remaining = batch.remaining_stems
+        source = "Skladda"
+        header = "Katalogni saqlash uchun sklad qoldig'i yetarli emas."
     missing = max(needed - remaining, 0)
     variant = batch.variant
     flower_name = " ".join(part for part in [variant.flower.name_uz, variant.name_uz, variant.color_uz] if part).strip()
     return (
-        "Katalogni saqlash uchun sklad qoldig'i yetarli emas.\n"
+        f"{header}\n"
         f"Gul: {flower_name}\n"
         f"Partiya: {batch.batch_number}\n"
         f"Kerak: {needed} dona\n"
-        f"Bor: {remaining} dona\n"
+        f"{source}: {remaining} dona\n"
         f"Yetmayapti: {missing} dona"
     )
+
+
+def catalog_stock_available(batch, needed, florist=None):
+    """Katalog uchun gul yetadimi. Florist tanlangan bo'lsa uning qoldig'i qaraladi."""
+    if florist is not None:
+        row = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
+        return (row.remaining_stems if row else 0) >= needed
+    return batch.remaining_stems >= needed
 
 
 def catalog_material_error(packaging, needed):
@@ -893,11 +910,12 @@ class SocialPostSerializer(serializers.ModelSerializer):
     def _validate_catalog_items(self, post_data, catalog_items):
         for item in catalog_items:
             quantity_total = item.get("quantity_total", 1)
+            florist = item.get("florist")
             for row in item.get("composition") or []:
                 batch = row["stock_batch"]
                 needed = row["quantity_stems"] * quantity_total
-                if batch.remaining_stems < needed:
-                    detail = catalog_stock_error(batch, needed)
+                if not catalog_stock_available(batch, needed, florist):
+                    detail = catalog_stock_error(batch, needed, florist)
                     raise DetailValidationError(detail)
             for row in item.get("materials") or []:
                 packaging = row["packaging"]
@@ -1117,11 +1135,12 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         elif materials is not None:
             materials = normalize_catalog_material_rows(materials)
         if composition and not self.instance:
+            florist = attrs.get("florist")
             for row in composition:
                 batch = row["stock_batch"]
                 needed = row["quantity_stems"] * quantity_total
-                if batch.remaining_stems < needed:
-                    detail = catalog_stock_error(batch, needed)
+                if not catalog_stock_available(batch, needed, florist):
+                    detail = catalog_stock_error(batch, needed, florist)
                     raise DetailValidationError(detail)
         if materials and not self.instance:
             for row in materials:

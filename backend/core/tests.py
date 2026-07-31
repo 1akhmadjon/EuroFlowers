@@ -2464,6 +2464,33 @@ class ApiTests(TestCase):
         self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [25, 25, 25])
         self.assertEqual(self._balance(profile), 0)
 
+    def test_florist_catalog_checks_florist_balance_not_warehouse(self):
+        # gul floristning qo'liga chiqarilgach skladda qolmaydi, lekin katalog qo'shilishi kerak
+        user = User.objects.create_user("fl-empty-warehouse", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 0)
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Sklad bo‘sh buket", "arrangement_type": "bouquet", "florist": profile.id,
+            "price": "500000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 25}],
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 75)
+
+    def test_florist_catalog_rejected_when_florist_has_too_few(self):
+        user = User.objects.create_user("fl-short", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 10}, format="json")
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Ko‘p gulli buket", "arrangement_type": "bouquet", "florist": profile.id,
+            "price": "500000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 25}],
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("floristdagi gul yetarli emas", response.data["detail"])
+
     def test_stock_batch_number_can_repeat(self):
         # bir xil raqamli partiyalar turli gul va turli kunlarda kelaveradi
         flower = Flower.objects.create(name_uz="Xrizantema API", slug="xrizantema-api")
