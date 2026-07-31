@@ -705,6 +705,12 @@ class StockBatchSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if not self.instance:
+            # narxni pochkada ham, donada ham berish mumkin, lekin biri bo'lishi shart
+            if attrs.get("cost_per_stem") is None and not attrs.get("cost_per_bunch"):
+                raise serializers.ValidationError({"cost_per_bunch": "Pochka tannarxini yoki dona tannarxini kiriting"})
+            if attrs.get("sale_price_per_stem") is None and attrs.get("sale_price_per_bunch") is None:
+                raise serializers.ValidationError({"sale_price_per_bunch": "Pochka sotuv narxini yoki dona sotuv narxini kiriting"})
         height_cm = attrs.get("height_cm") or getattr(self.instance, "height_cm", None)
         height_from = attrs.get("height_from_cm")
         height_to = attrs.get("height_to_cm")

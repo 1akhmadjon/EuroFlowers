@@ -2741,12 +2741,29 @@ class ApiTests(TestCase):
         delivery = self.client.post("/api/stock-deliveries/", {"number": "EX-1", "received_at": "2026-08-01"}, format="json").json()
         self.client.post("/api/stock-batches/", {
             "delivery": delivery["id"], "variant": self.batch.variant_id, "height_cm": 50,
-            "stems_per_bunch": 25, "received_stems": 100, "cost_per_bunch": "24950",
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_bunch": "24950", "sale_price_per_bunch": "50000",
         }, format="json")
         detail = self.client.get(f"/api/stock-deliveries/{delivery['id']}/")
         self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("100000.00"))
         self.assertEqual(Decimal(detail.data["total_cost_exact"]), Decimal("99800.00"))
         self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("200.00"))
+
+    def test_batch_without_any_price_is_rejected(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "NOPRICE-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 25,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cost_per_bunch", response.data)
+
+    def test_batch_without_sale_price_is_rejected(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "NOPRICE-2", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 25, "cost_per_bunch": "25000",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("sale_price_per_bunch", response.data)
 
     def test_stem_price_fills_bunch_price_backwards(self):
         response = self.client.post("/api/stock-batches/", {
