@@ -141,8 +141,31 @@ class SupplierPayment(TimeStampedModel):
         return f"{self.supplier} · {self.amount}"
 
 
+class StockDelivery(TimeStampedModel):
+    """Partiya — bitta kelgan yuk. Ichiga turli gullar qo'shiladi.
+
+    Postavshik va sana partiyada bir marta yoziladi, ichidagi gullar shuni oladi.
+    """
+
+    number = models.CharField(max_length=40)
+    received_at = models.DateField(default=timezone.localdate)
+    supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="deliveries")
+    note = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_deliveries")
+
+    class Meta:
+        ordering = ["-received_at", "-id"]
+        indexes = [models.Index(fields=["number"])]
+        verbose_name_plural = "Stock deliveries"
+
+    def __str__(self):
+        return f"{self.number} · {self.received_at}"
+
+
 class StockBatch(TimeStampedModel):
     variant = models.ForeignKey(FlowerVariant, on_delete=models.PROTECT, related_name="batches")
+    delivery = models.ForeignKey(StockDelivery, null=True, blank=True, on_delete=models.PROTECT, related_name="batches")
     supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_batches")
     batch_number = models.CharField(max_length=40)
     received_at = models.DateField(default=timezone.localdate)
@@ -152,6 +175,7 @@ class StockBatch(TimeStampedModel):
     stems_per_bunch = models.PositiveIntegerField(default=10)
     received_stems = models.PositiveIntegerField()
     remaining_stems = models.PositiveIntegerField()
+    cost_per_bunch = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     cost_per_stem = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
     sale_price_per_stem = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
     sale_price_per_bunch = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])

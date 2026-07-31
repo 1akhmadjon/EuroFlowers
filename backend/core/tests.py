@@ -13,7 +13,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -2496,6 +2496,89 @@ class ApiTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("floristdagi gul yetarli emas", response.data["detail"])
+
+    def test_delivery_is_created_then_flowers_added_into_it(self):
+        supplier = Supplier.objects.create(name="Golland Flowers")
+        created = self.client.post("/api/stock-deliveries/", {
+            "number": "7", "received_at": "2026-08-01", "supplier": supplier.id, "note": "Chorshanba yuki",
+        }, format="json")
+        self.assertEqual(created.status_code, 201, created.json())
+        delivery_id = created.json()["id"]
+        flower = Flower.objects.create(name_uz="Lola partiya", slug="lola-partiya")
+        first = FlowerVariant.objects.create(flower=flower, name_uz="Qizil nav", color_uz="Qizil")
+        second = FlowerVariant.objects.create(flower=flower, name_uz="Sariq nav", color_uz="Sariq")
+        for variant in [first, second]:
+            response = self.client.post("/api/stock-batches/", {
+                "delivery": delivery_id, "variant": variant.id, "height_cm": 50,
+                "stems_per_bunch": 25, "received_stems": 100,
+                "cost_per_bunch": "250000", "sale_price_per_bunch": "500000",
+            }, format="json")
+            self.assertEqual(response.status_code, 201, response.json())
+            # partiya raqami, sanasi va postavshigi partiyadan olinadi
+            self.assertEqual(response.json()["batch_number"], "7")
+            self.assertEqual(response.json()["received_at"], "2026-08-01")
+            self.assertEqual(response.json()["supplier"], supplier.id)
+        listed = self.client.get(f"/api/stock-deliveries/{delivery_id}/")
+        self.assertEqual(listed.data["batch_count"], 2)
+        self.assertEqual(listed.data["total_stems"], 200)
+        inside = self.client.get(f"/api/stock-deliveries/{delivery_id}/batches/")
+        self.assertEqual(len(inside.data), 2)
+
+    def test_bunch_price_fills_stem_price_automatically(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "AUTO-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 50,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("1000.00"))
+        self.assertEqual(Decimal(response.json()["sale_price_per_stem"]), Decimal("2000.00"))
+
+    def test_stem_price_is_rounded_to_hundred(self):
+        # 24 950 / 25 = 998 -> 1 000,  26 500 / 25 = 1 060 -> 1 100
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "AUTO-2", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 50,
+            "cost_per_bunch": "24950", "sale_price_per_bunch": "26500",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("1000.00"))
+        self.assertEqual(Decimal(response.json()["sale_price_per_stem"]), Decimal("1100.00"))
+        # pochka narxi kiritilgani o'zgarmay saqlanadi
+        self.assertEqual(Decimal(response.json()["cost_per_bunch"]), Decimal("24950.00"))
+
+    def test_stem_price_fills_bunch_price_backwards(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "AUTO-3", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 10, "received_stems": 50,
+            "cost_per_stem": "3000", "sale_price_per_stem": "5000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Decimal(response.json()["cost_per_bunch"]), Decimal("30000.00"))
+        self.assertEqual(Decimal(response.json()["sale_price_per_bunch"]), Decimal("50000.00"))
+
+    def test_batch_without_delivery_gets_one_automatically(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "AUTO-4", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 10, "received_stems": 20,
+            "cost_per_stem": "1000", "sale_price_per_stem": "2000", "sale_price_per_bunch": "20000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertIsNotNone(response.json()["delivery"])
+        self.assertEqual(response.json()["delivery_detail"]["number"], "AUTO-4")
+
+    def test_same_delivery_reused_for_same_number_and_date(self):
+        payload = {
+            "batch_number": "AUTO-5", "variant": self.batch.variant_id, "height_cm": 50,
+            "received_at": "2026-08-01", "stems_per_bunch": 10, "received_stems": 20,
+            "cost_per_stem": "1000", "sale_price_per_stem": "2000", "sale_price_per_bunch": "20000",
+        }
+        one = self.client.post("/api/stock-batches/", payload, format="json")
+        two = self.client.post("/api/stock-batches/", payload, format="json")
+        self.assertEqual(one.status_code, 201)
+        self.assertEqual(two.status_code, 201)
+        self.assertEqual(one.json()["delivery"], two.json()["delivery"])
+        self.assertEqual(StockDelivery.objects.filter(number="AUTO-5").count(), 1)
 
     def test_stock_batch_number_can_repeat(self):
         # bir xil raqamli partiyalar turli gul va turli kunlarda kelaveradi

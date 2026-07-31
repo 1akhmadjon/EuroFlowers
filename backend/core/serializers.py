@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
 from django.db import transaction
@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -511,9 +511,58 @@ class FloristVolumeRateSerializer(serializers.ModelSerializer):
         return str(obj.florist)
 
 
+PRICE_ROUND_STEP = Decimal("100")
+
+
+def round_stem_price(value):
+    """Dona narxini eng yaqin 100 ga yaxlitlaydi: 998 -> 1000, 1060 -> 1100.
+
+    Pochka narxini donaga bo'lganda 998 kabi noqulay son chiqib qoladi,
+    shuning uchun natija yaxlitlanadi.
+    """
+    amount = Decimal(str(value))
+    if amount <= 0:
+        return Decimal("0.00")
+    steps = (amount / PRICE_ROUND_STEP).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return (steps * PRICE_ROUND_STEP).quantize(Decimal("0.01"))
+
+
+class StockDeliverySerializer(serializers.ModelSerializer):
+    """Partiya — avval ochiladi, keyin ichiga gullar qo'shiladi."""
+
+    supplier_detail = SupplierSerializer(source="supplier", read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+    batch_count = serializers.SerializerMethodField()
+    total_stems = serializers.SerializerMethodField()
+    remaining_stems = serializers.SerializerMethodField()
+    total_cost = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StockDelivery
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_batch_count(self, obj):
+        return obj.batches.count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_total_stems(self, obj):
+        return sum(row.received_stems for row in obj.batches.all())
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_remaining_stems(self, obj):
+        return sum(row.remaining_stems for row in obj.batches.all())
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_total_cost(self, obj):
+        return sum((Decimal(row.received_stems) * Decimal(row.cost_per_stem or 0) for row in obj.batches.all()), Decimal("0"))
+
+
 class StockBatchSerializer(serializers.ModelSerializer):
     variant_detail = FlowerVariantSerializer(source="variant", read_only=True)
     supplier_detail = SupplierSerializer(source="supplier", read_only=True)
+    delivery_detail = serializers.SerializerMethodField()
     remaining_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     remaining_bunches_label = serializers.SerializerMethodField()
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
@@ -526,11 +575,47 @@ class StockBatchSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "received_stems": {"required": False},
             "remaining_stems": {"required": False},
+            "batch_number": {"required": False},
+            "cost_per_stem": {"required": False},
+            "sale_price_per_stem": {"required": False},
+            "sale_price_per_bunch": {"required": False},
         }
 
     @extend_schema_field(serializers.CharField())
     def get_remaining_bunches_label(self, obj):
         return f"{obj.remaining_bunches} pochka"
+
+    @extend_schema_field(serializers.DictField())
+    def get_delivery_detail(self, obj):
+        if not obj.delivery_id:
+            return None
+        delivery = obj.delivery
+        return {
+            "id": delivery.id,
+            "number": delivery.number,
+            "received_at": delivery.received_at,
+            "supplier": delivery.supplier.name if delivery.supplier_id else "",
+            "note": delivery.note,
+        }
+
+    def _fill_prices(self, data):
+        """Pochka narxidan dona narxini, dona narxidan pochka narxini to'ldiradi."""
+        stems = data.get("stems_per_bunch") or getattr(self.instance, "stems_per_bunch", None)
+        try:
+            stems = int(stems)
+        except (TypeError, ValueError):
+            return data
+        if stems < 1:
+            return data
+        pairs = [("cost_per_bunch", "cost_per_stem"), ("sale_price_per_bunch", "sale_price_per_stem")]
+        for bunch_key, stem_key in pairs:
+            bunch_value = data.get(bunch_key)
+            stem_value = data.get(stem_key)
+            if bunch_value not in [None, ""] and stem_value in [None, ""]:
+                data[stem_key] = str(round_stem_price(Decimal(str(bunch_value)) / Decimal(stems)))
+            elif stem_value not in [None, ""] and bunch_value in [None, ""]:
+                data[bunch_key] = str((Decimal(str(stem_value)) * Decimal(stems)).quantize(Decimal("0.01")))
+        return data
 
     def to_internal_value(self, data):
         data = data.copy()
@@ -540,6 +625,14 @@ class StockBatchSerializer(serializers.ModelSerializer):
                     data.pop(key)
         if not data.get("height_cm") and data.get("height_from_cm"):
             data["height_cm"] = data["height_from_cm"]
+        delivery = StockDelivery.objects.filter(pk=data.get("delivery")).first() if data.get("delivery") else None
+        if delivery:
+            # partiya raqami, sanasi va postavshigi partiyadan olinadi, qayta so'ralmaydi
+            data["batch_number"] = delivery.number
+            data.setdefault("received_at", delivery.received_at)
+            if delivery.supplier_id and not data.get("supplier"):
+                data["supplier"] = delivery.supplier_id
+        data = self._fill_prices(data)
         if not data.get("received_stems") and data.get("received_bunches") and data.get("stems_per_bunch"):
             data["received_stems"] = int(Decimal(str(data["received_bunches"])) * Decimal(str(data["stems_per_bunch"])))
         if data.get("received_stems") and not data.get("remaining_stems"):
@@ -564,10 +657,27 @@ class StockBatchSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data.pop("received_bunches", None)
+        # Har bir gul partiya ichida turadi. Partiya tanlanmagan bo'lsa
+        # raqam bo'yicha topiladi yoki o'sha zahoti ochiladi.
+        if not validated_data.get("delivery"):
+            number = (validated_data.get("batch_number") or "").strip()
+            if not number:
+                raise serializers.ValidationError({"delivery": "Partiyani tanlang yoki partiya raqamini kiriting"})
+            received_at = validated_data.get("received_at") or timezone.localdate()
+            delivery, _ = StockDelivery.objects.get_or_create(
+                number=number,
+                received_at=received_at,
+                defaults={"supplier": validated_data.get("supplier"), "is_active": True},
+            )
+            validated_data["delivery"] = delivery
+        validated_data["batch_number"] = validated_data["delivery"].number
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
         validated_data.pop("received_bunches", None)
+        delivery = validated_data.get("delivery") or instance.delivery
+        if delivery:
+            validated_data["batch_number"] = delivery.number
         return super().update(instance, validated_data)
 
 
