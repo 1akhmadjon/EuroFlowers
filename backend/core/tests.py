@@ -8,6 +8,7 @@ import zipfile
 from types import SimpleNamespace
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import F
 from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
@@ -2344,6 +2345,9 @@ class ApiTests(TestCase):
         self._leftover_seq = getattr(self, "_leftover_seq", 0) + 1
         user = User.objects.create_user(f"fl-leftover-{self._leftover_seq}", password="p")
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        # bir nechta florist ketma-ket sinalganda skladda gul tugab qolmasin
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + issued)
+        self.batch.refresh_from_db()
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": issued}, format="json")
         made = []
         for index in range(items):
