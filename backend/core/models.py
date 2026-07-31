@@ -161,8 +161,10 @@ class StockBatch(TimeStampedModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["batch_number"], name="unique_batch_number")]
+        # Partiya raqami takrorlanishi mumkin: bir xil raqamli qog'oz partiyalar
+        # turli gul va turli kunlarda kelaveradi.
         ordering = ["received_at", "id"]
+        indexes = [models.Index(fields=["batch_number"])]
 
     @property
     def remaining_bunches(self):

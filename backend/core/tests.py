@@ -2339,6 +2339,30 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["remaining_stems"], 15)
         self.assertEqual(response.json()["remaining_bunches"], "3.00")
 
+    def test_stock_batch_number_can_repeat(self):
+        # bir xil raqamli partiyalar turli gul va turli kunlarda kelaveradi
+        flower = Flower.objects.create(name_uz="Xrizantema API", slug="xrizantema-api")
+        first = FlowerVariant.objects.create(flower=flower, name_uz="Oq", color_uz="Oq")
+        second = FlowerVariant.objects.create(flower=flower, name_uz="Sariq", color_uz="Sariq")
+        payload = {
+            "batch_number": "1",
+            "height_cm": 50,
+            "stems_per_bunch": 5,
+            "received_stems": 20,
+            "cost_per_stem": "10000.00",
+            "sale_price_per_stem": "20000.00",
+            "sale_price_per_bunch": "100000.00",
+        }
+        one = self.client.post("/api/stock-batches/", {**payload, "variant": first.id}, format="json")
+        self.assertEqual(one.status_code, 201, one.json())
+        two = self.client.post("/api/stock-batches/", {**payload, "variant": second.id}, format="json")
+        self.assertEqual(two.status_code, 201, two.json())
+        self.assertEqual(StockBatch.objects.filter(batch_number="1").count(), 2)
+        # ayni gulga ayni raqam bilan yana qo'shsa ham to'sib qo'yilmaydi
+        three = self.client.post("/api/stock-batches/", {**payload, "variant": first.id}, format="json")
+        self.assertEqual(three.status_code, 201, three.json())
+        self.assertEqual(StockBatch.objects.filter(batch_number="1").count(), 3)
+
     @override_settings(OPENAI_API_KEY="")
     def test_mini_app_custom_quote_ai_returns_final_price_note(self):
         BusinessSettings.objects.update_or_create(pk=1, defaults={"default_florist_fee": Decimal("50000")})
