@@ -394,6 +394,34 @@ class FloristStockReturnRequestSerializer(FloristStockIssueRequestSerializer):
     kind = serializers.ChoiceField(choices=["return", "waste"], required=False, default="return")
 
 
+class FloristLeftoverRequestSerializer(serializers.Serializer):
+    """Florist standartdan farqli gul ishlatganda hisobni to'g'rilash so'rovi."""
+
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    batch = serializers.PrimaryKeyRelatedField(
+        queryset=StockBatch.objects.all(), required=False, allow_null=True,
+        help_text="to_catalog da berilmasa hamma qoldiq bo‘linadi. to_florist da majburiy.",
+    )
+    direction = serializers.ChoiceField(
+        choices=[("to_catalog", "Qoldiqni katalogga bo‘lish"), ("to_florist", "Katalogdan floristga qaytarish")],
+        required=False, default="to_catalog",
+        help_text="to_catalog — florist ko‘proq ishlatgan. to_florist — kamroq ishlatgan.",
+    )
+    quantity_stems = serializers.IntegerField(
+        required=False, min_value=1,
+        help_text="Faqat to_florist uchun: katalogdan kamaytirib floristga qaytariladigan gul soni.",
+    )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if attrs.get("direction", "to_catalog") == "to_florist":
+            if not attrs.get("batch"):
+                raise serializers.ValidationError({"batch": "Katalogdan qaytarishda partiyani tanlash kerak"})
+            if not attrs.get("quantity_stems"):
+                raise serializers.ValidationError({"quantity_stems": "Qaytariladigan gul sonini kiriting"})
+        return attrs
+
+
 class FloristDayOffSerializer(serializers.ModelSerializer):
     florist_name = serializers.SerializerMethodField(read_only=True)
     kind_label = serializers.SerializerMethodField(read_only=True)

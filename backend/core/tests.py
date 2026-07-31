@@ -2339,6 +2339,131 @@ class ApiTests(TestCase):
         self.assertEqual(response.json()["remaining_stems"], 15)
         self.assertEqual(response.json()["remaining_bunches"], "3.00")
 
+    def _florist_with_leftover(self, issued=100, per_item=25, items=3, quantity_total=1):
+        """Skladdan gul olib, standart bo'yicha katalog yasagan florist."""
+        user = User.objects.create_user(f"fl-leftover-{items}-{per_item}-{quantity_total}", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": issued}, format="json")
+        made = []
+        for index in range(items):
+            response = self.client.post("/api/catalog/", {
+                "name_uz": f"Buket {index + 1}", "arrangement_type": "bouquet", "volume": "M",
+                "florist": profile.id, "price": "500000", "quantity_total": quantity_total, "status": "available",
+                "composition": [{"stock_batch": self.batch.id, "quantity_stems": per_item}],
+            }, format="json")
+            self.assertEqual(response.status_code, 201, response.json())
+            made.append(CatalogItem.objects.get(id=response.json()["id"]))
+        return profile, made
+
+    def _balance(self, profile):
+        row = FloristStockBalance.objects.filter(florist=profile, batch=self.batch).first()
+        return row.remaining_stems if row else 0
+
+    def test_leftover_splits_evenly_into_catalog_items(self):
+        # 100 dona olindi, standart 25 dan 3 ta buket = 75. Qolgani 25, uchga bo'linsa 8+8+9
+        profile, made = self._florist_with_leftover(issued=100, per_item=25, items=3)
+        self.assertEqual(self._balance(profile), 25)
+        response = self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self._balance(profile), 0)
+        stems = sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True))
+        self.assertEqual(stems, [33, 33, 34])
+        self.assertEqual(sum(stems), 100)
+
+    def test_leftover_gives_extra_to_one_item_when_not_divisible(self):
+        # 90 olindi, 25 dan 3 ta = 75, qolgani 15 -> 5+5+5 teng bo'linadi
+        profile, made = self._florist_with_leftover(issued=90, per_item=25, items=3)
+        self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id}, format="json")
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [30, 30, 30])
+        # 92 olinganda qolgani 17 -> 5+6+6, kimdir bittaga ko'p oladi
+        profile2, made2 = self._florist_with_leftover(issued=92, per_item=25, items=3, quantity_total=1)
+        self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile2.id}, format="json")
+        stems = sorted(CatalogComposition.objects.filter(catalog_item__in=made2).values_list("quantity_stems", flat=True))
+        self.assertEqual(stems, [30, 31, 31])
+        self.assertEqual(sum(stems), 92)
+        self.assertEqual(self._balance(profile2), 0)
+
+    def test_leftover_counts_units_not_items(self):
+        # 2 donadan 2 ta katalog = 4 dona. 100 - (25*4) = 0 qoldiq, keyin qo'shimcha chiqarib ko'ramiz
+        profile, made = self._florist_with_leftover(issued=100, per_item=25, items=2, quantity_total=2)
+        self.assertEqual(self._balance(profile), 0)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 8}, format="json")
+        self.assertEqual(self._balance(profile), 8)
+        self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id}, format="json")
+        # 4 dona buket, 8 gul -> har donaga +2, ya'ni tarkib 25 -> 27
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [27, 27])
+        self.assertEqual(self._balance(profile), 0)
+
+    def test_leftover_raises_costs_including_sold_items(self):
+        profile, made = self._florist_with_leftover(issued=100, per_item=25, items=3)
+        mark_catalog_sold(made[0], self.user)
+        before = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price
+        self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id}, format="json")
+        after = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price
+        self.assertGreater(after, before)
+        # hisob-kitobdagi tannarx ham o'sadi
+        report = self.client.get("/api/accounting/")
+        self.assertGreater(Decimal(report.data["summary"]["cost_total"]), Decimal("0"))
+
+    def test_leftover_blocked_when_no_catalog_uses_the_flower(self):
+        user = User.objects.create_user("fl-no-catalog", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 10}, format="json")
+        response = self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("katalog topilmadi", response.data["detail"])
+        self.assertEqual(self._balance(profile), 10)
+
+    def test_adjust_preview_changes_nothing(self):
+        profile, made = self._florist_with_leftover(issued=100, per_item=25, items=3)
+        response = self.client.get(f"/api/florist-stock-balances/adjust-preview/?florist={profile.id}")
+        self.assertEqual(response.status_code, 200)
+        row = response.data["batches"][0]
+        self.assertEqual(row["florist_stems_now"], 25)
+        self.assertEqual(sorted(item["change_per_item"] for item in row["items"]), [8, 8, 9])
+        self.assertEqual(self._balance(profile), 25)
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [25, 25, 25])
+
+    def test_reverse_returns_stems_from_catalog_to_florist(self):
+        # standart 25 edi, florist 23 tadan ishlatgan: 3 buketdan 6 dona ortdi
+        profile, made = self._florist_with_leftover(issued=75, per_item=25, items=3)
+        self.assertEqual(self._balance(profile), 0)
+        response = self.client.post("/api/florist-stock-balances/adjust/", {
+            "florist": profile.id, "batch": self.batch.id, "direction": "to_florist", "quantity_stems": 6,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [23, 23, 23])
+        self.assertEqual(self._balance(profile), 6)
+
+    def test_reverse_lowers_catalog_cost(self):
+        profile, made = self._florist_with_leftover(issued=75, per_item=25, items=3)
+        before = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price
+        self.client.post("/api/florist-stock-balances/adjust/", {
+            "florist": profile.id, "batch": self.batch.id, "direction": "to_florist", "quantity_stems": 6,
+        }, format="json")
+        after = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price
+        self.assertLess(after, before)
+
+    def test_reverse_requires_batch_and_quantity(self):
+        profile, _ = self._florist_with_leftover(issued=75, per_item=25, items=3)
+        no_batch = self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id, "direction": "to_florist", "quantity_stems": 3}, format="json")
+        self.assertEqual(no_batch.status_code, 400)
+        self.assertIn("batch", no_batch.data)
+        no_quantity = self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id, "batch": self.batch.id, "direction": "to_florist"}, format="json")
+        self.assertEqual(no_quantity.status_code, 400)
+        self.assertIn("quantity_stems", no_quantity.data)
+
+    def test_reverse_rejects_more_than_catalog_holds(self):
+        profile, made = self._florist_with_leftover(issued=75, per_item=25, items=3)
+        response = self.client.post("/api/florist-stock-balances/adjust/", {
+            "florist": profile.id, "batch": self.batch.id, "direction": "to_florist", "quantity_stems": 500,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("yetmayapti", response.data["detail"])
+        # hech narsa o'zgarmadi
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [25, 25, 25])
+        self.assertEqual(self._balance(profile), 0)
+
     def test_stock_batch_number_can_repeat(self):
         # bir xil raqamli partiyalar turli gul va turli kunlarda kelaveradi
         flower = Flower.objects.create(name_uz="Xrizantema API", slug="xrizantema-api")

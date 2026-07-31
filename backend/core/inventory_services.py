@@ -279,6 +279,229 @@ def restore_florist_stock(florist, rows, quantity):
         balance.save(update_fields=["remaining_stems", "updated_at"])
 
 
+def split_stems_over_items(amount, items, max_per_item=None):
+    """Gul sonini kataloglar orasida bo'ladi.
+
+    Katalogda bir nechta dona bo'lishi mumkin, tarkib esa bitta dona uchun yoziladi.
+    Shuning uchun bo'lish dona hisobida boradi: katalogga har donaga +1 qo'shilsa,
+    undan quantity_total dona gul ketadi.
+
+    Avval hammaga tenglab bo'linadi, teng bo'linmagani navbat bilan oldingi
+    kataloglarga bittadan qo'shiladi — ya'ni kimdir bittaga ko'proq oladi.
+
+    items: [(tarkib_qatori, katalogdagi dona soni)]
+    max_per_item: {tarkib_qatori_id: har donaga eng ko'pi} — teskari yo'nalishda
+        tarkibni nolga tushirib yubormaslik uchun.
+    Qaytadi: ({tarkib_qatori_id: har donaga o'zgarish}, joylashmay qolgani)
+    """
+    plan = {row.id: 0 for row, _ in items}
+    caps = {row.id: (max_per_item or {}).get(row.id) for row, _ in items}
+    total_units = sum(units for _, units in items)
+    amount = int(amount or 0)
+    if not total_units or amount <= 0:
+        return plan, max(amount, 0)
+    base = amount // total_units
+    if base:
+        for row, units in items:
+            cap = caps[row.id]
+            add = base if cap is None else min(base, cap)
+            if add > 0:
+                plan[row.id] += add
+                amount -= add * units
+    placed = True
+    while amount > 0 and placed:
+        placed = False
+        for row, units in items:
+            cap = caps[row.id]
+            if units <= amount and (cap is None or plan[row.id] < cap):
+                plan[row.id] += 1
+                amount -= units
+                placed = True
+                if amount <= 0:
+                    break
+    return plan, amount
+
+
+def florist_leftover_candidates(florist, batch):
+    """Qoldiq bo'linadigan kataloglar: shu floristniki va tarkibida shu gul bor.
+
+    Sotilgani ham kiradi — gul unga ham haqiqatda ketgan, shuning uchun
+    tannarxi to'g'rilanishi kerak.
+    """
+    return list(
+        CatalogComposition.objects.filter(stock_batch=batch, catalog_item__florist=florist)
+        .select_related("catalog_item")
+        .order_by("catalog_item__created_at", "catalog_item_id")
+    )
+
+
+TO_CATALOG = "to_catalog"
+TO_FLORIST = "to_florist"
+
+
+def florist_stem_batches(florist, batch, direction):
+    """Amal qaysi partiyalar ustida bajarilishini aniqlaydi.
+
+    Katalogga qo'shishda faqat qoldig'i bor partiyalar kerak.
+    Floristga qaytarishda esa qoldiq nol bo'lishi ham mumkin — gul katalogda turibdi.
+    """
+    if direction == TO_CATALOG:
+        queryset = FloristStockBalance.objects.filter(florist=florist, remaining_stems__gt=0)
+        if batch is not None:
+            queryset = queryset.filter(batch=batch)
+        return [row.batch for row in queryset.select_related("batch__variant__flower").order_by("batch__batch_number", "batch_id")]
+    if batch is None:
+        raise ValueError("Katalogdan floristga qaytarishda partiyani tanlash kerak")
+    return [batch]
+
+
+def florist_stem_plan(florist, batch=None, direction=TO_CATALOG, quantity_stems=None):
+    """Amal qanday bajarilishini oldindan hisoblab beradi. Hech narsani o'zgartirmaydi."""
+    rows = []
+    for target in florist_stem_batches(florist, batch, direction):
+        candidates = florist_leftover_candidates(florist, target)
+        items = [(row, int(row.catalog_item.quantity_total or 1)) for row in candidates]
+        balance = FloristStockBalance.objects.filter(florist=florist, batch=target).first()
+        held = balance.remaining_stems if balance else 0
+        if direction == TO_CATALOG:
+            amount = held
+            caps = None
+            sign = 1
+        else:
+            amount = int(quantity_stems or 0)
+            # tarkibni nolga tushirmaymiz, kamida bitta gul qolsin
+            caps = {row.id: max(row.quantity_stems - 1, 0) for row, _ in items}
+            sign = -1
+        plan, leftover = split_stems_over_items(amount, items, caps)
+        rows.append({
+            "batch_id": target.id,
+            "batch_number": target.batch_number,
+            "flower": str(target.variant),
+            "florist_stems_now": held,
+            "requested_stems": amount,
+            "unplaced_stems": leftover,
+            "blocked": not candidates,
+            "reason": "" if candidates else "Bu guldan yasalgan katalog topilmadi",
+            "items": [
+                {
+                    "catalog_item": row.catalog_item_id,
+                    "catalog_name": row.catalog_item.name_uz,
+                    "quantity_total": units,
+                    "stems_per_item_now": row.quantity_stems,
+                    "change_per_item": sign * plan[row.id],
+                    "change_total": sign * plan[row.id] * units,
+                    "stems_per_item_after": row.quantity_stems + sign * plan[row.id],
+                }
+                for row, units in items
+                if plan[row.id]
+            ],
+        })
+    return rows
+
+
+def adjust_florist_stems(florist, batch=None, direction=TO_CATALOG, quantity_stems=None, user=None):
+    """Florist standartdan farqli gul ishlatganda hisobni to'g'rilaydi.
+
+    to_catalog — florist ko'proq ishlatgan. Uning qo'lida yo'q gul qoldiqda turib
+    qolgan, katalog tannarxi esa past ko'rinadi. Qoldiq o'sha guldan yasalgan
+    kataloglarga bo'linadi va floristdagi qoldiq nolga tushadi.
+
+    to_florist — florist kamroq ishlatgan. Katalogdan ortiqcha yozilgan gul
+    kamaytirilib, floristning qo'liga qaytariladi.
+
+    Ikkala yo'nalishda ham sotilgan kataloglar qamraladi: gul ularga ham
+    haqiqatda ketgan, shuning uchun tannarxi to'g'rilanishi kerak.
+    """
+    if direction not in [TO_CATALOG, TO_FLORIST]:
+        raise ValueError("Yo‘nalish noto‘g‘ri")
+    if direction == TO_FLORIST and int(quantity_stems or 0) < 1:
+        raise ValueError("Qaytariladigan gul soni 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        targets = florist_stem_batches(florist, batch, direction)
+        if not targets:
+            raise ValueError(f"{florist} qo‘lida bo‘linadigan qoldiq yo‘q")
+        blocked = []
+        prepared = []
+        for target in targets:
+            candidates = florist_leftover_candidates(florist, target)
+            if not candidates:
+                blocked.append(f"{target.batch_number} ({target.variant})")
+                continue
+            items = [(row, int(row.catalog_item.quantity_total or 1)) for row in candidates]
+            balance = florist_balance_row(florist, target, lock=True)
+            if direction == TO_CATALOG:
+                plan, leftover = split_stems_over_items(balance.remaining_stems, items)
+            else:
+                caps = {row.id: max(row.quantity_stems - 1, 0) for row, _ in items}
+                plan, leftover = split_stems_over_items(quantity_stems, items, caps)
+                if leftover:
+                    raise ValueError(
+                        f"{target.batch_number} bo‘yicha {leftover} dona gulni katalogdan kamaytirib bo‘lmadi. "
+                        "Katalogdagi gul soni yetmayapti — sonni kamaytiring."
+                    )
+            prepared.append((target, balance, items, plan, leftover))
+        if blocked:
+            raise ValueError(
+                f"Bu guldan {florist} yasagan katalog topilmadi: " + ", ".join(blocked)
+                + ". Qoldiqni skladga qaytaring yoki chiqitga yozing."
+            )
+        sign = 1 if direction == TO_CATALOG else -1
+        result = {"florist": str(florist), "direction": direction, "batches": [], "moved_stems": 0, "unplaced_stems": 0}
+        touched = {}
+        for target, balance, items, plan, leftover in prepared:
+            moved = 0
+            rows = []
+            for row, units in items:
+                step = plan[row.id]
+                if not step:
+                    continue
+                before = row.quantity_stems
+                row.quantity_stems += sign * step
+                row.quantity_bunches = (
+                    Decimal(row.quantity_stems) / Decimal(target.stems_per_bunch or 1)
+                ).quantize(Decimal("0.01"))
+                row.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+                moved += step * units
+                touched[row.catalog_item_id] = row.catalog_item
+                rows.append({
+                    "catalog_item": row.catalog_item_id,
+                    "catalog_name": row.catalog_item.name_uz,
+                    "quantity_total": units,
+                    "stems_before": before,
+                    "stems_after": row.quantity_stems,
+                    "change_total": sign * step * units,
+                })
+            balance.remaining_stems -= sign * moved
+            balance.save(update_fields=["remaining_stems", "updated_at"])
+            result["moved_stems"] += moved
+            result["unplaced_stems"] += leftover
+            result["batches"].append({
+                "batch_id": target.id,
+                "batch_number": target.batch_number,
+                "flower": str(target.variant),
+                "moved_stems": sign * moved,
+                "florist_stems_after": balance.remaining_stems,
+                "items": rows,
+            })
+        for item in touched.values():
+            sync_catalog_financials(item)
+        action = "florist_stems_to_catalog" if direction == TO_CATALOG else "florist_stems_to_florist"
+        summary = (
+            f"{florist} qoldig‘i {len(touched)} ta katalogga bo‘lindi"
+            if direction == TO_CATALOG
+            else f"{len(touched)} ta katalogdan {result['moved_stems']} dona gul {florist} ga qaytarildi"
+        )
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action=action,
+            summary=summary,
+            entity_type="FloristProfile",
+            entity_id=str(florist.id),
+            after=result,
+        )
+    return result
+
+
 
 def transfer_catalog_to_branch(item, branch, quantity, target_price=None, note="", user=None):
     """Katalog mahsulotining bir qismini boshqa filialga yuboradi.

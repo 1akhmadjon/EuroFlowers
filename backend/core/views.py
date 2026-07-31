@@ -31,9 +31,9 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, AISettingsSerializer, BranchSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, AISettingsSerializer, BranchSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import catalog_cost_breakdown, transfer_catalog_to_branch, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
+from .inventory_services import catalog_cost_breakdown, adjust_florist_stems, florist_stem_plan, transfer_catalog_to_branch, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -1193,6 +1193,60 @@ class FloristStockBalanceViewSet(viewsets.ReadOnlyModelViewSet):
             return queryset
         profile = FloristProfile.objects.filter(user=self.request.user).first()
         return queryset.filter(florist=profile) if profile else queryset.none()
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("florist", int, description="Florist id — majburiy"),
+            OpenApiParameter("batch", int, description="Bitta partiya bo‘yicha. to_florist da majburiy."),
+            OpenApiParameter("direction", str, description="to_catalog (sukut) yoki to_florist"),
+            OpenApiParameter("quantity_stems", int, description="Faqat to_florist uchun: qaytariladigan gul soni"),
+        ],
+        responses=OpenApiResponse(description="Qaysi katalogga qancha o‘zgarishi. Hech narsa o‘zgarmaydi."),
+    )
+    @action(detail=False, methods=["get"], url_path="adjust-preview")
+    def adjust_preview(self, request):
+        """Hisobni to'g'rilashdan oldin nima bo'lishini ko'rsatadi."""
+        if not has_page_permission(request.user, "inventory", False):
+            return forbidden()
+        florist = FloristProfile.objects.filter(pk=request.query_params.get("florist")).first()
+        if not florist:
+            return Response({"detail": "Florist tanlanmadi."}, status=status.HTTP_400_BAD_REQUEST)
+        batch = StockBatch.objects.filter(pk=request.query_params.get("batch")).first() if request.query_params.get("batch") else None
+        direction = request.query_params.get("direction") or "to_catalog"
+        if direction not in ["to_catalog", "to_florist"]:
+            return Response({"detail": "Yo‘nalish noto‘g‘ri."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rows = florist_stem_plan(florist, batch, direction, request.query_params.get("quantity_stems"))
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "florist": florist.id,
+            "florist_name": str(florist),
+            "direction": direction,
+            "batches": rows,
+            "total_florist_stems": sum(row["florist_stems_now"] for row in rows),
+            "blocked_count": sum(1 for row in rows if row["blocked"]),
+        })
+
+    @extend_schema(request=FloristLeftoverRequestSerializer, responses=OpenApiResponse(description="To‘g‘rilash natijasi"))
+    @action(detail=False, methods=["post"], url_path="adjust")
+    def adjust(self, request):
+        """Florist standartdan farqli gul ishlatganda hisobni to'g'rilaydi."""
+        if not has_page_permission(request.user, "inventory", True):
+            return forbidden()
+        serializer = FloristLeftoverRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = adjust_florist_stems(
+                serializer.validated_data["florist"],
+                serializer.validated_data.get("batch"),
+                serializer.validated_data.get("direction", "to_catalog"),
+                serializer.validated_data.get("quantity_stems"),
+                request.user,
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
 
 
 class FloristDayOffViewSet(ScopedViewSet):
