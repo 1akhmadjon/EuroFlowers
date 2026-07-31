@@ -2497,6 +2497,154 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("floristdagi gul yetarli emas", response.data["detail"])
 
+    def _florist_with_rates(self, name):
+        user = User.objects.create_user(name, password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        for volume, stems in [("S", 15), ("M", 25), ("L", 40)]:
+            FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume=volume, default_stems=stems, florist_fee=Decimal("50000"))
+        return profile
+
+    def _make_sized_catalog(self, profile, volume, count=1, quantity_total=1):
+        made = []
+        for index in range(count):
+            response = self.client.post("/api/catalog/", {
+                "name_uz": f"{volume} buket {index + 1}", "arrangement_type": "bouquet", "volume": volume,
+                "florist": profile.id, "price": "500000", "quantity_total": quantity_total, "status": "available",
+            }, format="json")
+            self.assertEqual(response.status_code, 201, response.json())
+            made.append(CatalogItem.objects.get(id=response.json()["id"]))
+        return made
+
+    def test_catalog_without_stems_needs_only_volume(self):
+        # florist katalogga faqat hajmni yozadi, gul soni so'ralmaydi
+        profile = self._florist_with_rates("fl-size-only")
+        made = self._make_sized_catalog(profile, "M")
+        self.assertEqual(made[0].composition.count(), 0)
+        self.assertEqual(made[0].volume, "M")
+
+    def test_florist_catalog_requires_volume(self):
+        profile = self._florist_with_rates("fl-no-volume")
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Hajmsiz", "arrangement_type": "bouquet",
+            "florist": profile.id, "price": "500000", "quantity_total": 1,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("volume", response.data)
+
+    def test_closing_issue_shares_stems_by_volume_standard(self):
+        # 600 dona chiqarildi, 3 ta S + 2 ta M + 1 ta L yasaldi
+        profile = self._florist_with_rates("fl-close-1")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 600)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 600}, format="json")
+        small = self._make_sized_catalog(profile, "S", count=3)
+        medium = self._make_sized_catalog(profile, "M", count=2)
+        large = self._make_sized_catalog(profile, "L", count=1)
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.data["shared_stems"], 600)
+        stems = {item.id: item.composition.first().quantity_stems for item in small + medium + large}
+        # ulush: S=15/135, M=25/135, L=40/135
+        self.assertEqual(sorted(stems[item.id] for item in small), [66, 67, 67])
+        self.assertEqual(sorted(stems[item.id] for item in medium), [111, 111])
+        self.assertEqual(stems[large[0].id], 178)
+        self.assertEqual(sum(stems.values()), 600)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 0)
+
+    def test_closing_issue_returns_leftover_to_warehouse_first(self):
+        profile = self._florist_with_rates("fl-close-2")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        self.batch.refresh_from_db()
+        warehouse_before = self.batch.remaining_stems
+        made = self._make_sized_catalog(profile, "M", count=2)
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {
+            "florist": profile.id, "batch": self.batch.id, "return_stems": 20,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.data["returned_stems"], 20)
+        self.assertEqual(response.data["shared_stems"], 80)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, warehouse_before + 20)
+        self.assertEqual(sorted(item.composition.first().quantity_stems for item in made), [40, 40])
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 0)
+
+    def test_closing_issue_counts_units_inside_one_catalog(self):
+        profile = self._florist_with_rates("fl-close-3")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 200)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 200}, format="json")
+        made = self._make_sized_catalog(profile, "M", count=1, quantity_total=4)
+        self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        # 4 dona buket, 200 gul -> har donaga 50
+        self.assertEqual(made[0].composition.first().quantity_stems, 50)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 0)
+
+    def test_closing_issue_sets_catalog_cost(self):
+        profile = self._florist_with_rates("fl-close-4")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        made = self._make_sized_catalog(profile, "M", count=2)
+        before = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price
+        self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        after = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price
+        self.assertGreater(after, before)
+
+    def test_closing_issue_needs_volume_rate(self):
+        user = User.objects.create_user("fl-close-norate", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="M", default_stems=25, florist_fee=Decimal("50000"))
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        self._make_sized_catalog(profile, "M")
+        self._make_sized_catalog(profile, "XL")
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("hajm tarifi belgilanmagan", response.data["detail"])
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 100)
+
+    def test_closing_issue_without_catalog_is_rejected(self):
+        profile = self._florist_with_rates("fl-close-5")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 50)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 50}, format="json")
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("guli yozilmagan katalog yo‘q", response.data["detail"])
+
+    def test_closing_issue_can_return_everything(self):
+        profile = self._florist_with_rates("fl-close-6")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 30)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 30}, format="json")
+        self.batch.refresh_from_db()
+        warehouse_before = self.batch.remaining_stems
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {
+            "florist": profile.id, "batch": self.batch.id, "return_stems": 30,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.data["shared_stems"], 0)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, warehouse_before + 30)
+
+    def test_close_issue_preview_changes_nothing(self):
+        profile = self._florist_with_rates("fl-close-7")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        made = self._make_sized_catalog(profile, "M", count=2)
+        response = self.client.get(f"/api/florist-stock-balances/close-issue-preview/?florist={profile.id}&batch={self.batch.id}&return_stems=20")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["share_stems"], 80)
+        self.assertEqual(sorted(row["stems_per_item"] for row in response.data["items"]), [40, 40])
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 100)
+        self.assertEqual(sum(item.composition.count() for item in made), 0)
+
+    def test_closing_issue_rejects_return_bigger_than_held(self):
+        profile = self._florist_with_rates("fl-close-8")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 40)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 40}, format="json")
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {
+            "florist": profile.id, "batch": self.batch.id, "return_stems": 500,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 40)
+
     def test_delivery_is_created_then_flowers_added_into_it(self):
         supplier = Supplier.objects.create(name="Golland Flowers")
         created = self.client.post("/api/stock-deliveries/", {

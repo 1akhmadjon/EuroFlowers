@@ -394,6 +394,17 @@ class FloristStockReturnRequestSerializer(FloristStockIssueRequestSerializer):
     kind = serializers.ChoiceField(choices=["return", "waste"], required=False, default="return")
 
 
+class FloristCloseIssueSerializer(serializers.Serializer):
+    """Chiqarilgan gul tugadi: ortig'i skladga, qolgani kataloglarga."""
+
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    return_stems = serializers.IntegerField(
+        required=False, min_value=0, default=0,
+        help_text="Ortib qolgan va skladga qaytariladigan gul soni. Qolgani kataloglarga bo‘linadi.",
+    )
+
+
 class FloristLeftoverRequestSerializer(serializers.Serializer):
     """Florist standartdan farqli gul ishlatganda hisobni to'g'rilash so'rovi."""
 
@@ -1242,6 +1253,14 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             materials = attrs["materials"]
         elif materials is not None:
             materials = normalize_catalog_material_rows(materials)
+        # Florist katalogida gul soni yozilmaydi — chiqim yopilganda hajm bo'yicha
+        # taqsimlanadi. Shuning uchun hajm va turi majburiy bo'ladi.
+        florist_value = attrs.get("florist", getattr(self.instance, "florist", None))
+        if florist_value and not composition and not self.instance:
+            if not attrs.get("arrangement_type"):
+                raise serializers.ValidationError({"arrangement_type": "Florist katalogida turini tanlash kerak"})
+            if not (attrs.get("volume") or "").strip():
+                raise serializers.ValidationError({"volume": "Florist katalogida hajmni tanlash kerak — gul shu bo‘yicha taqsimlanadi"})
         if composition and not self.instance:
             florist = attrs.get("florist")
             for row in composition:

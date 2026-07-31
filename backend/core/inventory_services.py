@@ -335,6 +335,178 @@ def florist_leftover_candidates(florist, batch):
     )
 
 
+def florist_volume_weight(florist, item):
+    """Katalogning bir donasiga standart bo'yicha necha dona gul ketishi.
+
+    Bo'lishda shu og'irlik ishlatiladi: L savat S buketdan ko'proq oladi.
+    """
+    rate = FloristVolumeRate.objects.filter(
+        florist=florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True,
+    ).first()
+    return int(rate.default_stems or 0) if rate else 0
+
+
+def split_stems_by_weight(amount, items):
+    """Gulni kataloglarga hajm standarti bo'yicha bo'ladi.
+
+    items: [(katalog, dona soni, bir donaga standart gul)]
+    Avval har biriga ulushiga qarab butun son tushadi, ortgani eng katta
+    kasrga ega kataloglardan boshlab bittadan tarqatiladi.
+    Qaytadi: ({katalog_id: har donaga gul}, joylashmay qolgani)
+    """
+    plan = {item.id: 0 for item, _, _ in items}
+    amount = int(amount or 0)
+    total_weight = sum(units * weight for _, units, weight in items)
+    if amount <= 0 or total_weight <= 0:
+        return plan, max(amount, 0)
+    order = []
+    used = 0
+    for item, units, weight in items:
+        ideal = Decimal(amount) * Decimal(weight) / Decimal(total_weight)
+        base = int(ideal)
+        plan[item.id] = base
+        used += base * units
+        order.append((ideal - base, item, units))
+    remaining = amount - used
+    order.sort(key=lambda row: -row[0])
+    placed = True
+    while remaining > 0 and placed:
+        placed = False
+        for _, item, units in order:
+            if units <= remaining:
+                plan[item.id] += 1
+                remaining -= units
+                placed = True
+                if remaining <= 0:
+                    break
+    return plan, remaining
+
+
+def florist_open_catalog_items(florist):
+    """Guli hali yozilmagan kataloglar — chiqim yopilganda shularga bo'linadi."""
+    return list(
+        CatalogItem.objects.filter(florist=florist, composition__isnull=True)
+        .order_by("created_at", "id")
+    )
+
+
+def florist_close_plan(florist, batch, return_stems=0):
+    """Chiqim yopilganda nima bo'lishini hisoblaydi. Hech narsani o'zgartirmaydi."""
+    balance = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
+    held = balance.remaining_stems if balance else 0
+    return_stems = int(return_stems or 0)
+    amount = max(held - return_stems, 0)
+    items = florist_open_catalog_items(florist)
+    missing = [item for item in items if florist_volume_weight(florist, item) < 1]
+    weighted = [(item, int(item.quantity_total or 1), florist_volume_weight(florist, item)) for item in items]
+    plan, unplaced = split_stems_by_weight(amount, weighted) if not missing else ({}, amount)
+    return {
+        "batch_id": batch.id,
+        "batch_number": batch.batch_number,
+        "flower": str(batch.variant),
+        "florist_stems_now": held,
+        "return_stems": return_stems,
+        "share_stems": amount,
+        "unplaced_stems": unplaced,
+        "missing_rates": [f"{item.get_arrangement_type_display()} · {item.volume or 'hajmsiz'}" for item in missing],
+        "items": [
+            {
+                "catalog_item": item.id,
+                "catalog_name": item.name_uz,
+                "arrangement_type": item.arrangement_type,
+                "volume": item.volume,
+                "quantity_total": units,
+                "standard_stems": weight,
+                "stems_per_item": plan.get(item.id, 0),
+                "stems_total": plan.get(item.id, 0) * units,
+            }
+            for item, units, weight in weighted
+        ],
+    }
+
+
+def close_florist_issue(florist, batch, return_stems=0, user=None):
+    """Chiqarilgan gul tugadi: ortig'i skladga qaytariladi, qolgani kataloglarga bo'linadi.
+
+    Florist katalogga faqat hajmni yozadi, qancha gul ketganini yozmaydi.
+    Yopilganda chiqarilgan gul o'sha kataloglarga hajm standartiga qarab taqsimlanadi.
+    """
+    return_stems = int(return_stems or 0)
+    if return_stems < 0:
+        raise ValueError("Qaytariladigan son manfiy bo‘lmaydi")
+    with transaction.atomic():
+        balance = florist_balance_row(florist, batch, lock=True)
+        if balance.remaining_stems < 1:
+            raise ValueError(f"{florist} qo‘lida bu guldan qoldiq yo‘q")
+        if return_stems > balance.remaining_stems:
+            raise ValueError(f"{florist} qo‘lida bu guldan atigi {balance.remaining_stems} dona bor")
+        if return_stems:
+            return_stock_from_florist(florist, batch, return_stems, reason="Chiqim yopildi", user=user, kind="return")
+            balance.refresh_from_db()
+        amount = balance.remaining_stems
+        result = {
+            "florist": str(florist),
+            "batch_number": batch.batch_number,
+            "returned_stems": return_stems,
+            "shared_stems": 0,
+            "unplaced_stems": 0,
+            "items": [],
+        }
+        if amount < 1:
+            AuditLog.objects.create(
+                user=user if getattr(user, "is_authenticated", False) else None,
+                action="florist_issue_closed", entity_type="FloristProfile", entity_id=str(florist.id),
+                summary=f"{florist} chiqimi yopildi, {return_stems} dona skladga qaytdi", after=result,
+            )
+            return result
+        items = florist_open_catalog_items(florist)
+        if not items:
+            raise ValueError(
+                f"{florist} da guli yozilmagan katalog yo‘q. Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
+            )
+        missing = sorted({f"{item.get_arrangement_type_display()} · {item.volume or 'hajmsiz'}" for item in items if florist_volume_weight(florist, item) < 1})
+        if missing:
+            raise ValueError(
+                f"{florist} uchun hajm tarifi belgilanmagan: " + ", ".join(missing)
+                + ". Avval floristga shu hajm narxini kiriting."
+            )
+        weighted = [(item, int(item.quantity_total or 1), florist_volume_weight(florist, item)) for item in items]
+        plan, unplaced = split_stems_by_weight(amount, weighted)
+        moved = 0
+        for item, units, weight in weighted:
+            stems = plan.get(item.id, 0)
+            if stems < 1:
+                continue
+            CatalogComposition.objects.create(
+                catalog_item=item, stock_batch=batch, quantity_stems=stems,
+                quantity_bunches=(Decimal(stems) / Decimal(batch.stems_per_bunch or 1)).quantize(Decimal("0.01")),
+            )
+            moved += stems * units
+            result["items"].append({
+                "catalog_item": item.id,
+                "catalog_name": item.name_uz,
+                "arrangement_type": item.arrangement_type,
+                "volume": item.volume,
+                "quantity_total": units,
+                "standard_stems": weight,
+                "stems_per_item": stems,
+                "stems_total": stems * units,
+            })
+        balance.remaining_stems -= moved
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+        result["shared_stems"] = moved
+        result["unplaced_stems"] = unplaced
+        for item, _, _ in weighted:
+            sync_catalog_financials(item)
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="florist_issue_closed", entity_type="FloristProfile", entity_id=str(florist.id),
+            summary=f"{florist} chiqimi yopildi: {moved} dona {len(result['items'])} ta katalogga bo‘lindi",
+            after=result,
+        )
+    return result
+
+
 TO_CATALOG = "to_catalog"
 TO_FLORIST = "to_florist"
 
