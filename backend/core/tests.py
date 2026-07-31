@@ -2695,6 +2695,59 @@ class ApiTests(TestCase):
         # pochka narxi kiritilgani o'zgarmay saqlanadi
         self.assertEqual(Decimal(response.json()["cost_per_bunch"]), Decimal("24950.00"))
 
+    def test_exact_price_is_kept_next_to_rounded(self):
+        # 24 950 / 25 = 998 -> yaxlitlangani 1 000, aniq hisob 998 saqlanadi
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "EXACT-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_bunch": "24950", "sale_price_per_bunch": "26500",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        data = response.json()
+        self.assertEqual(Decimal(data["cost_per_stem"]), Decimal("1000.00"))
+        self.assertEqual(Decimal(data["cost_per_stem_exact"]), Decimal("998.0000"))
+        self.assertEqual(Decimal(data["sale_price_per_stem"]), Decimal("1100.00"))
+        self.assertEqual(Decimal(data["sale_price_per_stem_exact"]), Decimal("1060.0000"))
+        rounding = data["rounding"]["cost"]
+        self.assertEqual(Decimal(rounding["per_stem_diff"]), Decimal("2.0000"))
+        self.assertEqual(Decimal(rounding["total_exact"]), Decimal("99800.00"))
+        self.assertEqual(Decimal(rounding["total_rounded"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(rounding["total_diff"]), Decimal("200.00"))
+        self.assertTrue(rounding["is_rounded"])
+
+    def test_exact_price_equals_rounded_when_it_divides(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "EXACT-2", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 25,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Decimal(response.json()["cost_per_stem_exact"]), Decimal("1000.0000"))
+        self.assertFalse(response.json()["rounding"]["cost"]["is_rounded"])
+
+    def test_exact_price_kept_when_stem_price_typed_by_hand(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "EXACT-3", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 24, "received_stems": 24,
+            "cost_per_stem": "1041", "sale_price_per_stem": "2000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        # qo'lda kiritilgan narx yaxlitlanmaydi va aniq hisob ham o'shaning o'zi
+        self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("1041.00"))
+        self.assertEqual(Decimal(response.json()["cost_per_stem_exact"]), Decimal("1041.0000"))
+        self.assertFalse(response.json()["rounding"]["cost"]["is_rounded"])
+
+    def test_delivery_detail_shows_both_totals(self):
+        delivery = self.client.post("/api/stock-deliveries/", {"number": "EX-1", "received_at": "2026-08-01"}, format="json").json()
+        self.client.post("/api/stock-batches/", {
+            "delivery": delivery["id"], "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100, "cost_per_bunch": "24950",
+        }, format="json")
+        detail = self.client.get(f"/api/stock-deliveries/{delivery['id']}/")
+        self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(detail.data["total_cost_exact"]), Decimal("99800.00"))
+        self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("200.00"))
+
     def test_stem_price_fills_bunch_price_backwards(self):
         response = self.client.post("/api/stock-batches/", {
             "batch_number": "AUTO-3", "variant": self.batch.variant_id, "height_cm": 50,

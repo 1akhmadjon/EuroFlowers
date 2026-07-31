@@ -179,6 +179,10 @@ class StockBatch(TimeStampedModel):
     cost_per_stem = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
     sale_price_per_stem = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
     sale_price_per_bunch = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+    # Yaxlitlanmagan aniq hisob. Hamma hisob-kitob yaxlitlangan narx bilan boradi,
+    # bular faqat partiya detalida farqni ko'rsatish uchun saqlanadi.
+    cost_per_stem_exact = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    sale_price_per_stem_exact = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     minimum_sale_stems = models.PositiveIntegerField(default=1)
     image_url = models.URLField(blank=True)
     notes = models.TextField(blank=True)

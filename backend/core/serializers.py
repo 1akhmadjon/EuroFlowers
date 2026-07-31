@@ -547,6 +547,8 @@ class StockDeliverySerializer(serializers.ModelSerializer):
     total_stems = serializers.SerializerMethodField()
     remaining_stems = serializers.SerializerMethodField()
     total_cost = serializers.SerializerMethodField()
+    total_cost_exact = serializers.SerializerMethodField()
+    rounding_diff = serializers.SerializerMethodField()
 
     class Meta:
         model = StockDelivery
@@ -567,13 +569,29 @@ class StockDeliverySerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_total_cost(self, obj):
+        """Yaxlitlangan dona narxi bo'yicha — hisob-kitob shu raqam bilan boradi."""
         return sum((Decimal(row.received_stems) * Decimal(row.cost_per_stem or 0) for row in obj.batches.all()), Decimal("0"))
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_total_cost_exact(self, obj):
+        """Yaxlitlanmagan aniq hisob bo'yicha."""
+        total = Decimal("0")
+        for row in obj.batches.all():
+            exact = Decimal(row.cost_per_stem_exact or 0) or Decimal(row.cost_per_stem or 0)
+            total += Decimal(row.received_stems) * exact
+        return total.quantize(Decimal("0.01"))
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_rounding_diff(self, obj):
+        """Yaxlitlash partiya tannarxini qanchaga o'zgartirgani."""
+        return (Decimal(self.get_total_cost(obj)) - Decimal(self.get_total_cost_exact(obj))).quantize(Decimal("0.01"))
 
 
 class StockBatchSerializer(serializers.ModelSerializer):
     variant_detail = FlowerVariantSerializer(source="variant", read_only=True)
     supplier_detail = SupplierSerializer(source="supplier", read_only=True)
     delivery_detail = serializers.SerializerMethodField()
+    rounding = serializers.SerializerMethodField()
     remaining_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     remaining_bunches_label = serializers.SerializerMethodField()
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
@@ -588,6 +606,8 @@ class StockBatchSerializer(serializers.ModelSerializer):
             "remaining_stems": {"required": False},
             "batch_number": {"required": False},
             "cost_per_stem": {"required": False},
+            "cost_per_stem_exact": {"required": False},
+            "sale_price_per_stem_exact": {"required": False},
             "sale_price_per_stem": {"required": False},
             "sale_price_per_bunch": {"required": False},
         }
@@ -609,8 +629,33 @@ class StockBatchSerializer(serializers.ModelSerializer):
             "note": delivery.note,
         }
 
+    @extend_schema_field(serializers.DictField())
+    def get_rounding(self, obj):
+        """Yaxlitlangan va yaxlitlanmagan narx yonma-yon, farqi bilan."""
+        stems = Decimal(obj.received_stems or 0)
+        rows = {}
+        for key, rounded, exact in [
+            ("cost", Decimal(obj.cost_per_stem or 0), Decimal(obj.cost_per_stem_exact or 0)),
+            ("sale", Decimal(obj.sale_price_per_stem or 0), Decimal(obj.sale_price_per_stem_exact or 0)),
+        ]:
+            exact = exact or rounded
+            rows[key] = {
+                "per_stem_exact": exact.quantize(Decimal("0.0001")),
+                "per_stem_rounded": rounded.quantize(Decimal("0.01")),
+                "per_stem_diff": (rounded - exact).quantize(Decimal("0.0001")),
+                "total_exact": (exact * stems).quantize(Decimal("0.01")),
+                "total_rounded": (rounded * stems).quantize(Decimal("0.01")),
+                "total_diff": ((rounded - exact) * stems).quantize(Decimal("0.01")),
+                "is_rounded": rounded != exact,
+            }
+        return rows
+
     def _fill_prices(self, data):
-        """Pochka narxidan dona narxini, dona narxidan pochka narxini to'ldiradi."""
+        """Pochka narxidan dona narxini, dona narxidan pochka narxini to'ldiradi.
+
+        Yaxlitlangan narx bilan birga yaxlitlanmagan aniq hisob ham saqlanadi —
+        partiya detalida ikkalasini yonma-yon ko'rsatish uchun.
+        """
         stems = data.get("stems_per_bunch") or getattr(self.instance, "stems_per_bunch", None)
         try:
             stems = int(stems)
@@ -618,14 +663,22 @@ class StockBatchSerializer(serializers.ModelSerializer):
             return data
         if stems < 1:
             return data
-        pairs = [("cost_per_bunch", "cost_per_stem"), ("sale_price_per_bunch", "sale_price_per_stem")]
-        for bunch_key, stem_key in pairs:
+        pairs = [
+            ("cost_per_bunch", "cost_per_stem", "cost_per_stem_exact"),
+            ("sale_price_per_bunch", "sale_price_per_stem", "sale_price_per_stem_exact"),
+        ]
+        for bunch_key, stem_key, exact_key in pairs:
             bunch_value = data.get(bunch_key)
             stem_value = data.get(stem_key)
             if bunch_value not in [None, ""] and stem_value in [None, ""]:
-                data[stem_key] = str(round_stem_price(Decimal(str(bunch_value)) / Decimal(stems)))
-            elif stem_value not in [None, ""] and bunch_value in [None, ""]:
-                data[bunch_key] = str((Decimal(str(stem_value)) * Decimal(stems)).quantize(Decimal("0.01")))
+                exact = (Decimal(str(bunch_value)) / Decimal(stems)).quantize(Decimal("0.0001"))
+                data[exact_key] = str(exact)
+                data[stem_key] = str(round_stem_price(exact))
+            elif stem_value not in [None, ""]:
+                # dona narxi qo'lda kiritilgan — aniq hisob ham o'shaning o'zi
+                data[exact_key] = str(Decimal(str(stem_value)).quantize(Decimal("0.0001")))
+                if bunch_value in [None, ""]:
+                    data[bunch_key] = str((Decimal(str(stem_value)) * Decimal(stems)).quantize(Decimal("0.01")))
         return data
 
     def to_internal_value(self, data):
