@@ -671,11 +671,9 @@ def catalog_stock_error(batch, needed, florist=None):
     if florist is not None:
         row = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
         remaining = row.remaining_stems if row else 0
-        source = f"{florist} qo‘lida"
-        header = "Katalogni saqlash uchun floristdagi gul yetarli emas."
+        header = f"Katalogni saqlash uchun floristdagi gul yetarli emas. Gul {florist} qo‘lida."
     else:
         remaining = batch.remaining_stems
-        source = "Skladda"
         header = "Katalogni saqlash uchun sklad qoldig'i yetarli emas."
     missing = max(needed - remaining, 0)
     variant = batch.variant
@@ -685,7 +683,7 @@ def catalog_stock_error(batch, needed, florist=None):
         f"Gul: {flower_name}\n"
         f"Partiya: {batch.batch_number}\n"
         f"Kerak: {needed} dona\n"
-        f"{source}: {remaining} dona\n"
+        f"Bor: {remaining} dona\n"
         f"Yetmayapti: {missing} dona"
     )
 

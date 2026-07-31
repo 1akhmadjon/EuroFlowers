@@ -2341,7 +2341,8 @@ class ApiTests(TestCase):
 
     def _florist_with_leftover(self, issued=100, per_item=25, items=3, quantity_total=1):
         """Skladdan gul olib, standart bo'yicha katalog yasagan florist."""
-        user = User.objects.create_user(f"fl-leftover-{items}-{per_item}-{quantity_total}", password="p")
+        self._leftover_seq = getattr(self, "_leftover_seq", 0) + 1
+        user = User.objects.create_user(f"fl-leftover-{self._leftover_seq}", password="p")
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": issued}, format="json")
         made = []
@@ -2384,14 +2385,15 @@ class ApiTests(TestCase):
         self.assertEqual(self._balance(profile2), 0)
 
     def test_leftover_counts_units_not_items(self):
-        # 2 donadan 2 ta katalog = 4 dona. 100 - (25*4) = 0 qoldiq, keyin qo'shimcha chiqarib ko'ramiz
-        profile, made = self._florist_with_leftover(issued=100, per_item=25, items=2, quantity_total=2)
+        # 2 donadan 2 ta katalog = 4 dona buket. Bo'lish katalog emas, dona hisobida borishi kerak
+        profile, made = self._florist_with_leftover(issued=92, per_item=23, items=2, quantity_total=2)
         self.assertEqual(self._balance(profile), 0)
-        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 8}, format="json")
+        issued = self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 8}, format="json")
+        self.assertEqual(issued.status_code, 201, issued.json())
         self.assertEqual(self._balance(profile), 8)
         self.client.post("/api/florist-stock-balances/adjust/", {"florist": profile.id}, format="json")
-        # 4 dona buket, 8 gul -> har donaga +2, ya'ni tarkib 25 -> 27
-        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [27, 27])
+        # 4 dona buket, 8 gul -> har donaga +2, ya'ni tarkib 23 -> 25
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [25, 25])
         self.assertEqual(self._balance(profile), 0)
 
     def test_leftover_raises_costs_including_sold_items(self):
