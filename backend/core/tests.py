@@ -1585,25 +1585,113 @@ class ApiTests(TestCase):
         self.assertEqual(row["discounted_quantity"], 1)
         self.assertEqual(Decimal(row["discount_total"]), Decimal("50000.00"))
 
-    def test_branch_accounting_and_dashboard_are_separate(self):
+    def _sold_in_both_branches(self):
+        """Asosiy filialda 1 ta, Parkentda 1 ta sotuv qoldiradi."""
         item = self._main_catalog(quantity=4, price="300000")
         parkent = self._parkent()
         transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": parkent.id, "quantity": 2, "price": "500000"}, format="json")
         target = CatalogItem.objects.get(id=transfer.data["target_item"])
-        mark_catalog_sold(item, self.user, quantity=1)
-        mark_catalog_sold(target, self.user, quantity=1)
-        main = self.client.get("/api/accounting/")
-        self.assertEqual(Decimal(main.data["summary"]["total_sales"]), Decimal("300000.00"))
+        mark_catalog_sold(item, self.user, quantity=1, payment_type="cash")
+        mark_catalog_sold(target, self.user, quantity=1, payment_type="card")
+        return item, target, parkent
+
+    def _branch_row(self, response, name):
+        return next(row for row in response.data["by_branch"] if row["branch_name"] == name)
+
+    def test_accounting_total_includes_branch_sales(self):
+        # umumiy yig'indi ikkala filialni qamraydi
+        self._sold_in_both_branches()
+        response = self.client.get("/api/accounting/")
+        self.assertEqual(Decimal(response.data["summary"]["total_sales"]), Decimal("800000.00"))
+        self.assertEqual(response.data["summary"]["sales_count"], 2)
+        self.assertEqual(response.data["summary"]["total_quantity"], 2)
+
+    def test_accounting_splits_total_by_branch(self):
+        # umumiyga qo'shilsa ham qaysi filialdan qanchaligi aniq ko'rinadi
+        self._sold_in_both_branches()
+        response = self.client.get("/api/accounting/")
+        main = self._branch_row(response, "Toshkent (asosiy filial)")
+        parkent = self._branch_row(response, "Parkent filiali")
+        self.assertEqual(Decimal(main["total_sales"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(parkent["total_sales"]), Decimal("500000.00"))
+        self.assertEqual(Decimal(main["share_percent"]), Decimal("37.50"))
+        self.assertEqual(Decimal(parkent["share_percent"]), Decimal("62.50"))
+        self.assertTrue(main["is_main"])
+        self.assertFalse(parkent["is_main"])
+        # filial qatorlari yig'indisi umumiyga teng
+        self.assertEqual(
+            sum(Decimal(row["total_sales"]) for row in response.data["by_branch"]),
+            Decimal(response.data["summary"]["total_sales"]),
+        )
+
+    def test_accounting_splits_cash_and_card_per_branch(self):
+        # naqd va karta har filialda alohida chiqadi
+        self._sold_in_both_branches()
+        response = self.client.get("/api/accounting/")
+        main = self._branch_row(response, "Toshkent (asosiy filial)")
+        parkent = self._branch_row(response, "Parkent filiali")
+        self.assertEqual(Decimal(main["cash_total"]), Decimal("300000.00"))
+        self.assertEqual(main["cash_count"], 1)
+        self.assertEqual(Decimal(main["card_total"]), Decimal("0"))
+        self.assertEqual(Decimal(parkent["card_total"]), Decimal("500000.00"))
+        self.assertEqual(parkent["card_count"], 1)
+        self.assertEqual(Decimal(parkent["cash_total"]), Decimal("0"))
+        self.assertEqual(Decimal(response.data["summary"]["cash_total"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(response.data["summary"]["card_total"]), Decimal("500000.00"))
+
+    def test_accounting_counts_sold_flower_stems_per_branch(self):
+        # filialga o'tkazilganda tarkib nusxalanadi, shuning uchun gul donasi u yerda ham sanaladi
+        self._sold_in_both_branches()
+        response = self.client.get("/api/accounting/")
+        main = self._branch_row(response, "Toshkent (asosiy filial)")
+        parkent = self._branch_row(response, "Parkent filiali")
+        self.assertEqual(main["flower_stems"], 4)
+        self.assertEqual(parkent["flower_stems"], 4)
+        self.assertEqual(response.data["summary"]["flower_stems"], 8)
+
+    def test_accounting_branch_filter_narrows_report(self):
+        _, _, parkent = self._sold_in_both_branches()
+        only_main = self.client.get("/api/accounting/?branch=main")
+        self.assertEqual(Decimal(only_main.data["summary"]["total_sales"]), Decimal("300000.00"))
+        self.assertEqual(only_main.data["branch_filter"]["mode"], "main")
+        only_branch = self.client.get(f"/api/accounting/?branch={parkent.id}")
+        self.assertEqual(Decimal(only_branch.data["summary"]["total_sales"]), Decimal("500000.00"))
+        self.assertEqual(only_branch.data["branch_filter"]["branch_name"], "Parkent filiali")
+        self.assertEqual(len(only_branch.data["by_branch"]), 1)
+
+    def test_accounting_history_rows_carry_branch(self):
+        self._sold_in_both_branches()
+        response = self.client.get("/api/accounting/")
+        branches = sorted(row["branch_name"] for row in response.data["history"])
+        self.assertEqual(branches, ["Parkent filiali", "Toshkent (asosiy filial)"])
+
+    def test_branch_accounting_and_dashboard_are_separate(self):
+        # filial foydalanuvchisi faqat o'z filialini ko'radi va buni kengaytira olmaydi
+        _, _, parkent = self._sold_in_both_branches()
         user = User.objects.create_user("parkent-acc", password="p")
         UserProfile.objects.create(user=user, role="operator", branch=parkent)
         for page in ["catalog", "dashboard"]:
             PagePermission.objects.create(user=user, page=page, can_view=True, can_control=True)
         client = APIClient()
         client.force_authenticate(user)
-        branch_acc = client.get("/api/accounting/")
+        branch_acc = client.get("/api/accounting/?branch=all")
         self.assertEqual(Decimal(branch_acc.data["summary"]["total_sales"]), Decimal("500000.00"))
+        self.assertEqual(len(branch_acc.data["by_branch"]), 1)
         branch_dash = client.get("/api/dashboard/")
         self.assertEqual(Decimal(branch_dash.data["catalog_sales_revenue_today"]), Decimal("500000.00"))
+
+    def test_accounting_waste_stays_with_main_branch(self):
+        # chiqit faqat asosiy skladda bo'ladi, filial hisobiga tushmaydi
+        self._sold_in_both_branches()
+        StockMovement.objects.create(batch=self.batch, movement_type="waste", quantity_stems=-5, quantity_bunches=Decimal("0.5"), reason="Qurib qoldi")
+        response = self.client.get("/api/accounting/")
+        main = self._branch_row(response, "Toshkent (asosiy filial)")
+        parkent = self._branch_row(response, "Parkent filiali")
+        self.assertEqual(main["waste_stems"], 5)
+        self.assertEqual(parkent["waste_stems"], 0)
+        self.assertEqual(response.data["summary"]["waste_stems"], 5)
+        branch_only = self.client.get(f"/api/accounting/?branch={self._parkent().id}")
+        self.assertEqual(branch_only.data["summary"]["waste_stems"], 0)
 
     def test_volume_rate_requires_florist(self):
         response = self.client.post("/api/florist-volume-rates/", {"arrangement_type": "bouquet", "volume": "M", "default_stems": 25, "florist_fee": "60000"}, format="json")

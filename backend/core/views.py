@@ -297,11 +297,54 @@ def catalog_history_cost_breakdown(history):
     return rows
 
 
+def catalog_history_flower_stems(history):
+    """Sotuvga ketgan gul donasi. Filialga o'tkazilgan katalogda tarkib nusxalanadi,
+    shuning uchun filial sotuvida ham gul soni to'g'ri chiqadi."""
+    item = history.catalog_item
+    per_item = sum(int(row.quantity_stems or 0) for row in item.composition.all())
+    return per_item * int(history.quantity or 0)
+
+
+def accounting_branch_selection(request):
+    """Hisob-kitob qaysi filiallarni qamrashini aniqlaydi.
+
+    Filial foydalanuvchisi faqat o'z filialini ko'radi va buni kengaytira olmaydi.
+    Asosiy filial foydalanuvchisi sukut bo'yicha hamma filialni ko'radi:
+    ?branch=main faqat asosiy filial, ?branch=<id> esa bitta filial.
+    """
+    branch = user_branch(getattr(request, "user", None))
+    if branch:
+        return {"mode": "branch", "branch": branch}
+    raw = str((request.query_params.get("branch") if hasattr(request, "query_params") else "") or "").strip().lower()
+    if raw in ["", "all"]:
+        return {"mode": "all", "branch": None}
+    if raw == "main":
+        return {"mode": "main", "branch": None}
+    selected = Branch.objects.filter(pk=raw).first() if raw.isdigit() else Branch.objects.filter(name__iexact=raw).first()
+    if not selected:
+        return {"mode": "all", "branch": None}
+    if selected.is_main:
+        return {"mode": "main", "branch": None}
+    return {"mode": "branch", "branch": selected}
+
+
+def accounting_includes_main(selection):
+    """Asosiy filial hisobga kiradimi. Chiqit faqat asosiy skladda bo'lgani uchun kerak."""
+    return selection["mode"] in ["all", "main"]
+
+
 def sold_catalog_history_queryset(request):
     date_from, date_to = parse_date_range_params(request)
-    rows = CatalogHistory.objects.filter(action="sold").select_related("catalog_item__florist__user", "created_by")
-    branch = user_branch(getattr(request, "user", None))
-    rows = rows.filter(catalog_item__branch=branch) if branch else rows.filter(catalog_item__branch__isnull=True)
+    rows = (
+        CatalogHistory.objects.filter(action="sold")
+        .select_related("catalog_item__florist__user", "catalog_item__branch", "created_by")
+        .prefetch_related("catalog_item__composition")
+    )
+    selection = accounting_branch_selection(request)
+    if selection["mode"] == "branch":
+        rows = rows.filter(catalog_item__branch=selection["branch"])
+    elif selection["mode"] == "main":
+        rows = rows.filter(catalog_item__branch__isnull=True)
     if date_from:
         rows = rows.filter(created_at__date__gte=date_from)
     if date_to:
@@ -309,16 +352,30 @@ def sold_catalog_history_queryset(request):
     return rows, date_from, date_to
 
 
-def accounting_report_data(request):
-    histories, date_from, date_to = sold_catalog_history_queryset(request)
-    summary = {
+MAIN_BRANCH_LABEL = "Toshkent (asosiy filial)"
+
+
+def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_main=True):
+    """Bitta filial uchun bo'sh hisob-kitob qutisi. Umumiy yig'indi ham shu shaklda."""
+    return {
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "is_main": is_main,
+        "sales_count": 0,
+        "total_quantity": 0,
+        "flower_stems": 0,
+        "standard_quantity": 0,
+        "custom_quantity": 0,
         "total_sales": Decimal("0"),
         "cash_total": Decimal("0"),
         "card_total": Decimal("0"),
         "unknown_total": Decimal("0"),
-        "total_quantity": 0,
-        "standard_quantity": 0,
-        "custom_quantity": 0,
+        "cash_quantity": 0,
+        "card_quantity": 0,
+        "unknown_quantity": 0,
+        "cash_count": 0,
+        "card_count": 0,
+        "unknown_count": 0,
         "discount_total": Decimal("0"),
         "discounted_sales_count": 0,
         "discounted_quantity": 0,
@@ -327,8 +384,50 @@ def accounting_report_data(request):
         "material_cost_total": Decimal("0"),
         "florist_fee_cost_total": Decimal("0"),
         "waste_cost_total": Decimal("0"),
+        "waste_stems": 0,
         "net_profit": Decimal("0"),
     }
+
+
+def add_sale_to_bucket(bucket, payment, quantity, stems, sale_total, discount, cost_total, cost_breakdown, kind):
+    """Bitta sotuvni qutiga qo'shadi. Umumiy va filial qutilariga bir xil qo'llanadi."""
+    bucket["sales_count"] += 1
+    bucket["total_quantity"] += quantity
+    bucket["flower_stems"] += stems
+    bucket["total_sales"] += sale_total
+    bucket[f"{payment}_total"] += sale_total
+    bucket[f"{payment}_quantity"] += quantity
+    bucket[f"{payment}_count"] += 1
+    bucket["discount_total"] += discount
+    bucket["cost_total"] += cost_total
+    bucket["flower_cost_total"] += cost_breakdown["flower_cost"]
+    bucket["material_cost_total"] += cost_breakdown["material_cost"]
+    bucket["florist_fee_cost_total"] += cost_breakdown["florist_fee_cost"]
+    if discount > 0:
+        bucket["discounted_sales_count"] += 1
+        bucket["discounted_quantity"] += quantity
+    if kind == "custom":
+        bucket["custom_quantity"] += quantity
+    else:
+        bucket["standard_quantity"] += quantity
+
+
+def accounting_report_data(request):
+    histories, date_from, date_to = sold_catalog_history_queryset(request)
+    selection = accounting_branch_selection(request)
+    summary = blank_accounting_bucket()
+    summary["branch_id"] = None
+    summary["branch_name"] = "Umumiy"
+    summary["is_main"] = False
+    branch_buckets = {}
+    if accounting_includes_main(selection):
+        branch_buckets[None] = blank_accounting_bucket()
+    if selection["mode"] == "all":
+        for row in Branch.objects.filter(is_main=False, is_active=True):
+            branch_buckets[row.id] = blank_accounting_bucket(row.id, row.name, False)
+    elif selection["mode"] == "branch":
+        branch = selection["branch"]
+        branch_buckets[branch.id] = blank_accounting_bucket(branch.id, branch.name, False)
     by_kind = {
         "standard": {"quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")},
         "custom": {"quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")},
@@ -352,25 +451,16 @@ def accounting_report_data(request):
         if payment not in ["cash", "card"]:
             payment = "unknown"
         quantity = int(history.quantity or 0)
+        stems = catalog_history_flower_stems(history)
         sale_total = catalog_history_sale_total(history)
         cost_total = catalog_history_cost_total(history)
         cost_breakdown = catalog_history_cost_breakdown(history)
         discount = Decimal(history.discount_amount or 0)
-        summary["total_sales"] += sale_total
-        summary[f"{payment}_total"] += sale_total
-        summary["total_quantity"] += quantity
-        summary["discount_total"] += discount
-        summary["cost_total"] += cost_total
-        summary["flower_cost_total"] += cost_breakdown["flower_cost"]
-        summary["material_cost_total"] += cost_breakdown["material_cost"]
-        summary["florist_fee_cost_total"] += cost_breakdown["florist_fee_cost"]
-        if discount > 0:
-            summary["discounted_sales_count"] += 1
-            summary["discounted_quantity"] += quantity
-        if kind == "custom":
-            summary["custom_quantity"] += quantity
-        else:
-            summary["standard_quantity"] += quantity
+        add_sale_to_bucket(summary, payment, quantity, stems, sale_total, discount, cost_total, cost_breakdown, kind)
+        if item.branch_id not in branch_buckets:
+            name = item.branch.name if item.branch_id else MAIN_BRANCH_LABEL
+            branch_buckets[item.branch_id] = blank_accounting_bucket(item.branch_id, name, item.branch_id is None)
+        add_sale_to_bucket(branch_buckets[item.branch_id], payment, quantity, stems, sale_total, discount, cost_total, cost_breakdown, kind)
         by_kind.setdefault(kind, {"quantity": 0, "sales": Decimal("0"), "discount": Decimal("0")})
         by_kind[kind]["quantity"] += quantity
         by_kind[kind]["sales"] += sale_total
@@ -390,6 +480,10 @@ def accounting_report_data(request):
             "arrangement_type": item.arrangement_type,
             "volume": item.volume,
             "quantity": quantity,
+            "flower_stems": stems,
+            "branch_id": item.branch_id,
+            "branch_name": item.branch.name if item.branch_id else MAIN_BRANCH_LABEL,
+            "is_main_branch": item.branch_id is None,
             "created_at": history.created_at,
             "catalog_created_at": item.created_at,
             "sold_at": history.created_at,
@@ -414,21 +508,38 @@ def accounting_report_data(request):
         history_rows.append(row)
         if discount > 0:
             discount_rows.append(row)
-    waste_movements = StockMovement.objects.filter(movement_type="waste").select_related("batch")
-    if date_from:
-        waste_movements = waste_movements.filter(created_at__date__gte=date_from)
-    if date_to:
-        waste_movements = waste_movements.filter(created_at__date__lte=date_to)
-    waste_stems = 0
-    for movement in waste_movements:
-        stems = abs(int(movement.quantity_stems or 0))
-        waste_stems += stems
-        summary["waste_cost_total"] += (Decimal(stems) * Decimal(movement.batch.cost_per_stem or 0)).quantize(Decimal("0.01"))
-    summary["waste_stems"] = waste_stems
+    # Chiqit faqat asosiy skladda bo'ladi, filiallarda gul saqlanmaydi.
+    if accounting_includes_main(selection):
+        waste_movements = StockMovement.objects.filter(movement_type="waste").select_related("batch")
+        if date_from:
+            waste_movements = waste_movements.filter(created_at__date__gte=date_from)
+        if date_to:
+            waste_movements = waste_movements.filter(created_at__date__lte=date_to)
+        main_bucket = branch_buckets.setdefault(None, blank_accounting_bucket())
+        for movement in waste_movements:
+            waste = abs(int(movement.quantity_stems or 0))
+            cost = (Decimal(waste) * Decimal(movement.batch.cost_per_stem or 0)).quantize(Decimal("0.01"))
+            summary["waste_stems"] += waste
+            summary["waste_cost_total"] += cost
+            main_bucket["waste_stems"] += waste
+            main_bucket["waste_cost_total"] += cost
     summary["net_profit"] = summary["total_sales"] - summary["cost_total"]
+    for bucket in branch_buckets.values():
+        bucket["net_profit"] = bucket["total_sales"] - bucket["cost_total"]
+        bucket["share_percent"] = (
+            (bucket["total_sales"] / summary["total_sales"] * 100).quantize(Decimal("0.01"))
+            if summary["total_sales"] else Decimal("0")
+        )
+    by_branch = sorted(branch_buckets.values(), key=lambda row: (not row["is_main"], row["branch_name"]))
     return {
         "period": {"date_from": date_from.isoformat() if date_from else None, "date_to": date_to.isoformat() if date_to else None},
+        "branch_filter": {
+            "mode": selection["mode"],
+            "branch_id": selection["branch"].id if selection["branch"] else None,
+            "branch_name": selection["branch"].name if selection["branch"] else None,
+        },
         "summary": summary,
+        "by_branch": by_branch,
         "by_kind": [{"catalog_kind": key, **value} for key, value in by_kind.items()],
         "by_payment": [{"payment_type": key, **value} for key, value in by_payment.items()],
         "by_volume": sorted(by_volume.values(), key=lambda row: (row["catalog_kind"], row["volume"])),
@@ -1522,6 +1633,9 @@ class AccountingReportView(APIView):
     permission_classes = [RolePermission]
     permission_page = "dashboard"
 
+    @extend_schema(parameters=[
+        OpenApiParameter("branch", str, description="all — hamma filial (sukut), main — faqat asosiy filial, <id> — bitta filial. Filial foydalanuvchisiga ta'sir qilmaydi."),
+    ])
     def get(self, request):
         if not has_page_permission(request.user, "dashboard", False):
             return forbidden()
@@ -1882,7 +1996,9 @@ def export_profit_workbook(request):
         ("Naqd", summary["cash_total"]),
         ("Karta", summary["card_total"]),
         ("Aniqlanmagan to‘lov", summary["unknown_total"]),
+        ("Sotuvlar soni", summary["sales_count"]),
         ("Sotilgan son", summary["total_quantity"]),
+        ("Sotilgan gul donasi", summary["flower_stems"]),
         ("Standart sotilgan", summary["standard_quantity"]),
         ("Custom sotilgan", summary["custom_quantity"]),
         ("Sof foyda", summary["net_profit"]),
@@ -1891,6 +2007,21 @@ def export_profit_workbook(request):
     ]
     for label, value in summary_rows:
         sheet.append([label, money_label(value) if isinstance(value, Decimal) else value])
+    branch_sheet = workbook.create_sheet("Filiallar")
+    branch_sheet.append([
+        "Filial", "Sotuvlar soni", "Sotilgan son", "Sotilgan gul donasi", "Savdo",
+        "Naqd", "Naqd soni", "Karta", "Karta soni", "Aniqlanmagan", "Skidka",
+        "Skidkali sotuv", "Tannarx", "Sof foyda", "Ulush %",
+    ])
+    _style_header(branch_sheet)
+    for row in data["by_branch"]:
+        branch_sheet.append([
+            row["branch_name"], row["sales_count"], row["total_quantity"], row["flower_stems"],
+            money_label(row["total_sales"]), money_label(row["cash_total"]), row["cash_count"],
+            money_label(row["card_total"]), row["card_count"], money_label(row["unknown_total"]),
+            money_label(row["discount_total"]), row["discounted_sales_count"],
+            money_label(row["cost_total"]), money_label(row["net_profit"]), str(row["share_percent"]),
+        ])
     volume_sheet = workbook.create_sheet("Hajmlar")
     volume_sheet.append(["Katalog turi", "Hajm", "Soni", "Savdo", "Skidka"])
     for cell in volume_sheet[1]:
@@ -1900,7 +2031,7 @@ def export_profit_workbook(request):
     for row in data["by_volume"]:
         volume_sheet.append([row["catalog_kind"], row["volume"], row["quantity"], money_label(row["sales"]), money_label(row["discount"])])
     history_sheet = workbook.create_sheet("Sotuv history")
-    history_sheet.append(["Sotilgan vaqt", "Katalogga qo‘shilgan vaqt", "Katalog", "Turi", "Arrangement", "Hajm", "Florist", "Soni", "Asl jami", "Sotuv jami", "Cost", "Sof foyda", "To‘lov", "Skidka", "Skidka foiz", "Kim sotdi", "Izoh"])
+    history_sheet.append(["Sotilgan vaqt", "Katalogga qo‘shilgan vaqt", "Filial", "Katalog", "Turi", "Arrangement", "Hajm", "Florist", "Soni", "Gul donasi", "Asl jami", "Sotuv jami", "Cost", "Sof foyda", "To‘lov", "Skidka", "Skidka foiz", "Kim sotdi", "Izoh"])
     for cell in history_sheet[1]:
         cell.fill = PatternFill("solid", fgColor="0F172A")
         cell.font = Font(color="FFFFFF", bold=True)
@@ -1909,12 +2040,14 @@ def export_profit_workbook(request):
         history_sheet.append([
             local_datetime_label(row["sold_at"]),
             local_datetime_label(row["catalog_created_at"]),
+            row["branch_name"],
             row["catalog_name"],
             row["catalog_kind"],
             row["arrangement_type"],
             row["volume"] or "Belgilanmagan",
             row["florist_name"],
             row["quantity"],
+            row["flower_stems"],
             money_label(row["listed_total"]),
             money_label(row["sale_total"]),
             money_label(row["cost_total"]),
@@ -1926,7 +2059,7 @@ def export_profit_workbook(request):
             row["discount_reason"],
         ])
     discount_sheet = workbook.create_sheet("Skidkalar")
-    discount_sheet.append(["Sana", "Katalog", "Turi", "Hajm", "Soni", "Skidka summa", "Skidka foiz", "Izoh", "Kim sotdi"])
+    discount_sheet.append(["Sana", "Filial", "Katalog", "Turi", "Hajm", "Soni", "Skidka summa", "Skidka foiz", "Izoh", "Kim sotdi"])
     for cell in discount_sheet[1]:
         cell.fill = PatternFill("solid", fgColor="0F172A")
         cell.font = Font(color="FFFFFF", bold=True)
@@ -1934,6 +2067,7 @@ def export_profit_workbook(request):
     for row in data["discounted_sales"]:
         discount_sheet.append([
             local_datetime_label(row["sold_at"]),
+            row["branch_name"],
             row["catalog_name"],
             row["catalog_kind"],
             row["volume"] or "Belgilanmagan",
@@ -1944,6 +2078,7 @@ def export_profit_workbook(request):
             row["sold_by"],
         ])
     autosize_sheet(sheet)
+    autosize_sheet(branch_sheet)
     autosize_sheet(volume_sheet)
     autosize_sheet(history_sheet)
     autosize_sheet(discount_sheet)
