@@ -13,6 +13,22 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
+class Branch(TimeStampedModel):
+    """Filial. Asosiy filial tizimda sukut bo'yicha, qo'shimcha filiallarda faqat tayyor katalog bo'ladi."""
+
+    name = models.CharField(max_length=120, unique=True)
+    is_main = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-is_main", "name"]
+        verbose_name_plural = "Branches"
+
+    def __str__(self):
+        return self.name
+
+
 class UserProfile(TimeStampedModel):
     ROLE_CHOICES = [
         ("developer", "Developer"),
@@ -27,6 +43,7 @@ class UserProfile(TimeStampedModel):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="operator")
     language = models.CharField(max_length=2, choices=[("uz", "O‘zbek"), ("ru", "Русский")], default="uz")
+    branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.SET_NULL, related_name="users")
 
 
 class PagePermission(TimeStampedModel):
@@ -414,6 +431,9 @@ class CatalogItem(TimeStampedModel):
     arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti")])
     catalog_kind = models.CharField(max_length=20, choices=CATALOG_KIND_CHOICES, default="standard")
     volume = models.CharField(max_length=80, blank=True)
+    branch = models.ForeignKey("Branch", null=True, blank=True, on_delete=models.PROTECT, related_name="catalog_items")
+    source_item = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="transferred_items")
+    source_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     customer = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     height_cm = models.PositiveIntegerField(null=True, blank=True)
@@ -439,6 +459,25 @@ class CatalogItem(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class CatalogTransfer(TimeStampedModel):
+    """1-filialdan boshqa filialga yuborilgan katalog mahsuloti."""
+
+    source_item = models.ForeignKey(CatalogItem, on_delete=models.SET_NULL, null=True, blank=True, related_name="transfers_out")
+    target_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="transfers_in")
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name="transfers")
+    quantity = models.PositiveIntegerField()
+    source_price = models.DecimalField(max_digits=12, decimal_places=2)
+    target_price = models.DecimalField(max_digits=12, decimal_places=2)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_transfers")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.target_item.name_uz} → {self.branch}"
 
 
 class CatalogComposition(TimeStampedModel):

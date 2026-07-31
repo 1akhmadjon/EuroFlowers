@@ -29,11 +29,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, AISettingsSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, AISettingsSerializer, BranchSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import catalog_cost_breakdown, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
+from .inventory_services import catalog_cost_breakdown, transfer_catalog_to_branch, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -300,6 +300,8 @@ def catalog_history_cost_breakdown(history):
 def sold_catalog_history_queryset(request):
     date_from, date_to = parse_date_range_params(request)
     rows = CatalogHistory.objects.filter(action="sold").select_related("catalog_item__florist__user", "created_by")
+    branch = user_branch(getattr(request, "user", None))
+    rows = rows.filter(catalog_item__branch=branch) if branch else rows.filter(catalog_item__branch__isnull=True)
     if date_from:
         rows = rows.filter(created_at__date__gte=date_from)
     if date_to:
@@ -1526,6 +1528,116 @@ class AccountingReportView(APIView):
         return Response(json_safe(accounting_report_data(request)))
 
 
+def user_branch(user):
+    """Foydalanuvchi qaysi filialga tegishli. None bo'lsa asosiy filial."""
+    return getattr(getattr(user, "profile", None), "branch", None)
+
+
+def scope_catalog_to_branch(queryset, user):
+    """Filiallar katalogi aralashmaydi. Filial foydalanuvchisi faqat o'z filialini,
+    asosiy filial foydalanuvchisi faqat asosiy katalogni ko'radi."""
+    branch = user_branch(user)
+    return queryset.filter(branch=branch) if branch else queryset.filter(branch__isnull=True)
+
+
+def branch_report_data(request):
+    branch_id = request.query_params.get("branch")
+    date_from, date_to = parse_date_range_params(request)
+    branches = Branch.objects.filter(is_main=False, is_active=True)
+    if branch_id:
+        branches = branches.filter(id=branch_id)
+    rows = []
+    for branch in branches:
+        transfers = CatalogTransfer.objects.filter(branch=branch)
+        items = CatalogItem.objects.filter(branch=branch)
+        history = CatalogHistory.objects.filter(action="sold", catalog_item__branch=branch).select_related("catalog_item")
+        if date_from:
+            transfers = transfers.filter(created_at__date__gte=date_from)
+            history = history.filter(created_at__date__gte=date_from)
+        if date_to:
+            transfers = transfers.filter(created_at__date__lte=date_to)
+            history = history.filter(created_at__date__lte=date_to)
+        received_quantity = transfers.aggregate(value=Coalesce(Sum("quantity"), 0))["value"]
+        sold_quantity = 0
+        sold_revenue = Decimal("0")
+        source_value = Decimal("0")
+        discounted_sales = 0
+        discounted_quantity = 0
+        discount_total = Decimal("0")
+        for row in history:
+            quantity = int(row.quantity or 0)
+            sold_quantity += quantity
+            sold_revenue += catalog_history_sale_total(row)
+            source_value += Decimal(row.catalog_item.source_price or 0) * Decimal(quantity)
+            discount = Decimal(row.discount_amount or 0)
+            if discount > 0:
+                discounted_sales += 1
+                discounted_quantity += quantity
+                discount_total += discount
+        rows.append({
+            "branch_id": branch.id,
+            "branch_name": branch.name,
+            "received_transfers": transfers.count(),
+            "received_quantity": received_quantity,
+            "catalog_items": items.count(),
+            "available_quantity": max(items.aggregate(value=Coalesce(Sum("quantity_total"), 0))["value"] - items.aggregate(value=Coalesce(Sum("quantity_sold"), 0))["value"], 0),
+            "sold_quantity": sold_quantity,
+            "sold_revenue": sold_revenue,
+            "source_value": source_value,
+            "markup_total": sold_revenue - source_value,
+            "discounted_sales_count": discounted_sales,
+            "discounted_quantity": discounted_quantity,
+            "discount_total": discount_total,
+        })
+    totals = {
+        "received_quantity": sum(row["received_quantity"] for row in rows),
+        "sold_quantity": sum(row["sold_quantity"] for row in rows),
+        "sold_revenue": sum((row["sold_revenue"] for row in rows), Decimal("0")),
+        "discounted_quantity": sum(row["discounted_quantity"] for row in rows),
+        "discount_total": sum((row["discount_total"] for row in rows), Decimal("0")),
+    }
+    return {
+        "period": {"date_from": date_from.isoformat() if date_from else None, "date_to": date_to.isoformat() if date_to else None},
+        "branches": rows,
+        "totals": totals,
+    }
+
+
+class BranchViewSet(ScopedViewSet):
+    permission_page = "settings"
+    write_roles = ["admin"]
+    queryset = Branch.objects.all()
+    serializer_class = BranchSerializer
+    filterset_fields = ["is_active", "is_main"]
+
+    def get_permissions(self):
+        return super().get_permissions()
+
+
+class CatalogTransferViewSet(viewsets.ReadOnlyModelViewSet):
+    """Filialga yuborilgan katalog tarixi."""
+
+    permission_classes = [RolePermission]
+    permission_page = "catalog"
+    queryset = CatalogTransfer.objects.select_related("branch", "target_item", "source_item", "created_by").all()
+    serializer_class = CatalogTransferSerializer
+    filterset_fields = ["branch", "source_item", "target_item"]
+    ordering_fields = ["created_at", "quantity"]
+
+
+class BranchReportView(APIView):
+    """Admin uchun: filialga qancha katalog yuborilgan, qanchasi sotilgan,
+    qanchasi chegirma bilan sotilgan."""
+
+    permission_classes = [RolePermission]
+    permission_page = "dashboard"
+
+    def get(self, request):
+        if not has_page_permission(request.user, "dashboard", False):
+            return forbidden()
+        return Response(json_safe(branch_report_data(request)))
+
+
 class CatalogItemViewSet(ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
@@ -1534,8 +1646,31 @@ class CatalogItemViewSet(ScopedViewSet):
     filterset_fields = ["status", "arrangement_type", "catalog_kind", "florist", "customer"]
     search_fields = ["name_uz", "description_uz", "description_ru", "customer__name", "customer__phone"]
 
+    def get_queryset(self):
+        return scope_catalog_to_branch(super().get_queryset(), self.request.user)
+
     def perform_create(self, serializer):
+        # Filial foydalanuvchisi yangi katalog yaratmaydi, unga faqat yuboriladi.
+        branch = user_branch(self.request.user)
+        if branch:
+            raise serializers.ValidationError({"detail": "Filialda yangi katalog yaratilmaydi. Asosiy filialdan yuboriladi."})
         serializer.save(created_by=self.request.user)
+
+    @extend_schema(request=CatalogTransferRequestSerializer, responses=CatalogTransferSerializer)
+    @action(detail=True, methods=["post"])
+    def transfer(self, request, pk=None):
+        if user_branch(request.user):
+            return Response({"detail": "Faqat asosiy filial katalogni boshqa filialga yuboradi"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = CatalogTransferRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            transfer = transfer_catalog_to_branch(
+                self.get_object(), serializer.validated_data["branch"], serializer.validated_data["quantity"],
+                serializer.validated_data.get("price"), serializer.validated_data.get("note", ""), request.user,
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(CatalogTransferSerializer(transfer).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(request=CatalogSellRequestSerializer, responses=CatalogItemSerializer)
     @action(detail=True, methods=["post"])
@@ -2278,7 +2413,8 @@ def dashboard(request):
     stock_movements = StockMovement.objects.all()
     leads = Lead.objects.all()
     customers = Customer.objects.all()
-    catalog = CatalogItem.objects.all()
+    branch = user_branch(request.user)
+    catalog = CatalogItem.objects.filter(branch=branch) if branch else CatalogItem.objects.filter(branch__isnull=True)
     notifications = notification_queryset_for_user(request.user)
     conversations = Conversation.objects.all()
     won_leads = leads.filter(status="won")
@@ -2290,13 +2426,13 @@ def dashboard(request):
     flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
     period_catalog_sold = apply_updated_range(catalog.filter(quantity_sold__gt=0), period_start, period_end)
     catalog_financials = catalog_sale_financials(period_catalog_sold)
-    catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end)
+    catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end, branch)
     today_start = timezone.make_aware(datetime.combine(today, time.min))
     today_end = timezone.make_aware(datetime.combine(today, time.max))
     week_start_dt = timezone.make_aware(datetime.combine(week_start, time.min))
-    catalog_today = catalog_sales_totals(catalog_sales_queryset(today_start, today_end))
-    catalog_week = catalog_sales_totals(catalog_sales_queryset(week_start_dt, today_end))
-    catalog_period_rows = list(catalog_sales_queryset(period_start, period_end))
+    catalog_today = catalog_sales_totals(catalog_sales_queryset(today_start, today_end, branch))
+    catalog_week = catalog_sales_totals(catalog_sales_queryset(week_start_dt, today_end, branch))
+    catalog_period_rows = list(catalog_sales_queryset(period_start, period_end, branch))
     catalog_period = catalog_sales_totals(catalog_period_rows)
     lead_revenue_today = won_leads.filter(updated_at__date=today).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
     lead_revenue_7d = won_leads.filter(updated_at__date__gte=week_start).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
@@ -2386,10 +2522,12 @@ def analytics(request):
     period_won_leads = apply_updated_range(won_leads, period_start, period_end)
     period_stock_out = apply_created_range(stock_movements.filter(movement_type="out", quantity_stems__lt=0), period_start, period_end)
     flowers_sold = period_stock_out.aggregate(value=Coalesce(Sum("quantity_stems"), 0))["value"] or 0
-    period_catalog_sold = apply_updated_range(CatalogItem.objects.filter(quantity_sold__gt=0), period_start, period_end)
+    branch = user_branch(request.user)
+    branch_catalog = CatalogItem.objects.filter(branch=branch) if branch else CatalogItem.objects.filter(branch__isnull=True)
+    period_catalog_sold = apply_updated_range(branch_catalog.filter(quantity_sold__gt=0), period_start, period_end)
     catalog_financials = catalog_sale_financials(period_catalog_sold)
-    catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end)
-    catalog_rows = list(catalog_sales_queryset(period_start, period_end))
+    catalog_discount_stats = catalog_sale_discount_stats(period_start, period_end, branch)
+    catalog_rows = list(catalog_sales_queryset(period_start, period_end, branch))
     catalog_sales = catalog_sales_totals(catalog_rows)
     lead_revenue = period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
     total_orders = period_won_leads.count() + catalog_sales["orders"]
@@ -2563,9 +2701,12 @@ def analytics_daily_stats(leads, conversations, won_leads, start, end, catalog_r
     return days
 
 
-def catalog_sales_queryset(start=None, end=None):
-    """Katalogdan haqiqiy sotuvlar. /api/accounting/ bilan bir xil manba."""
-    return apply_created_range(CatalogHistory.objects.filter(action="sold").select_related("catalog_item"), start, end)
+def catalog_sales_queryset(start=None, end=None, branch=None):
+    """Katalogdan haqiqiy sotuvlar. /api/accounting/ bilan bir xil manba.
+    Filiallar aralashmasligi uchun har doim filial bo'yicha ajratiladi."""
+    rows = CatalogHistory.objects.filter(action="sold").select_related("catalog_item")
+    rows = rows.filter(catalog_item__branch=branch) if branch else rows.filter(catalog_item__branch__isnull=True)
+    return apply_created_range(rows, start, end)
 
 
 def catalog_sales_totals(rows):
@@ -2717,8 +2858,10 @@ def catalog_sale_financials(queryset):
     return {"revenue": revenue, "cost": cost, "florist_salary": florist_salary, "discount": discount, "profit": revenue - cost}
 
 
-def catalog_sale_discount_stats(start, end):
-    rows = apply_created_range(CatalogHistory.objects.filter(action="sold", discount_amount__gt=0), start, end)
+def catalog_sale_discount_stats(start, end, branch=None):
+    rows = CatalogHistory.objects.filter(action="sold", discount_amount__gt=0)
+    rows = rows.filter(catalog_item__branch=branch) if branch else rows.filter(catalog_item__branch__isnull=True)
+    rows = apply_created_range(rows, start, end)
     totals = rows.aggregate(
         discounted_sales_count=Count("id"),
         discounted_quantity=Coalesce(Sum("quantity"), 0),

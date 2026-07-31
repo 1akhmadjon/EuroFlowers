@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -21,7 +21,7 @@ class DetailValidationError(APIException):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
-        fields = ["role", "language"]
+        fields = ["role", "language", "branch"]
 
 
 class PagePermissionSerializer(serializers.ModelSerializer):
@@ -80,6 +80,7 @@ class UserSerializer(serializers.ModelSerializer):
 class UserWriteSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(choices=UserProfile.ROLE_CHOICES, write_only=True, required=False)
     language = serializers.ChoiceField(choices=[("uz", "O‘zbek"), ("ru", "Русский")], write_only=True, required=False)
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), write_only=True, required=False, allow_null=True)
     permissions = PagePermissionInputSerializer(many=True, required=False)
     password = serializers.CharField(write_only=True, required=False, min_length=6)
     profile = UserProfileSerializer(read_only=True)
@@ -87,7 +88,7 @@ class UserWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "username", "first_name", "last_name", "email", "password", "is_active", "role", "language", "permissions", "profile", "permission_matrix"]
+        fields = ["id", "username", "first_name", "last_name", "email", "password", "is_active", "role", "language", "branch", "permissions", "profile", "permission_matrix"]
 
     def get_permission_matrix(self, obj) -> list[dict[str, Any]]:
         return permission_matrix(obj)
@@ -124,6 +125,7 @@ class UserWriteSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         role = validated_data.pop("role", "operator")
         language = validated_data.pop("language", "uz")
+        branch = validated_data.pop("branch", None)
         permissions = validated_data.pop("permissions", None)
         password = validated_data.pop("password", None)
         user = User(**validated_data)
@@ -132,13 +134,14 @@ class UserWriteSerializer(serializers.ModelSerializer):
         else:
             user.set_unusable_password()
         user.save()
-        UserProfile.objects.create(user=user, role=role, language=language)
+        UserProfile.objects.create(user=user, role=role, language=language, branch=branch)
         self.save_permissions(user, permissions)
         return user
 
     def update(self, instance, validated_data):
         role = validated_data.pop("role", None)
         language = validated_data.pop("language", None)
+        branch = validated_data.pop("branch", serializers.empty)
         permissions = validated_data.pop("permissions", None)
         password = validated_data.pop("password", None)
         for key, value in validated_data.items():
@@ -151,6 +154,8 @@ class UserWriteSerializer(serializers.ModelSerializer):
             profile.role = role
         if language is not None:
             profile.language = language
+        if branch is not serializers.empty:
+            profile.branch = branch
         profile.save()
         self.save_permissions(instance, permissions)
         return instance
@@ -973,6 +978,38 @@ class SocialPostSerializer(serializers.ModelSerializer):
         return post
 
 
+class BranchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Branch
+        fields = "__all__"
+
+
+class CatalogTransferSerializer(serializers.ModelSerializer):
+    branch_name = serializers.SerializerMethodField(read_only=True)
+    catalog_name = serializers.SerializerMethodField(read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = CatalogTransfer
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.CharField())
+    def get_branch_name(self, obj):
+        return obj.branch.name
+
+    @extend_schema_field(serializers.CharField())
+    def get_catalog_name(self, obj):
+        return obj.target_item.name_uz
+
+
+class CatalogTransferRequestSerializer(serializers.Serializer):
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.filter(is_active=True, is_main=False))
+    quantity = serializers.IntegerField(min_value=1)
+    price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+    note = serializers.CharField(required=False, allow_blank=True)
+
+
 class CatalogItemSerializer(serializers.ModelSerializer):
     composition = CatalogCompositionSerializer(many=True, required=False)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
@@ -980,6 +1017,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
     customer_detail = serializers.SerializerMethodField(read_only=True)
+    branch_name = serializers.SerializerMethodField(read_only=True)
     profit = serializers.SerializerMethodField(read_only=True)
     customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
@@ -988,6 +1026,10 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         model = CatalogItem
         fields = "__all__"
         read_only_fields = ["created_by", "sold_at", "stock_deducted_at", "calculated_component_price", "discount_amount", "discount_percent"]
+
+    @extend_schema_field(serializers.CharField())
+    def get_branch_name(self, obj):
+        return obj.branch.name if obj.branch_id else "Asosiy filial"
 
     @extend_schema_field(serializers.DictField())
     def get_profit(self, obj):

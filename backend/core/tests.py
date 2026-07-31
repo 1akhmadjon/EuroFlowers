@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -1475,6 +1475,136 @@ class ApiTests(TestCase):
         duplicate = self.client.post("/api/florist-days-off/", {"florist": florist.id, "work_date": "2026-08-02", "kind": "sick"}, format="json")
         self.assertEqual(duplicate.status_code, 400)
 
+    def _parkent(self):
+        return Branch.objects.get(name="Parkent filiali")
+
+    def _main_catalog(self, quantity=5, price="300000"):
+        item = CatalogItem.objects.create(name_uz="Filial buketi", arrangement_type="bouquet", price=Decimal(price), quantity_total=quantity, quantity_stock_deducted=quantity, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=4)
+        sync_catalog_financials(item)
+        return item
+
+    def test_transfer_moves_part_of_catalog_to_branch(self):
+        item = self._main_catalog(quantity=5, price="300000")
+        parkent = self._parkent()
+        response = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": parkent.id, "quantity": 2, "price": "450000", "note": "Parkentga"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["quantity"], 2)
+        self.assertEqual(Decimal(response.data["source_price"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(response.data["target_price"]), Decimal("450000.00"))
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_total, 3)
+        target = CatalogItem.objects.get(id=response.data["target_item"])
+        self.assertEqual(target.branch_id, parkent.id)
+        self.assertEqual(target.quantity_total, 2)
+        self.assertEqual(target.price, Decimal("450000.00"))
+        self.assertEqual(target.source_price, Decimal("300000.00"))
+        self.assertEqual(target.source_item_id, item.id)
+
+    def test_transfer_does_not_touch_warehouse_stock(self):
+        item = self._main_catalog()
+        self.batch.refresh_from_db()
+        before = self.batch.remaining_stems
+        self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 2}, format="json")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before)
+
+    def test_transfer_rejects_more_than_available(self):
+        item = self._main_catalog(quantity=2)
+        response = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 5}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("atigi 2 dona", response.data["detail"])
+
+    def test_branch_catalogs_do_not_mix(self):
+        item = self._main_catalog()
+        parkent = self._parkent()
+        self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": parkent.id, "quantity": 2}, format="json")
+        # asosiy filial admini faqat asosiy katalogni ko'radi
+        main_list = self.client.get("/api/catalog/")
+        names = {row["id"] for row in main_list.data["results"]}
+        self.assertIn(item.id, names)
+        self.assertEqual(len(names), 1)
+        # filial foydalanuvchisi faqat o'z filialini ko'radi
+        user = User.objects.create_user("parkent-user", password="p")
+        UserProfile.objects.create(user=user, role="operator", branch=parkent)
+        PagePermission.objects.create(user=user, page="catalog", can_view=True, can_control=True)
+        client = APIClient()
+        client.force_authenticate(user)
+        branch_list = client.get("/api/catalog/")
+        self.assertEqual(branch_list.data["count"], 1)
+        self.assertEqual(branch_list.data["results"][0]["branch_name"], "Parkent filiali")
+
+    def test_branch_user_cannot_create_catalog(self):
+        parkent = self._parkent()
+        user = User.objects.create_user("parkent-creator", password="p")
+        UserProfile.objects.create(user=user, role="operator", branch=parkent)
+        PagePermission.objects.create(user=user, page="catalog", can_view=True, can_control=True)
+        client = APIClient()
+        client.force_authenticate(user)
+        response = client.post("/api/catalog/", {"name_uz": "Yangi", "arrangement_type": "bouquet", "price": "100000", "quantity_total": 1}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_branch_can_change_price_then_sell_with_discount(self):
+        item = self._main_catalog(quantity=3, price="300000")
+        parkent = self._parkent()
+        transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": parkent.id, "quantity": 2, "price": "450000"}, format="json")
+        target_id = transfer.data["target_item"]
+        user = User.objects.create_user("parkent-seller", password="p")
+        UserProfile.objects.create(user=user, role="operator", branch=parkent)
+        PagePermission.objects.create(user=user, page="catalog", can_view=True, can_control=True)
+        client = APIClient()
+        client.force_authenticate(user)
+        # narxni yana o'zgartiradi
+        changed = client.patch(f"/api/catalog/{target_id}/", {"price": "500000"}, format="json")
+        self.assertEqual(changed.status_code, 200)
+        # keyin chegirma bilan sotadi
+        sold = client.post(f"/api/catalog/{target_id}/sell/", {"quantity": 1, "sale_price": "420000", "discount_reason": "Doimiy mijoz"}, format="json")
+        self.assertEqual(sold.status_code, 200)
+        history = CatalogHistory.objects.get(catalog_item_id=target_id, action="sold")
+        self.assertEqual(history.listed_unit_price, Decimal("500000.00"))
+        self.assertEqual(history.sold_unit_price, Decimal("420000.00"))
+        self.assertEqual(history.discount_amount, Decimal("80000.00"))
+        self.assertEqual(history.discount_reason, "Doimiy mijoz")
+
+    def test_branch_report_counts_transfers_sales_and_discounts(self):
+        item = self._main_catalog(quantity=5, price="300000")
+        parkent = self._parkent()
+        transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": parkent.id, "quantity": 3, "price": "450000"}, format="json")
+        target = CatalogItem.objects.get(id=transfer.data["target_item"])
+        mark_catalog_sold(target, self.user, quantity=1)
+        mark_catalog_sold(target, self.user, quantity=1, sale_price=Decimal("400000"), discount_reason="Aksiya")
+        response = self.client.get("/api/branch-report/")
+        self.assertEqual(response.status_code, 200)
+        row = next(r for r in response.data["branches"] if r["branch_name"] == "Parkent filiali")
+        self.assertEqual(row["received_quantity"], 3)
+        self.assertEqual(row["sold_quantity"], 2)
+        self.assertEqual(Decimal(row["sold_revenue"]), Decimal("850000.00"))
+        self.assertEqual(Decimal(row["source_value"]), Decimal("600000.00"))
+        self.assertEqual(Decimal(row["markup_total"]), Decimal("250000.00"))
+        self.assertEqual(row["discounted_sales_count"], 1)
+        self.assertEqual(row["discounted_quantity"], 1)
+        self.assertEqual(Decimal(row["discount_total"]), Decimal("50000.00"))
+
+    def test_branch_accounting_and_dashboard_are_separate(self):
+        item = self._main_catalog(quantity=4, price="300000")
+        parkent = self._parkent()
+        transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": parkent.id, "quantity": 2, "price": "500000"}, format="json")
+        target = CatalogItem.objects.get(id=transfer.data["target_item"])
+        mark_catalog_sold(item, self.user, quantity=1)
+        mark_catalog_sold(target, self.user, quantity=1)
+        main = self.client.get("/api/accounting/")
+        self.assertEqual(Decimal(main.data["summary"]["total_sales"]), Decimal("300000.00"))
+        user = User.objects.create_user("parkent-acc", password="p")
+        UserProfile.objects.create(user=user, role="operator", branch=parkent)
+        for page in ["catalog", "dashboard"]:
+            PagePermission.objects.create(user=user, page=page, can_view=True, can_control=True)
+        client = APIClient()
+        client.force_authenticate(user)
+        branch_acc = client.get("/api/accounting/")
+        self.assertEqual(Decimal(branch_acc.data["summary"]["total_sales"]), Decimal("500000.00"))
+        branch_dash = client.get("/api/dashboard/")
+        self.assertEqual(Decimal(branch_dash.data["catalog_sales_revenue_today"]), Decimal("500000.00"))
+
     def test_volume_rate_requires_florist(self):
         response = self.client.post("/api/florist-volume-rates/", {"arrangement_type": "bouquet", "volume": "M", "default_stems": 25, "florist_fee": "60000"}, format="json")
         self.assertEqual(response.status_code, 400)
@@ -1861,9 +1991,12 @@ class ApiTests(TestCase):
         message = conversation.messages.get(sender="operator", text="Javob")
         self.assertEqual(message.metadata["delivery_status"], "failed")
 
-    def test_branches_endpoint_is_removed(self):
+    def test_branches_endpoint_lists_seeded_branches(self):
         response = self.client.get("/api/branches/")
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
+        names = {row["name"] for row in response.data["results"]}
+        self.assertIn("Asosiy filial", names)
+        self.assertIn("Parkent filiali", names)
 
     def test_admin_permission_matrix_uses_saved_rows(self):
         UserProfile.objects.create(user=self.user, role="admin")
@@ -1908,6 +2041,7 @@ class ApiTests(TestCase):
         created = User.objects.get(username="branchless-user")
         self.assertFalse(hasattr(created.profile, "branches"))
         self.assertNotIn("branches", response.json()["profile"])
+        self.assertIsNone(created.profile.branch_id)
         response = self.client.post("/api/packaging/", {"packaging_type": "basket", "name_uz": "Branchsiz savat", "quantity": 1, "sale_price": "100000.00"}, format="json")
         self.assertEqual(response.status_code, 201)
         self.assertNotIn("branch", response.json())

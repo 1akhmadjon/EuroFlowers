@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, CatalogHistory, CatalogItem, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+from .models import AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
 
 
 def money(value):
@@ -277,6 +277,77 @@ def restore_florist_stock(florist, rows, quantity):
         balance = florist_balance_row(florist, row.stock_batch, lock=True)
         balance.remaining_stems += row.quantity_stems * quantity
         balance.save(update_fields=["remaining_stems", "updated_at"])
+
+
+
+def transfer_catalog_to_branch(item, branch, quantity, target_price=None, note="", user=None):
+    """Katalog mahsulotining bir qismini boshqa filialga yuboradi.
+
+    Sklad allaqachon 1-filialda yechilgan, shuning uchun bu yerda sklad tegilmaydi —
+    faqat katalog yozuvi bo'linadi va yangi filialda o'z narxi bilan paydo bo'ladi.
+    """
+    quantity = int(quantity or 0)
+    if quantity < 1:
+        raise ValueError("Yuboriladigan son 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        if item.branch_id:
+            raise ValueError("Faqat asosiy filial katalogini boshqa filialga yuborish mumkin")
+        available = int(item.quantity_total or 0) - int(item.quantity_sold or 0)
+        if quantity > available:
+            raise ValueError(f"Yuborish uchun atigi {available} dona bor")
+        total = Decimal(item.quantity_total or 1)
+        share = Decimal(quantity) / total if total else Decimal("0")
+        source_price = Decimal(item.price or 0)
+        price = Decimal(str(target_price)) if target_price not in [None, ""] else source_price
+        if price < 0:
+            raise ValueError("Narx manfiy bo‘lishi mumkin emas")
+
+        target = CatalogItem.objects.create(
+            name_uz=item.name_uz, description_uz=item.description_uz, description_ru=item.description_ru,
+            note=item.note, arrangement_type=item.arrangement_type, catalog_kind=item.catalog_kind,
+            volume=item.volume, branch=branch, source_item=item, source_price=source_price,
+            florist=item.florist, height_cm=item.height_cm, diameter_cm=item.diameter_cm,
+            price=price, florist_fee=item.florist_fee, florist_salary_amount=0,
+            calculated_cost_price=(Decimal(item.calculated_cost_price or 0) * share).quantize(Decimal("0.01")),
+            calculated_component_price=(Decimal(item.calculated_component_price or 0) * share).quantize(Decimal("0.01")),
+            status="available", image_url=item.image_url, social_post=item.social_post,
+            quantity_total=quantity, quantity_sold=0,
+            quantity_stock_deducted=quantity, stock_deducted_at=item.stock_deducted_at,
+            created_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        # Tarkib nusxalanadi — tannarx va hisobot uchun kerak, sklad qayta yechilmaydi.
+        CatalogComposition.objects.bulk_create([
+            CatalogComposition(catalog_item=target, stock_batch=row.stock_batch, quantity_stems=row.quantity_stems, quantity_bunches=row.quantity_bunches)
+            for row in item.composition.all()
+        ])
+        CatalogMaterialUsage.objects.bulk_create([
+            CatalogMaterialUsage(catalog_item=target, packaging=row.packaging, quantity=row.quantity)
+            for row in item.materials.all()
+        ])
+
+        item.quantity_total -= quantity
+        item.quantity_stock_deducted = max(int(item.quantity_stock_deducted or 0) - quantity, 0)
+        item.calculated_cost_price = (Decimal(item.calculated_cost_price or 0) * (Decimal("1") - share)).quantize(Decimal("0.01"))
+        item.calculated_component_price = (Decimal(item.calculated_component_price or 0) * (Decimal("1") - share)).quantize(Decimal("0.01"))
+        if item.quantity_total <= 0:
+            item.status = "archived"
+        item.save(update_fields=["quantity_total", "quantity_stock_deducted", "calculated_cost_price", "calculated_component_price", "status", "updated_at"])
+
+        transfer = CatalogTransfer.objects.create(
+            source_item=item, target_item=target, branch=branch, quantity=quantity,
+            source_price=source_price, target_price=price, note=note,
+            created_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        create_catalog_history(item, "updated", user=user, note=f"{quantity} dona {branch.name} ga yuborildi")
+        create_catalog_history(target, "created", user=user, note=f"{branch.name} ga qabul qilindi")
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="catalog_transferred", summary=f"{item.name_uz} {branch.name} ga yuborildi",
+            entity_type="CatalogItem", entity_id=str(target.id),
+            after={"branch": branch.name, "quantity": quantity, "source_price": str(source_price), "target_price": str(price)},
+        )
+    return transfer
 
 
 def deduct_catalog_inventory(item, user, quantity=None):
