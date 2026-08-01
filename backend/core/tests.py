@@ -2478,6 +2478,7 @@ class ApiTests(TestCase):
         # gul floristning qo'liga chiqarilgach skladda qolmaydi, lekin katalog qo'shilishi kerak
         user = User.objects.create_user("fl-empty-warehouse", password="p")
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="M", default_stems=25, florist_fee=Decimal("50000"))
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 0)
@@ -2492,6 +2493,7 @@ class ApiTests(TestCase):
     def test_florist_catalog_rejected_when_florist_has_too_few(self):
         user = User.objects.create_user("fl-short", password="p")
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="M", default_stems=25, florist_fee=Decimal("50000"))
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 10}, format="json")
         response = self.client.post("/api/catalog/", {
             "name_uz": "Ko‘p gulli buket", "arrangement_type": "bouquet", "volume": "M", "florist": profile.id,
