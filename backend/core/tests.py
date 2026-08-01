@@ -1439,7 +1439,7 @@ class ApiTests(TestCase):
         self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 30}, format="json")
         self.batch.refresh_from_db()
         stock_before = self.batch.remaining_stems
-        response = self.client.post("/api/catalog/", {"name_uz": "Florist buketi", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "florist": florist.id, "composition": [{"stock_batch": self.batch.id, "quantity_stems": 20}]}, format="json")
+        response = self.client.post("/api/catalog/", {"name_uz": "Florist buketi", "arrangement_type": "bouquet", "volume": "M", "price": "300000", "quantity_total": 1, "status": "available", "florist": florist.id, "composition": [{"stock_batch": self.batch.id, "quantity_stems": 20}]}, format="json")
         self.assertEqual(response.status_code, 201)
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, stock_before)
@@ -1448,7 +1448,7 @@ class ApiTests(TestCase):
     def test_catalog_with_florist_rejects_when_florist_lacks_stock(self):
         florist = self._florist()
         self.client.post("/api/florist-stock-issues/issue/", {"florist": florist.id, "batch": self.batch.id, "quantity_stems": 5}, format="json")
-        response = self.client.post("/api/catalog/", {"name_uz": "Yetmaydi", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "florist": florist.id, "composition": [{"stock_batch": self.batch.id, "quantity_stems": 20}]}, format="json")
+        response = self.client.post("/api/catalog/", {"name_uz": "Yetmaydi", "arrangement_type": "bouquet", "volume": "M", "price": "300000", "quantity_total": 1, "status": "available", "florist": florist.id, "composition": [{"stock_batch": self.batch.id, "quantity_stems": 20}]}, format="json")
         self.assertEqual(response.status_code, 400)
 
     def test_catalog_without_florist_still_uses_warehouse(self):
@@ -2478,7 +2478,7 @@ class ApiTests(TestCase):
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 0)
         response = self.client.post("/api/catalog/", {
-            "name_uz": "Sklad bo‘sh buket", "arrangement_type": "bouquet", "florist": profile.id,
+            "name_uz": "Sklad bo‘sh buket", "arrangement_type": "bouquet", "volume": "M", "florist": profile.id,
             "price": "500000", "quantity_total": 1, "status": "available",
             "composition": [{"stock_batch": self.batch.id, "quantity_stems": 25}],
         }, format="json")
@@ -2490,7 +2490,7 @@ class ApiTests(TestCase):
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 10}, format="json")
         response = self.client.post("/api/catalog/", {
-            "name_uz": "Ko‘p gulli buket", "arrangement_type": "bouquet", "florist": profile.id,
+            "name_uz": "Ko‘p gulli buket", "arrangement_type": "bouquet", "volume": "M", "florist": profile.id,
             "price": "500000", "quantity_total": 1, "status": "available",
             "composition": [{"stock_batch": self.batch.id, "quantity_stems": 25}],
         }, format="json")
@@ -2683,7 +2683,8 @@ class ApiTests(TestCase):
         self.assertEqual(response.data["share_stems"], 80)
         self.assertEqual(sorted(row["stems_per_item"] for row in response.data["items"]), [40, 40])
         self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 100)
-        self.assertEqual(sum(item.composition.count() for item in made), 0)
+        # gul tanlangan, lekin soni hali yozilmagan
+        self.assertEqual(sorted(item.composition.get().quantity_stems for item in made), [0, 0])
 
     def test_closing_issue_rejects_return_bigger_than_held(self):
         profile = self._florist_with_rates("fl-close-8")
