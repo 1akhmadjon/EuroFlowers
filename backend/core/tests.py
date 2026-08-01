@@ -3077,6 +3077,88 @@ class ApiTests(TestCase):
         items = self.client.get(f"/api/material-deliveries/{delivery_id}/items/")
         self.assertEqual(len(items.data), 2)
 
+    def test_suppliers_can_be_filtered_by_type(self):
+        Supplier.objects.create(name="Gul postavshigi", supplier_type="flower")
+        Supplier.objects.create(name="Qadoq postavshigi", supplier_type="material")
+        Supplier.objects.create(name="Ikkalasi", supplier_type="both")
+        materials = self.client.get("/api/suppliers/?supplier_type=material")
+        self.assertEqual([row["name"] for row in materials.data["results"]], ["Qadoq postavshigi"])
+        flowers = self.client.get("/api/suppliers/?supplier_type=flower")
+        self.assertIn("Gul postavshigi", [row["name"] for row in flowers.data["results"]])
+        self.assertNotIn("Qadoq postavshigi", [row["name"] for row in flowers.data["results"]])
+
+    def test_material_can_be_added_straight_into_delivery(self):
+        supplier = Supplier.objects.create(name="Qadoq yuk", supplier_type="material")
+        delivery = self.client.post("/api/material-deliveries/", {
+            "number": "M-10", "received_at": "2026-08-01", "supplier": supplier.id,
+        }, format="json").json()
+        response = self.client.post("/api/materials/", {
+            "packaging_type": "wrap", "name_uz": "Flizilin", "unit": "bunch", "units_per_bunch": 20,
+            "delivery": delivery["id"], "bunches": 10, "cost_per_bunch": "45000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        material = Packaging.objects.get(id=response.json()["id"])
+        self.assertEqual(material.quantity, 200)
+        self.assertEqual(material.cost_price, Decimal("2250.00"))
+        # kirim yozuvi bir marta yaratiladi va yukka bog'lanadi
+        movements = PackagingMovement.objects.filter(packaging=material)
+        self.assertEqual(movements.count(), 1)
+        self.assertEqual(movements.first().delivery_id, delivery["id"])
+        detail = self.client.get(f"/api/material-deliveries/{delivery['id']}/")
+        self.assertEqual(detail.data["total_quantity"], 200)
+        self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("450000.00"))
+
+    def test_material_without_delivery_still_works(self):
+        response = self.client.post("/api/materials/", {
+            "packaging_type": "other", "name_uz": "Lenta", "unit": "piece",
+            "quantity": 30, "cost_price": "4000", "sale_price": "0",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        material = Packaging.objects.get(id=response.json()["id"])
+        self.assertEqual(material.quantity, 30)
+        self.assertEqual(PackagingMovement.objects.filter(packaging=material).count(), 1)
+
+    def test_receiving_by_bunches_computes_pieces_and_cost(self):
+        delivery = self.client.post("/api/material-deliveries/", {"number": "M-11", "received_at": "2026-08-01"}, format="json").json()
+        sponge = Packaging.objects.create(packaging_type="other", name_uz="Gupka", unit="bunch", units_per_bunch=20, cost_price=Decimal("0"), sale_price=Decimal("0"), quantity=0)
+        response = self.client.post(f"/api/material-deliveries/{delivery['id']}/receive/", {
+            "packaging": sponge.id, "bunches": 5, "cost_per_bunch": "60000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        sponge.refresh_from_db()
+        self.assertEqual(sponge.quantity, 100)
+        self.assertEqual(sponge.cost_price, Decimal("3000.00"))
+
+    def test_receive_needs_quantity_or_bunches(self):
+        delivery = self.client.post("/api/material-deliveries/", {"number": "M-12", "received_at": "2026-08-01"}, format="json").json()
+        lak = Packaging.objects.create(packaging_type="other", name_uz="Lak", unit="piece", cost_price=Decimal("0"), sale_price=Decimal("0"), quantity=0)
+        response = self.client.post(f"/api/material-deliveries/{delivery['id']}/receive/", {"packaging": lak.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("quantity", response.data)
+
+    def test_basket_size_is_validated(self):
+        good = self.client.post("/api/materials/", {
+            "packaging_type": "basket", "name_uz": "Yog‘ochli savat", "basket_material": "wooden",
+            "size": "M", "cost_price": "0", "sale_price": "0", "quantity": 0,
+        }, format="json")
+        self.assertEqual(good.status_code, 201, good.json())
+        self.assertEqual(good.json()["size"], "m")
+        self.assertEqual(good.json()["basket_material_label"], "Yog‘ochli")
+        bad = self.client.post("/api/materials/", {
+            "packaging_type": "basket", "name_uz": "Katta savat", "basket_material": "woven",
+            "size": "ultra", "cost_price": "0", "sale_price": "0", "quantity": 0,
+        }, format="json")
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn("size", bad.data)
+
+    def test_materials_can_be_filtered_by_basket_material_and_size(self):
+        for material, size in [("wooden", "s"), ("wooden", "l"), ("woven", "s")]:
+            Packaging.objects.create(packaging_type="basket", name_uz=f"{material} {size}", basket_material=material, size=size, cost_price=Decimal("0"), sale_price=Decimal("0"), quantity=0)
+        wooden = self.client.get("/api/materials/?basket_material=wooden")
+        self.assertEqual(wooden.data["count"], 2)
+        small = self.client.get("/api/materials/?basket_material=wooden&size=s")
+        self.assertEqual(small.data["count"], 1)
+
     def test_material_keeps_cost_when_not_given(self):
         delivery = self.client.post("/api/material-deliveries/", {"number": "M-2", "received_at": "2026-08-01"}, format="json").json()
         wrap = Packaging.objects.create(packaging_type="wrap", name_uz="Plyonka", cost_price=Decimal("4000"), sale_price=Decimal("9000"), quantity=5)
