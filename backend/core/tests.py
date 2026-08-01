@@ -2770,7 +2770,7 @@ class ApiTests(TestCase):
         FloristVolumeRate.objects.filter(florist=profile, volume="M").update(is_active=False)
         response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("hajm tarifi belgilanmagan", response.data["detail"])
+        self.assertIn("hajm tarifi to‘liq emas", response.data["detail"])
         self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 100)
 
     def test_closing_issue_without_catalog_is_rejected(self):
