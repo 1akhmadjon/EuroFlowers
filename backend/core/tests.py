@@ -2877,6 +2877,21 @@ class ApiTests(TestCase):
         # gul tanlangan, lekin soni hali yozilmagan
         self.assertEqual(sorted(item.composition.get().quantity_stems for item in made), [0, 0])
 
+    def test_close_issue_absorbs_remainder_by_default(self):
+        profile = self._florist_with_rates("fl-close-rem")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 74)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 74}, format="json")
+        item = self._make_sized_catalog(profile, "M", count=1, quantity_total=7, batch=self.batch)[0]
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.data["shared_stems"], 74)
+        self.assertEqual(response.data["unplaced_stems"], 0)
+        self.assertEqual(response.data["absorbed_remainder"], 4)
+        self.assertEqual(response.data["rounded_extra_stems"], 3)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 0)
+        item.refresh_from_db()
+        self.assertEqual(item.composition.get().quantity_stems, 11)
+
     def test_close_all_absorbs_small_remainders(self):
         profile = self._florist_with_rates("fl-close-all")
         second = StockBatch.objects.create(

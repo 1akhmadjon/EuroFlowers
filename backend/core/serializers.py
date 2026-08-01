@@ -411,7 +411,7 @@ class FloristCloseIssueSerializer(serializers.Serializer):
         help_text="Ortib qolgan va skladga qaytariladigan gul soni. Qolgani kataloglarga bo‘linadi.",
     )
     close_all = serializers.BooleanField(required=False, default=False)
-    absorb_remainder = serializers.BooleanField(required=False, default=False)
+    absorb_remainder = serializers.BooleanField(required=False, default=True)
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

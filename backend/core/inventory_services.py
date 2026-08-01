@@ -515,7 +515,7 @@ def florist_open_catalog_rows(florist, batch):
     )
 
 
-def florist_close_plan(florist, batch, return_stems=0, absorb_remainder=False):
+def florist_close_plan(florist, batch, return_stems=0, absorb_remainder=True):
     """Chiqim yopilganda nima bo'lishini hisoblaydi. Hech narsani o'zgartirmaydi."""
     balance = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
     held = balance.remaining_stems if balance else 0
@@ -564,7 +564,7 @@ def florist_close_plan(florist, batch, return_stems=0, absorb_remainder=False):
     }
 
 
-def close_florist_issue(florist, batch, return_stems=0, user=None, absorb_remainder=False):
+def close_florist_issue(florist, batch, return_stems=0, user=None, absorb_remainder=True):
     """Chiqarilgan gul tugadi: ortig'i skladga qaytariladi, qolgani kataloglarga bo'linadi.
 
     Florist katalogga faqat hajmni yozadi, qancha gul ketganini yozmaydi.

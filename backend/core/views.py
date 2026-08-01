@@ -1280,7 +1280,7 @@ class FloristStockBalanceViewSet(viewsets.ReadOnlyModelViewSet):
             return_stems = int(request.query_params.get("return_stems") or 0)
         except (TypeError, ValueError):
             return Response({"detail": "Qaytariladigan son noto‘g‘ri."}, status=status.HTTP_400_BAD_REQUEST)
-        plan = florist_close_plan(florist, batch, return_stems)
+        plan = florist_close_plan(florist, batch, return_stems, True)
         return Response({"florist": florist.id, "florist_name": str(florist), **plan})
 
     @extend_schema(request=FloristCloseIssueSerializer, responses=OpenApiResponse(description="Yopish natijasi"))
