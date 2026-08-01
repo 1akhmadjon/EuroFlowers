@@ -254,6 +254,93 @@ def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=No
     return issue
 
 
+def edit_florist_stock_issue(issue, quantity_stems, reason=None, user=None):
+    """Floristga chiqarilgan yoki qaytarilgan gul sonini to'g'rilaydi.
+
+    Farq qancha bo'lsa, sklad va floristdagi qoldiq o'shancha siljiydi.
+    Chiqim kamaytirilsa gul skladga qaytadi, oshirilsa skladdan yana yechiladi.
+    """
+    quantity_stems = int(quantity_stems or 0)
+    if quantity_stems < 1:
+        raise ValueError("Gul soni 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        issue = FloristStockIssue.objects.select_for_update().select_related("batch", "florist").get(pk=issue.pk)
+        batch = StockBatch.objects.select_for_update().get(pk=issue.batch_id)
+        balance = florist_balance_row(issue.florist, batch, lock=True)
+        delta = quantity_stems - issue.quantity_stems
+        if delta:
+            if issue.kind == "issue":
+                # chiqim oshsa skladdan yana yechiladi, kamaysa skladga qaytadi
+                if batch.remaining_stems - delta < 0:
+                    raise ValueError(f"{batch.batch_number} partiyasida atigi {batch.remaining_stems} dona qolgan")
+                if balance.remaining_stems + delta < 0:
+                    raise ValueError(f"{issue.florist} qo‘lida atigi {balance.remaining_stems} dona bor, uni kamaytirib bo‘lmaydi")
+                batch.remaining_stems -= delta
+                balance.remaining_stems += delta
+            else:
+                # qaytarish yoki chiqit oshsa floristdan yana yechiladi
+                if balance.remaining_stems - delta < 0:
+                    raise ValueError(f"{issue.florist} qo‘lida atigi {balance.remaining_stems} dona bor")
+                balance.remaining_stems -= delta
+                if issue.kind == "return":
+                    batch.remaining_stems += delta
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            balance.save(update_fields=["remaining_stems", "updated_at"])
+        before = {"quantity_stems": issue.quantity_stems, "reason": issue.reason}
+        issue.quantity_stems = quantity_stems
+        if reason is not None:
+            issue.reason = reason
+        issue.save(update_fields=["quantity_stems", "reason", "updated_at"])
+        movement = StockMovement.objects.filter(reference_type="florist_issue", reference_id=issue.id).first()
+        if movement:
+            sign = -1 if issue.kind in ["issue", "waste"] else 1
+            movement.quantity_stems = sign * quantity_stems
+            movement.quantity_bunches = Decimal(sign * quantity_stems) / Decimal(batch.stems_per_bunch or 1)
+            movement.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="florist_stock_issue_edited", entity_type="FloristStockIssue", entity_id=str(issue.id),
+            summary=f"{issue.florist} chiqimi {before['quantity_stems']} dan {quantity_stems} ga o‘zgartirildi",
+            before=before,
+            after={"quantity_stems": quantity_stems, "reason": issue.reason, "batch": batch.batch_number,
+                   "batch_remaining": batch.remaining_stems, "florist_remaining": balance.remaining_stems},
+        )
+    return issue
+
+
+def delete_florist_stock_issue(issue, user=None):
+    """Chiqim yozuvini bekor qiladi va qoldiqlarni asl holiga qaytaradi."""
+    with transaction.atomic():
+        issue = FloristStockIssue.objects.select_for_update().select_related("batch", "florist").get(pk=issue.pk)
+        batch = StockBatch.objects.select_for_update().get(pk=issue.batch_id)
+        balance = florist_balance_row(issue.florist, batch, lock=True)
+        if issue.kind == "issue":
+            if balance.remaining_stems < issue.quantity_stems:
+                raise ValueError(
+                    f"{issue.florist} qo‘lida atigi {balance.remaining_stems} dona bor, "
+                    f"{issue.quantity_stems} donalik chiqimni bekor qilib bo‘lmaydi"
+                )
+            balance.remaining_stems -= issue.quantity_stems
+            batch.remaining_stems += issue.quantity_stems
+        else:
+            if issue.kind == "return" and batch.remaining_stems < issue.quantity_stems:
+                raise ValueError(f"{batch.batch_number} partiyasida atigi {batch.remaining_stems} dona bor")
+            balance.remaining_stems += issue.quantity_stems
+            if issue.kind == "return":
+                batch.remaining_stems -= issue.quantity_stems
+        batch.save(update_fields=["remaining_stems", "updated_at"])
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+        StockMovement.objects.filter(reference_type="florist_issue", reference_id=issue.id).delete()
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="florist_stock_issue_deleted", entity_type="FloristStockIssue", entity_id=str(issue.id),
+            summary=f"{issue.florist} chiqimi bekor qilindi: {issue.quantity_stems} dona",
+            before={"quantity_stems": issue.quantity_stems, "kind": issue.kind, "batch": batch.batch_number},
+            after={"batch_remaining": batch.remaining_stems, "florist_remaining": balance.remaining_stems},
+        )
+        issue.delete()
+
+
 def consume_florist_stock(florist, rows, quantity, reason="", user=None):
     """Katalog yasalganda floristning qo'lidagi guldan minus qiladi."""
     shortages = []

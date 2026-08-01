@@ -394,6 +394,13 @@ class FloristStockReturnRequestSerializer(FloristStockIssueRequestSerializer):
     kind = serializers.ChoiceField(choices=["return", "waste"], required=False, default="return")
 
 
+class FloristStockIssueEditSerializer(serializers.Serializer):
+    """Floristga chiqarilgan gul sonini to'g'rilash."""
+
+    quantity_stems = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
 class FloristCloseIssueSerializer(serializers.Serializer):
     """Chiqarilgan gul tugadi: ortig'i skladga, qolgani kataloglarga."""
 
@@ -1027,9 +1034,18 @@ def merge_catalog_item_payloads(items):
     return merged
 
 
-def apply_volume_rate_to_attrs(attrs, initial_data=None):
+def apply_volume_rate_to_attrs(attrs, initial_data=None, default_kind="standard"):
+    """Florist haqini hajm tarifidan oladi.
+
+    Standart katalogda qo'lda kiritilgan summa qabul qilinmaydi — haq faqat
+    floristga belgilangan hajm tarifi bo'yicha beriladi. Custom katalogda esa
+    ish hajmi oldindan noma'lum, shuning uchun qo'lda kiritish qoladi.
+    """
     data = initial_data or {}
-    if "florist_salary_amount" in attrs or "florist_salary_amount" in data:
+    kind = attrs.get("catalog_kind") or data.get("catalog_kind") or default_kind
+    if kind == "standard":
+        attrs.pop("florist_salary_amount", None)
+    elif "florist_salary_amount" in attrs or "florist_salary_amount" in data:
         return attrs
     arrangement_type = attrs.get("arrangement_type")
     volume = attrs.get("volume")
@@ -1195,6 +1211,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({"catalog_items": "Sotilgan katalog tarkibini o‘zgartirib bo‘lmaydi"})
                 if has_composition or has_materials:
                     restore_catalog_inventory(item, user, item.quantity_stock_deducted)
+                    item.refresh_from_db()
                 for key, value in item_data.items():
                     setattr(item, key, value)
                 item.social_post = post
@@ -1386,6 +1403,17 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"volume": "Florist katalogida hajmni tanlash kerak — gul shu bo‘yicha taqsimlanadi"})
             if not composition:
                 raise serializers.ValidationError({"composition": "Floristga chiqarilgan qaysi guldan yasalganini tanlang"})
+        # Standart katalogda florist haqi qo'lda berilmaydi, faqat hajm tarifidan olinadi.
+        kind = attrs.get("catalog_kind") or getattr(self.instance, "catalog_kind", None) or "standard"
+        if kind == "standard" and florist_value:
+            arrangement_type = attrs.get("arrangement_type") or getattr(self.instance, "arrangement_type", None)
+            volume = attrs.get("volume") or getattr(self.instance, "volume", None)
+            if arrangement_type and volume and not FloristVolumeRate.objects.filter(
+                florist=florist_value, arrangement_type=arrangement_type, volume=volume, is_active=True,
+            ).exists():
+                raise serializers.ValidationError({
+                    "volume": f"{florist_value} uchun bu hajm tarifi belgilanmagan. Avval floristga hajm narxini kiriting.",
+                })
         # Florist tanlanmagan katalogda gul skladdan darrov yechiladi,
         # shuning uchun u yerda son majburiy.
         if composition and not florist_value:
@@ -1472,13 +1500,17 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             composition = normalize_catalog_composition_rows(composition)
         if materials is not None:
             materials = normalize_catalog_material_rows(materials)
-        validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
+        validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}), instance.catalog_kind)
         validated_data = self._sync_social_post_image_data(validated_data)
         user = getattr(self.context.get("request"), "user", None)
         old_quantity_total = instance.quantity_total
         with transaction.atomic():
             if composition is not None or materials is not None:
                 restore_catalog_inventory(instance, user, instance.quantity_stock_deducted)
+                # qoldiq qaytarilganda quantity_stock_deducted bazada o'zgaradi.
+                # Obyekt yangilanmasa keyingi save eski qiymatni qaytarib yozadi
+                # va "sondan oshib ketdi" xatosi chiqadi.
+                instance.refresh_from_db()
             instance = super().update(instance, validated_data)
             if composition is not None:
                 instance.composition.all().delete()
