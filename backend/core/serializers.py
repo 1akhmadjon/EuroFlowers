@@ -1466,6 +1466,14 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             except ValueError as exc:
                 raise serializers.ValidationError({"detail": str(exc)})
             item = sync_catalog_financials(item)
+            # To'g'ridan-to'g'ri filial uchun qo'shilgan katalogda "kelib chiqish narxi"
+            # bo'lmaydi — gul asosiy filial skladidan ketgan. Shuning uchun uning
+            # o'rniga bir donaga to'g'ri keladigan tannarx yoziladi va filial
+            # hisobotidagi ustama haqiqiy foydani ko'rsatadi.
+            if item.branch_id and item.source_price is None:
+                units = Decimal(item.quantity_total or 1)
+                item.source_price = (Decimal(item.calculated_cost_price or 0) / units).quantize(Decimal("0.01")) if units else Decimal("0")
+                item.save(update_fields=["source_price", "updated_at"])
             validate_catalog_discount_reason(item)
             sync_catalog_florist_salary(item, user)
             create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi" if item.catalog_kind == "custom" else "Katalog qo‘shildi")

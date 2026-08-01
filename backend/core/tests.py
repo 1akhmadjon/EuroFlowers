@@ -1505,6 +1505,66 @@ class ApiTests(TestCase):
         self.assertEqual(target.source_price, Decimal("300000.00"))
         self.assertEqual(target.source_item_id, item.id)
 
+    def test_catalog_can_be_created_directly_for_branch_with_stems(self):
+        # asosiy filialdan turib Parkent uchun katalog qo'shiladi, gul soni bilan
+        parkent = self._parkent()
+        self.batch.refresh_from_db()
+        before = self.batch.remaining_stems
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Parkent uchun buket", "arrangement_type": "bouquet", "volume": "M",
+            "branch": parkent.id, "price": "500000", "quantity_total": 2, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 30}],
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(response.json()["branch"], parkent.id)
+        self.assertEqual(response.json()["branch_name"], "Parkent filiali")
+        item = CatalogItem.objects.get(id=response.json()["id"])
+        self.assertEqual(item.composition.get().quantity_stems, 30)
+        # gul asosiy filial skladidan yechiladi
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before - 60)
+        # kelib chiqish narxi o'rniga bir donaga to'g'ri keladigan tannarx yoziladi
+        self.assertEqual(item.source_price, (item.calculated_cost_price / 2).quantize(Decimal("0.01")))
+
+    def test_branch_user_sees_directly_created_catalog(self):
+        parkent = self._parkent()
+        created = self.client.post("/api/catalog/", {
+            "name_uz": "To‘g‘ridan buket", "arrangement_type": "bouquet", "volume": "M",
+            "branch": parkent.id, "price": "500000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
+        }, format="json")
+        self.assertEqual(created.status_code, 201, created.json())
+        user = User.objects.create_user("parkent-direct", password="p")
+        UserProfile.objects.create(user=user, role="operator", branch=parkent)
+        PagePermission.objects.create(user=user, page="catalog", can_view=True, can_control=True)
+        client = APIClient()
+        client.force_authenticate(user)
+        listed = client.get("/api/catalog/")
+        self.assertEqual(listed.data["count"], 1)
+        self.assertEqual(listed.data["results"][0]["name_uz"], "To‘g‘ridan buket")
+        # asosiy filial ro'yxatida ko'rinmaydi
+        main = self.client.get("/api/catalog/")
+        self.assertNotIn("To‘g‘ridan buket", [row["name_uz"] for row in main.data["results"]])
+
+    def test_branch_report_counts_directly_created_catalog(self):
+        parkent = self._parkent()
+        created = self.client.post("/api/catalog/", {
+            "name_uz": "Hisobot buketi", "arrangement_type": "bouquet", "volume": "M",
+            "branch": parkent.id, "price": "500000", "quantity_total": 2, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
+        }, format="json")
+        item = CatalogItem.objects.get(id=created.json()["id"])
+        mark_catalog_sold(item, self.user, quantity=1)
+        response = self.client.get("/api/branch-report/")
+        row = next(r for r in response.data["branches"] if r["branch_name"] == "Parkent filiali")
+        self.assertEqual(row["received_quantity"], 0)
+        self.assertEqual(row["direct_quantity"], 2)
+        self.assertEqual(row["incoming_quantity"], 2)
+        self.assertEqual(row["sold_quantity"], 1)
+        # ustama endi haqiqiy foyda: sotuv narxi - bir donalik tannarx
+        self.assertEqual(Decimal(row["source_value"]), item.source_price)
+        self.assertEqual(Decimal(row["markup_total"]), Decimal("500000.00") - item.source_price)
+
     def test_transfer_does_not_touch_warehouse_stock(self):
         item = self._main_catalog()
         self.batch.refresh_from_db()

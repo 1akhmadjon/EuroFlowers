@@ -1868,6 +1868,14 @@ def branch_report_data(request):
             transfers = transfers.filter(created_at__date__lte=date_to)
             history = history.filter(created_at__date__lte=date_to)
         received_quantity = transfers.aggregate(value=Coalesce(Sum("quantity"), 0))["value"]
+        # Filialga katalog ikki yo'l bilan tushadi: asosiy filialdan yuborilgan (transfer)
+        # yoki o'sha zahoti filial uchun qo'shilgan. Ikkinchisi transferda ko'rinmaydi.
+        direct_items = items.filter(source_item__isnull=True)
+        if date_from:
+            direct_items = direct_items.filter(created_at__date__gte=date_from)
+        if date_to:
+            direct_items = direct_items.filter(created_at__date__lte=date_to)
+        direct_quantity = direct_items.aggregate(value=Coalesce(Sum("quantity_total"), 0))["value"]
         sold_quantity = 0
         sold_revenue = Decimal("0")
         source_value = Decimal("0")
@@ -1889,6 +1897,8 @@ def branch_report_data(request):
             "branch_name": branch.name,
             "received_transfers": transfers.count(),
             "received_quantity": received_quantity,
+            "direct_quantity": direct_quantity,
+            "incoming_quantity": received_quantity + direct_quantity,
             "catalog_items": items.count(),
             "available_quantity": max(items.aggregate(value=Coalesce(Sum("quantity_total"), 0))["value"] - items.aggregate(value=Coalesce(Sum("quantity_sold"), 0))["value"], 0),
             "sold_quantity": sold_quantity,
@@ -1901,6 +1911,8 @@ def branch_report_data(request):
         })
     totals = {
         "received_quantity": sum(row["received_quantity"] for row in rows),
+        "direct_quantity": sum(row["direct_quantity"] for row in rows),
+        "incoming_quantity": sum(row["incoming_quantity"] for row in rows),
         "sold_quantity": sum(row["sold_quantity"] for row in rows),
         "sold_revenue": sum((row["sold_revenue"] for row in rows), Decimal("0")),
         "discounted_quantity": sum(row["discounted_quantity"] for row in rows),
