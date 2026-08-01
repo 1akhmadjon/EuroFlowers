@@ -1598,6 +1598,75 @@ class ApiTests(TestCase):
         self.assertEqual(branch_list.data["count"], 1)
         self.assertEqual(branch_list.data["results"][0]["branch_name"], "Parkent filiali")
 
+    def _parkent_client(self, username="parkent-eye"):
+        parkent = self._parkent()
+        user = User.objects.create_user(username, password="p")
+        UserProfile.objects.create(user=user, role="operator", branch=parkent)
+        for page in ["catalog", "dashboard"]:
+            PagePermission.objects.create(user=user, page=page, can_view=True, can_control=True)
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_branch_cannot_see_main_branch_price_and_cost(self):
+        item = self._main_catalog(quantity=5, price="300000")
+        transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 2, "price": "450000"}, format="json")
+        target_id = transfer.data["target_item"]
+        client = self._parkent_client("parkent-price-eye")
+        seen = client.get(f"/api/catalog/{target_id}/").data
+        # o'z narxini ko'radi
+        self.assertEqual(Decimal(seen["price"]), Decimal("450000.00"))
+        # asosiy filial narxi va tannarxi ko'rinmaydi
+        for key in ["source_price", "calculated_cost_price", "calculated_component_price",
+                    "florist_fee", "florist_salary_amount", "profit", "discount_amount", "discount_percent"]:
+            self.assertNotIn(key, seen, f"{key} filialga ko‘rinib turibdi")
+        # gul narxlari ham ko'rinmaydi
+        batch = seen["composition"][0]["batch_detail"]
+        for key in ["cost_per_stem", "sale_price_per_stem", "cost_per_bunch", "sale_price_per_bunch", "supplier", "remaining_stems"]:
+            self.assertNotIn(key, batch, f"batch_detail.{key} filialga ko‘rinib turibdi")
+
+    def test_main_branch_still_sees_everything(self):
+        item = self._main_catalog(quantity=5, price="300000")
+        seen = self.client.get(f"/api/catalog/{item.id}/").data
+        for key in ["calculated_cost_price", "florist_fee", "profit"]:
+            self.assertIn(key, seen)
+        self.assertIn("cost_per_stem", seen["composition"][0]["batch_detail"])
+
+    def test_branch_transfer_record_hides_source_price(self):
+        item = self._main_catalog(quantity=5, price="300000")
+        self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 2, "price": "450000"}, format="json")
+        client = self._parkent_client("parkent-transfer-eye")
+        rows = client.get("/api/catalog-transfers/").data["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("source_price", rows[0])
+        self.assertNotIn("source_item", rows[0])
+        self.assertEqual(Decimal(rows[0]["target_price"]), Decimal("450000.00"))
+        self.assertEqual(rows[0]["quantity"], 2)
+        # asosiy filial admini ikkalasini ham ko'radi
+        admin_rows = self.client.get("/api/catalog-transfers/").data["results"]
+        self.assertEqual(Decimal(admin_rows[0]["source_price"]), Decimal("300000.00"))
+
+    def test_branch_sees_only_its_own_transfers(self):
+        other = Branch.objects.create(name="Chirchiq filiali", is_main=False, is_active=True)
+        item = self._main_catalog(quantity=6, price="300000")
+        self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 2}, format="json")
+        self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": other.id, "quantity": 2}, format="json")
+        client = self._parkent_client("parkent-own-transfers")
+        rows = client.get("/api/catalog-transfers/").data["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["branch_name"], "Parkent filiali")
+        self.assertEqual(self.client.get("/api/catalog-transfers/").data["count"], 2)
+
+    def test_branch_can_still_change_its_own_price(self):
+        item = self._main_catalog(quantity=5, price="300000")
+        transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 2, "price": "450000"}, format="json")
+        target_id = transfer.data["target_item"]
+        client = self._parkent_client("parkent-price-edit")
+        changed = client.patch(f"/api/catalog/{target_id}/", {"price": "500000"}, format="json")
+        self.assertEqual(changed.status_code, 200, changed.data)
+        self.assertEqual(Decimal(changed.data["price"]), Decimal("500000.00"))
+        self.assertNotIn("source_price", changed.data)
+
     def test_branch_user_cannot_create_catalog(self):
         parkent = self._parkent()
         user = User.objects.create_user("parkent-creator", password="p")

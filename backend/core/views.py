@@ -1946,6 +1946,12 @@ class CatalogTransferViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ["branch", "source_item", "target_item"]
     ordering_fields = ["created_at", "quantity"]
 
+    def get_queryset(self):
+        # filial faqat o'ziga kelgan yuborishlarni ko'radi
+        branch = user_branch(self.request.user)
+        queryset = super().get_queryset()
+        return queryset.filter(branch=branch) if branch else queryset
+
 
 class BranchReportView(APIView):
     """Admin uchun: filialga qancha katalog yuborilgan, qanchasi sotilgan,

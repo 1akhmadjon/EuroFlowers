@@ -1288,6 +1288,49 @@ class BranchSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+def request_user_branch(serializer):
+    """So'rov yuborayotgan foydalanuvchi filialga biriktirilganmi."""
+    user = getattr(serializer.context.get("request"), "user", None)
+    return getattr(getattr(user, "profile", None), "branch_id", None)
+
+
+# Filial faqat o'z sotuv narxini biladi. Asosiy filialning narxi, tannarxi va
+# foydasi unga ko'rinmasligi kerak.
+BRANCH_HIDDEN_CATALOG_FIELDS = [
+    "source_price", "source_item",
+    "calculated_cost_price", "calculated_component_price",
+    "florist_fee", "florist_salary_amount",
+    "discount_amount", "discount_percent",
+    "profit", "florist", "florist_detail",
+]
+BRANCH_HIDDEN_BATCH_FIELDS = [
+    "cost_per_stem", "cost_per_bunch", "cost_per_stem_exact",
+    "sale_price_per_stem", "sale_price_per_bunch", "sale_price_per_stem_exact",
+    "stock_value", "rounding", "supplier", "supplier_detail", "delivery", "delivery_detail",
+    "received_stems", "remaining_stems", "remaining_bunches", "remaining_bunches_label",
+]
+
+
+def strip_branch_sensitive_catalog(data):
+    """Katalog javobidan asosiy filialga tegishli pul ma'lumotlarini olib tashlaydi."""
+    for key in BRANCH_HIDDEN_CATALOG_FIELDS:
+        data.pop(key, None)
+    for row in data.get("composition") or []:
+        batch = row.get("batch_detail")
+        if isinstance(batch, dict):
+            for key in BRANCH_HIDDEN_BATCH_FIELDS:
+                batch.pop(key, None)
+    for row in data.get("materials") or []:
+        material = row.get("packaging_detail")
+        if isinstance(material, dict):
+            for key in ["cost_price", "sale_price", "quantity", "quantity_label", "last_delivery"]:
+                material.pop(key, None)
+    for row in data.get("history") or []:
+        # snapshot ichida asosiy filial narxi va tarkibi turadi
+        row.pop("snapshot", None)
+    return data
+
+
 class CatalogTransferSerializer(serializers.ModelSerializer):
     branch_name = serializers.SerializerMethodField(read_only=True)
     catalog_name = serializers.SerializerMethodField(read_only=True)
@@ -1297,6 +1340,14 @@ class CatalogTransferSerializer(serializers.ModelSerializer):
         model = CatalogTransfer
         fields = "__all__"
         read_only_fields = ["created_by"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if request_user_branch(self):
+            # filial o'ziga kelgan sonni ko'radi, asosiy filial narxini emas
+            data.pop("source_price", None)
+            data.pop("source_item", None)
+        return data
 
     @extend_schema_field(serializers.CharField())
     def get_branch_name(self, obj):
@@ -1334,6 +1385,12 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.CharField())
     def get_branch_name(self, obj):
         return obj.branch.name if obj.branch_id else "Asosiy filial"
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if request_user_branch(self):
+            data = strip_branch_sensitive_catalog(data)
+        return data
 
     @extend_schema_field(serializers.DictField())
     def get_profit(self, obj):
