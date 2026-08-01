@@ -423,15 +423,46 @@ def florist_leftover_candidates(florist, batch):
     )
 
 
-def florist_volume_weight(florist, item):
-    """Katalogning bir donasiga standart bo'yicha necha dona gul ketishi.
-
-    Bo'lishda shu og'irlik ishlatiladi: L savat S buketdan ko'proq oladi.
-    """
-    rate = FloristVolumeRate.objects.filter(
+def florist_volume_rate_for(florist, item):
+    return FloristVolumeRate.objects.filter(
         florist=florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True,
     ).first()
+
+
+def florist_volume_weight(florist, item):
+    """Katalogning bir donasiga standart bo'yicha necha dona gul ketishi."""
+    rate = florist_volume_rate_for(florist, item)
     return int(rate.default_stems or 0) if rate else 0
+
+
+def volume_label(item):
+    return f"{item.get_arrangement_type_display()} · {item.volume or 'hajmsiz'}"
+
+
+def florist_weight_plan(florist, items):
+    """Taqsimot og'irligini hisoblaydi.
+
+    Asosiysi — hajm tarifidagi standart dona soni. U kiritilmagan bo'lsa
+    florist haqi og'irlik bo'ladi: katta buketning haqi kattaroq, ya'ni
+    o'lcham nisbati baribir saqlanadi.
+
+    Qaytadi: ({katalog_id: og'irlik}, muammoli hajmlar ro'yxati, og'irlik manbai)
+    """
+    rates = {item.id: florist_volume_rate_for(florist, item) for item in items}
+    missing = sorted({volume_label(item) for item in items if rates[item.id] is None})
+    if missing:
+        return {}, missing, ""
+    stems = {item.id: int(rates[item.id].default_stems or 0) for item in items}
+    if all(value > 0 for value in stems.values()):
+        return stems, [], "default_stems"
+    if any(value > 0 for value in stems.values()):
+        # bir qismida kiritilgan, bir qismida yo'q — aralashtirsak taqsimot buziladi
+        blank = sorted({volume_label(item) for item in items if stems[item.id] < 1})
+        return {}, blank, ""
+    fees = {item.id: int(Decimal(rates[item.id].florist_fee or 0)) for item in items}
+    if all(value < 1 for value in fees.values()):
+        return {}, sorted({volume_label(item) for item in items}), ""
+    return fees, [], "florist_fee"
 
 
 def split_stems_by_weight(amount, items):
@@ -492,10 +523,11 @@ def florist_close_plan(florist, batch, return_stems=0):
     amount = max(held - return_stems, 0)
     rows = florist_open_catalog_rows(florist, batch)
     items = [row.catalog_item for row in rows]
-    missing = [item for item in items if florist_volume_weight(florist, item) < 1]
-    weighted = [(item, int(item.quantity_total or 1), florist_volume_weight(florist, item)) for item in items]
+    weights, missing, weight_source = florist_weight_plan(florist, items)
+    weighted = [(item, int(item.quantity_total or 1), weights.get(item.id, 0)) for item in items]
     plan, unplaced = split_stems_by_weight(amount, weighted) if not missing else ({}, amount)
     return {
+        "weight_source": weight_source,
         "batch_id": batch.id,
         "batch_number": batch.batch_number,
         "flower": str(batch.variant),
@@ -503,7 +535,7 @@ def florist_close_plan(florist, batch, return_stems=0):
         "return_stems": return_stems,
         "share_stems": amount,
         "unplaced_stems": unplaced,
-        "missing_rates": [f"{item.get_arrangement_type_display()} · {item.volume or 'hajmsiz'}" for item in missing],
+        "missing_rates": missing,
         "items": [
             {
                 "catalog_item": item.id,
@@ -512,6 +544,7 @@ def florist_close_plan(florist, batch, return_stems=0):
                 "volume": item.volume,
                 "quantity_total": units,
                 "standard_stems": weight,
+                "weight": weight,
                 "stems_per_item": plan.get(item.id, 0),
                 "stems_total": plan.get(item.id, 0) * units,
             }
@@ -542,6 +575,7 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
         result = {
             "florist": str(florist),
             "batch_number": batch.batch_number,
+            "weight_source": "",
             "returned_stems": return_stems,
             "shared_stems": 0,
             "unplaced_stems": 0,
@@ -561,13 +595,13 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
                 f"{florist} da bu guldan yasalgan, soni yozilmagan katalog yo‘q. "
                 f"Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
             )
-        missing = sorted({f"{item.get_arrangement_type_display()} · {item.volume or 'hajmsiz'}" for item in items if florist_volume_weight(florist, item) < 1})
+        weights, missing, weight_source = florist_weight_plan(florist, items)
         if missing:
             raise ValueError(
-                f"{florist} uchun hajm tarifi belgilanmagan: " + ", ".join(missing)
-                + ". Avval floristga shu hajm narxini kiriting."
+                f"{florist} uchun hajm tarifi to‘liq emas: " + ", ".join(missing)
+                + ". Shu hajmlarga dona sonini yoki florist haqini kiriting."
             )
-        weighted = [(item, int(item.quantity_total or 1), florist_volume_weight(florist, item)) for item in items]
+        weighted = [(item, int(item.quantity_total or 1), weights.get(item.id, 0)) for item in items]
         plan, unplaced = split_stems_by_weight(amount, weighted)
         by_item = {row.catalog_item_id: row for row in rows}
         moved = 0
@@ -594,6 +628,7 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
         balance.save(update_fields=["remaining_stems", "updated_at"])
         result["shared_stems"] = moved
         result["unplaced_stems"] = unplaced
+        result["weight_source"] = weight_source
         for item, _, _ in weighted:
             sync_catalog_financials(item)
         AuditLog.objects.create(
