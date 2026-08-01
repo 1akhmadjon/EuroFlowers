@@ -29,11 +29,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .models import MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, FloristCloseIssueSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, FloristCloseIssueSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import catalog_cost_breakdown, adjust_florist_stems, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
+from .inventory_services import receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -1636,9 +1636,54 @@ class PackagingViewSet(ScopedViewSet):
 class PackagingMovementViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [RolePermission]
     permission_page = "inventory"
-    queryset = PackagingMovement.objects.select_related("packaging", "performed_by").all()
+    queryset = PackagingMovement.objects.select_related("packaging", "performed_by", "delivery__supplier").all()
     serializer_class = PackagingMovementSerializer
     filterset_class = PackagingMovementFilter
+
+
+class MaterialDeliveryViewSet(ScopedViewSet):
+    """Material partiyasi. Avval ochiladi, keyin ichiga materiallar kiritiladi."""
+
+    permission_page = "inventory"
+    write_roles = ["admin", "warehouse"]
+    queryset = MaterialDelivery.objects.select_related("supplier", "created_by").prefetch_related("movements__packaging").all()
+    serializer_class = MaterialDeliverySerializer
+    filterset_fields = ["supplier", "is_active", "received_at"]
+    search_fields = ["number", "note", "supplier__name"]
+    ordering_fields = ["received_at", "number", "created_at"]
+
+    def perform_create(self, serializer):
+        delivery = serializer.save(created_by=self.request.user)
+        write_audit(self.request.user, "material_delivery_created", delivery, before={}, after=instance_snapshot(delivery), request=self.request, summary=f"{delivery.number} material partiyasi ochildi")
+
+    @extend_schema(responses=PackagingMovementSerializer(many=True))
+    @action(detail=True, methods=["get"])
+    def items(self, request, pk=None):
+        """Partiya ichiga kiritilgan materiallar."""
+        rows = PackagingMovement.objects.filter(delivery_id=pk, movement_type="in").select_related("packaging", "performed_by", "delivery__supplier")
+        return Response(PackagingMovementSerializer(rows, many=True).data)
+
+    @extend_schema(request=MaterialReceiveSerializer, responses=PackagingMovementSerializer)
+    @action(detail=True, methods=["post"])
+    def receive(self, request, pk=None):
+        """Partiyaga material kiritadi: soni oshadi, tannarxi yangilanadi."""
+        if not has_page_permission(request.user, "inventory", True):
+            return forbidden()
+        delivery = self.get_object()
+        serializer = MaterialReceiveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            movement = receive_material_into_delivery(
+                delivery,
+                serializer.validated_data["packaging"],
+                serializer.validated_data["quantity"],
+                serializer.validated_data.get("cost_price"),
+                serializer.validated_data.get("reason", ""),
+                request.user,
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PackagingMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class InventoryMovementJournalView(APIView):

@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -773,14 +773,73 @@ class StockMovementSerializer(serializers.ModelSerializer):
         return str((Decimal(stems) * Decimal(obj.batch.sale_price_per_stem or 0)).quantize(Decimal("0.01")))
 
 
+class MaterialDeliverySerializer(serializers.ModelSerializer):
+    """Material partiyasi — avval ochiladi, keyin ichiga materiallar kiritiladi."""
+
+    supplier_detail = SupplierSerializer(source="supplier", read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+    item_count = serializers.SerializerMethodField()
+    total_quantity = serializers.SerializerMethodField()
+    total_cost = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MaterialDelivery
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_item_count(self, obj):
+        return obj.movements.filter(movement_type="in").count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_total_quantity(self, obj):
+        return sum(row.quantity for row in obj.movements.filter(movement_type="in"))
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_total_cost(self, obj):
+        return sum(
+            (Decimal(row.quantity) * Decimal(row.unit_cost or 0) for row in obj.movements.filter(movement_type="in")),
+            Decimal("0"),
+        )
+
+
+class MaterialReceiveSerializer(serializers.Serializer):
+    """Partiyaga material kiritish so'rovi."""
+
+    packaging = serializers.PrimaryKeyRelatedField(queryset=Packaging.objects.all())
+    quantity = serializers.IntegerField(min_value=1)
+    cost_price = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"),
+        help_text="Berilmasa materialning hozirgi tannarxi qoladi.",
+    )
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
 class PackagingSerializer(serializers.ModelSerializer):
     image = serializers.FileField(write_only=True, required=False)
     quantity_label = serializers.CharField(read_only=True)
     packaging_type_label = serializers.CharField(source="get_packaging_type_display", read_only=True)
+    last_delivery = serializers.SerializerMethodField()
 
     class Meta:
         model = Packaging
         fields = "__all__"
+
+    @extend_schema_field(serializers.DictField())
+    def get_last_delivery(self, obj):
+        """Oxirgi marta qaysi partiyadan, qaysi postavshikdan kelgani."""
+        row = obj.movements.filter(movement_type="in", delivery__isnull=False).select_related("delivery__supplier").order_by("-created_at", "-id").first()
+        if not row:
+            return None
+        return {
+            "id": row.delivery_id,
+            "number": row.delivery.number,
+            "received_at": row.delivery.received_at,
+            "supplier": row.delivery.supplier.name if row.delivery.supplier_id else "",
+            "supplier_id": row.delivery.supplier_id,
+            "quantity": row.quantity,
+            "unit_cost": row.unit_cost,
+        }
 
     def save_image(self, validated_data):
         image = validated_data.pop("image", None)

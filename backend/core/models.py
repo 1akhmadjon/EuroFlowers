@@ -255,6 +255,29 @@ class Packaging(TimeStampedModel):
         return f"{self.quantity} dona"
 
 
+class MaterialDelivery(TimeStampedModel):
+    """Material partiyasi — buket qog'ozi, savat, gupka kelgan yuk.
+
+    Gul partiyasidan alohida: material odatda boshqa postavshikdan, boshqa kunda keladi.
+    Postavshik shu yerda bir marta tanlanadi, ichidagi materiallar shuni oladi.
+    """
+
+    number = models.CharField(max_length=40)
+    received_at = models.DateField(default=timezone.localdate)
+    supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="material_deliveries")
+    note = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_material_deliveries")
+
+    class Meta:
+        ordering = ["-received_at", "-id"]
+        indexes = [models.Index(fields=["number"])]
+        verbose_name_plural = "Material deliveries"
+
+    def __str__(self):
+        return f"{self.number} · {self.received_at}"
+
+
 class PackagingMovement(TimeStampedModel):
     TYPE_CHOICES = [
         ("in", "Kirim"),
@@ -265,6 +288,8 @@ class PackagingMovement(TimeStampedModel):
         ("transfer_in", "Filialga kirim"),
     ]
     packaging = models.ForeignKey(Packaging, on_delete=models.PROTECT, related_name="movements")
+    delivery = models.ForeignKey(MaterialDelivery, null=True, blank=True, on_delete=models.PROTECT, related_name="movements")
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     movement_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     quantity = models.IntegerField()
     reference_type = models.CharField(max_length=40, blank=True)

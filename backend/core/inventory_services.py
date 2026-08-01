@@ -1058,6 +1058,49 @@ def apply_stock_movement(batch, movement_type, quantity_stems=None, reason="", u
     return movement
 
 
+def receive_material_into_delivery(delivery, packaging, quantity, cost_price=None, reason="", user=None):
+    """Material partiyasiga material kiritadi.
+
+    Material bitta qator bo'lib qoladi: soni oshadi, tannarxi berilgan bo'lsa
+    yangilanadi. Kirim yozuvi partiyaga bog'lanadi, shundan kelib chiqib
+    materialning oxirgi postavshigi ham ko'rinadi.
+    """
+    quantity = int(quantity or 0)
+    if quantity < 1:
+        raise ValueError("Kiritiladigan son 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        packaging = Packaging.objects.select_for_update().get(pk=packaging.pk)
+        before = {"quantity": packaging.quantity, "cost_price": str(packaging.cost_price)}
+        packaging.quantity += quantity
+        fields = ["quantity", "updated_at"]
+        if cost_price not in [None, ""]:
+            packaging.cost_price = Decimal(str(cost_price))
+            fields.append("cost_price")
+        packaging.save(update_fields=fields)
+        movement = PackagingMovement.objects.create(
+            packaging=packaging,
+            delivery=delivery,
+            movement_type="in",
+            quantity=quantity,
+            unit_cost=packaging.cost_price,
+            reason=reason or f"{delivery.number} partiya kirimi",
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="material_received", entity_type="Packaging", entity_id=str(packaging.id),
+            summary=f"{packaging.name_uz} {delivery.number} partiyadan {quantity} dona kirim qilindi",
+            before=before,
+            after={
+                "material": packaging.name_uz, "delivery": delivery.number,
+                "supplier": delivery.supplier.name if delivery.supplier_id else "",
+                "quantity": quantity, "cost_price": str(packaging.cost_price),
+                "quantity_after": packaging.quantity, "movement": movement.id,
+            },
+        )
+    return movement
+
+
 def apply_packaging_movement(packaging, movement_type, quantity, reason, user):
     with transaction.atomic():
         packaging = Packaging.objects.select_for_update().get(pk=packaging.pk)
