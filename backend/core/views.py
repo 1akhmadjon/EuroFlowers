@@ -866,7 +866,7 @@ class SupplierViewSet(ScopedViewSet):
     write_roles = ["admin", "warehouse"]
     queryset = supplier_rollup_queryset()
     serializer_class = SupplierSerializer
-    filterset_fields = ["is_active"]
+    filterset_fields = ["is_active", "supplier_type"]
     search_fields = ["name", "phone", "notes"]
     ordering_fields = ["name", "purchase_total", "paid_total", "outstanding", "last_payment_at", "created_at"]
 
@@ -1633,12 +1633,13 @@ class PackagingViewSet(ScopedViewSet):
     queryset = Packaging.objects.all()
     serializer_class = PackagingSerializer
     parser_classes = [JSONParser, FormParser, MultiPartParser]
-    filterset_fields = ["packaging_type", "is_active"]
-    search_fields = ["name_uz"]
+    filterset_fields = ["packaging_type", "is_active", "unit", "basket_material", "size"]
+    search_fields = ["name_uz", "size"]
 
     def perform_create(self, serializer):
         packaging = serializer.save()
-        if packaging.quantity:
+        # yukka bog'lab qo'shilgan bo'lsa kirim yozuvi allaqachon yaratilgan
+        if packaging.quantity and not getattr(packaging, "received_via_delivery", False):
             movement = PackagingMovement.objects.create(packaging=packaging, movement_type="in", quantity=packaging.quantity, reason="Qadoq/savat kirimi", performed_by=self.request.user)
             write_audit(self.request.user, "packaging_received", packaging, before={}, after={**instance_snapshot(packaging), "movement": movement.id}, request=self.request, summary=f"{packaging.name_uz} material kirim qilindi")
 

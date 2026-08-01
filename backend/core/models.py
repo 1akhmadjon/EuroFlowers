@@ -116,6 +116,11 @@ class Supplier(TimeStampedModel):
     phone = models.CharField(max_length=30, blank=True)
     notes = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    supplier_type = models.CharField(
+        max_length=20,
+        choices=[("flower", "Gul"), ("material", "Material"), ("both", "Gul va material")],
+        default="flower",
+    )
 
     class Meta:
         ordering = ["name", "id"]
@@ -239,9 +244,20 @@ class StockMovement(TimeStampedModel):
 
 class Packaging(TimeStampedModel):
     TYPE_CHOICES = [("wrap", "Buket qog‘ozi"), ("basket", "Savat"), ("box", "Quti"), ("other", "Boshqalar")]
+    UNIT_CHOICES = [("piece", "Dona"), ("bunch", "Pochka")]
+    BASKET_MATERIAL_CHOICES = [
+        ("wooden", "Yog‘ochli"),
+        ("plastic_handle", "Plastmassa ruchkali"),
+        ("woven", "To‘qima"),
+    ]
+    SIZE_CHOICES = [("xs", "XS"), ("s", "S"), ("m", "M"), ("l", "L"), ("xl", "XL")]
     packaging_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     name_uz = models.CharField(max_length=120)
     size = models.CharField(max_length=40, blank=True)
+    # Qog'oz va gupka pochkada keladi, savat va lenta donada.
+    unit = models.CharField(max_length=20, choices=UNIT_CHOICES, default="piece")
+    units_per_bunch = models.PositiveIntegerField(default=20)
+    basket_material = models.CharField(max_length=20, choices=BASKET_MATERIAL_CHOICES, blank=True)
     capacity_min_stems = models.PositiveIntegerField(default=1)
     capacity_max_stems = models.PositiveIntegerField(default=999)
     cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)

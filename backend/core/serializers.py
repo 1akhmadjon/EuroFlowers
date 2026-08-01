@@ -811,26 +811,94 @@ class MaterialDeliverySerializer(serializers.ModelSerializer):
 
 
 class MaterialReceiveSerializer(serializers.Serializer):
-    """Partiyaga material kiritish so'rovi."""
+    """Partiyaga material kiritish so'rovi.
+
+    Pochkada keladigan materialda `bunches` va `cost_per_bunch` yuborish yetarli —
+    dona soni bilan dona tannarxi o'zi hisoblanadi.
+    """
 
     packaging = serializers.PrimaryKeyRelatedField(queryset=Packaging.objects.all())
-    quantity = serializers.IntegerField(min_value=1)
+    quantity = serializers.IntegerField(min_value=1, required=False)
+    bunches = serializers.IntegerField(min_value=1, required=False)
     cost_price = serializers.DecimalField(
         max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"),
-        help_text="Berilmasa materialning hozirgi tannarxi qoladi.",
+        help_text="Dona tannarxi. Berilmasa materialning hozirgi tannarxi qoladi.",
+    )
+    cost_per_bunch = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"),
+        help_text="Pochka narxi. Dona tannarxi shundan hisoblanadi.",
     )
     reason = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        material = attrs["packaging"]
+        per_bunch = int(material.units_per_bunch or 20)
+        if attrs.get("bunches"):
+            attrs["quantity"] = int(attrs["bunches"]) * per_bunch
+        if not attrs.get("quantity"):
+            raise serializers.ValidationError({"quantity": "Dona sonini yoki pochka sonini kiriting"})
+        if attrs.get("cost_per_bunch") is not None and per_bunch > 0:
+            attrs["cost_price"] = (Decimal(str(attrs["cost_per_bunch"])) / Decimal(per_bunch)).quantize(Decimal("0.01"))
+        return attrs
 
 
 class PackagingSerializer(serializers.ModelSerializer):
     image = serializers.FileField(write_only=True, required=False)
     quantity_label = serializers.CharField(read_only=True)
     packaging_type_label = serializers.CharField(source="get_packaging_type_display", read_only=True)
+    unit_label = serializers.CharField(source="get_unit_display", read_only=True)
+    basket_material_label = serializers.CharField(source="get_basket_material_display", read_only=True)
     last_delivery = serializers.SerializerMethodField()
+    # Material qo'shilayotganda darrov yukka bog'lash uchun
+    delivery = serializers.PrimaryKeyRelatedField(
+        queryset=MaterialDelivery.objects.all(), write_only=True, required=False, allow_null=True,
+        help_text="Berilsa material shu yukka kirim qilinadi.",
+    )
+    bunches = serializers.IntegerField(
+        write_only=True, required=False, min_value=1,
+        help_text="Pochkada keladigan material uchun: nechta pochka. Dona soni o‘zi hisoblanadi.",
+    )
+    cost_per_bunch = serializers.DecimalField(
+        max_digits=12, decimal_places=2, write_only=True, required=False, min_value=Decimal("0"),
+        help_text="Pochka narxi. Dona tannarxi shundan hisoblanadi.",
+    )
 
     class Meta:
         model = Packaging
         fields = "__all__"
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        kind = attrs.get("packaging_type") or getattr(self.instance, "packaging_type", None)
+        size = (attrs.get("size") if "size" in attrs else getattr(self.instance, "size", "")) or ""
+        if kind == "basket":
+            allowed = [key for key, _ in Packaging.SIZE_CHOICES]
+            if size and size.lower() not in allowed:
+                raise serializers.ValidationError({"size": f"Savat razmeri: {', '.join(allowed)}"})
+            if size:
+                attrs["size"] = size.lower()
+        if attrs.get("bunches") and not attrs.get("units_per_bunch") and not getattr(self.instance, "units_per_bunch", None):
+            attrs["units_per_bunch"] = 20
+        return attrs
+
+    def _receive_extras(self, validated_data):
+        """Yuk, pochka soni va pochka narxini ajratib oladi."""
+        return (
+            validated_data.pop("delivery", None),
+            validated_data.pop("bunches", None),
+            validated_data.pop("cost_per_bunch", None),
+        )
+
+    def _apply_bunch_pricing(self, validated_data, bunches, cost_per_bunch):
+        """Pochka soni va narxidan dona soni bilan dona tannarxini hisoblaydi."""
+        per_bunch = int(validated_data.get("units_per_bunch") or getattr(self.instance, "units_per_bunch", 20) or 20)
+        quantity = None
+        if bunches:
+            quantity = int(bunches) * per_bunch
+        if cost_per_bunch is not None and per_bunch > 0:
+            validated_data["cost_price"] = (Decimal(str(cost_per_bunch)) / Decimal(per_bunch)).quantize(Decimal("0.01"))
+        return quantity
 
     @extend_schema_field(serializers.DictField())
     def get_last_delivery(self, obj):
@@ -856,11 +924,34 @@ class PackagingSerializer(serializers.ModelSerializer):
         return validated_data
 
     def create(self, validated_data):
+        from .inventory_services import receive_material_into_delivery
+
         validated_data = self.save_image(validated_data)
-        return super().create(validated_data)
+        delivery, bunches, cost_per_bunch = self._receive_extras(validated_data)
+        quantity = self._apply_bunch_pricing(validated_data, bunches, cost_per_bunch)
+        if quantity is None:
+            quantity = int(validated_data.get("quantity") or 0)
+        user = getattr(self.context.get("request"), "user", None)
+        with transaction.atomic():
+            # yukka kirim qilinadigan bo'lsa soni kirim orqali qo'shiladi
+            validated_data["quantity"] = 0 if delivery else quantity
+            material = super().create(validated_data)
+            if delivery and quantity > 0:
+                receive_material_into_delivery(delivery, material, quantity, material.cost_price, "", user)
+                material.refresh_from_db()
+                # kirim yozuvi allaqachon yaratildi, viewset yana yozmasin
+                material.received_via_delivery = True
+        return material
 
     def update(self, instance, validated_data):
         validated_data = self.save_image(validated_data)
+        validated_data.pop("delivery", None)
+        bunches = validated_data.pop("bunches", None)
+        cost_per_bunch = validated_data.pop("cost_per_bunch", None)
+        self._apply_bunch_pricing(validated_data, None, cost_per_bunch)
+        if bunches:
+            per_bunch = int(validated_data.get("units_per_bunch") or instance.units_per_bunch or 20)
+            validated_data["quantity"] = int(bunches) * per_bunch
         return super().update(instance, validated_data)
 
 
