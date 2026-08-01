@@ -869,9 +869,13 @@ class PackagingMovementSerializer(serializers.ModelSerializer):
 
 class CatalogCompositionSerializer(serializers.ModelSerializer):
     batch_detail = StockBatchSerializer(source="stock_batch", read_only=True)
+
     class Meta:
         model = CatalogComposition
         fields = ["id", "stock_batch", "batch_detail", "quantity_stems", "quantity_bunches"]
+        # Florist katalogida gul tanlanadi, lekin soni yozilmaydi — u chiqim
+        # yopilganda hisoblanadi. Shuning uchun son majburiy emas.
+        extra_kwargs = {"quantity_stems": {"required": False, "default": 0}}
 
 
 class CatalogMaterialUsageSerializer(serializers.ModelSerializer):
@@ -1371,14 +1375,23 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             materials = attrs["materials"]
         elif materials is not None:
             materials = normalize_catalog_material_rows(materials)
-        # Florist katalogida gul soni yozilmaydi — chiqim yopilganda hajm bo'yicha
-        # taqsimlanadi. Shuning uchun hajm va turi majburiy bo'ladi.
+        # Florist katalogida gul tanlanadi, lekin soni yozilmaydi — u chiqim
+        # yopilganda hajm bo'yicha hisoblanadi. Shuning uchun tur, hajm va
+        # kamida bitta gul majburiy.
         florist_value = attrs.get("florist", getattr(self.instance, "florist", None))
-        if florist_value and not composition and not self.instance:
+        if florist_value and not self.instance:
             if not attrs.get("arrangement_type"):
                 raise serializers.ValidationError({"arrangement_type": "Florist katalogida turini tanlash kerak"})
             if not (attrs.get("volume") or "").strip():
                 raise serializers.ValidationError({"volume": "Florist katalogida hajmni tanlash kerak — gul shu bo‘yicha taqsimlanadi"})
+            if not composition:
+                raise serializers.ValidationError({"composition": "Floristga chiqarilgan qaysi guldan yasalganini tanlang"})
+        # Florist tanlanmagan katalogda gul skladdan darrov yechiladi,
+        # shuning uchun u yerda son majburiy.
+        if composition and not florist_value:
+            for row in composition:
+                if int(row.get("quantity_stems") or 0) < 1:
+                    raise serializers.ValidationError({"composition": "Gul sonini kiriting"})
         if composition and not self.instance:
             florist = attrs.get("florist")
             for row in composition:

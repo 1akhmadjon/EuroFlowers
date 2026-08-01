@@ -2504,23 +2504,73 @@ class ApiTests(TestCase):
             FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume=volume, default_stems=stems, florist_fee=Decimal("50000"))
         return profile
 
-    def _make_sized_catalog(self, profile, volume, count=1, quantity_total=1):
+    def _make_sized_catalog(self, profile, volume, count=1, quantity_total=1, batch=None):
+        """Florist katalogi: gul tanlanadi, soni yozilmaydi."""
+        batch = batch or self.batch
         made = []
         for index in range(count):
             response = self.client.post("/api/catalog/", {
                 "name_uz": f"{volume} buket {index + 1}", "arrangement_type": "bouquet", "volume": volume,
                 "florist": profile.id, "price": "500000", "quantity_total": quantity_total, "status": "available",
+                "composition": [{"stock_batch": batch.id}],
             }, format="json")
             self.assertEqual(response.status_code, 201, response.json())
             made.append(CatalogItem.objects.get(id=response.json()["id"]))
         return made
 
-    def test_catalog_without_stems_needs_only_volume(self):
-        # florist katalogga faqat hajmni yozadi, gul soni so'ralmaydi
+    def test_catalog_takes_flower_without_stem_count(self):
+        # florist gulni tanlaydi, sonini yozmaydi — son 0 bo'lib turadi
         profile = self._florist_with_rates("fl-size-only")
         made = self._make_sized_catalog(profile, "M")
-        self.assertEqual(made[0].composition.count(), 0)
+        row = made[0].composition.get()
+        self.assertEqual(row.stock_batch_id, self.batch.id)
+        self.assertEqual(row.quantity_stems, 0)
         self.assertEqual(made[0].volume, "M")
+
+    def test_florist_catalog_requires_flower(self):
+        profile = self._florist_with_rates("fl-no-flower")
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Gulsiz", "arrangement_type": "bouquet", "volume": "M",
+            "florist": profile.id, "price": "500000", "quantity_total": 1,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("composition", response.data)
+
+    def test_operator_catalog_still_requires_stem_count(self):
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Operator buketi", "arrangement_type": "bouquet",
+            "price": "500000", "quantity_total": 1,
+            "composition": [{"stock_batch": self.batch.id}],
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("composition", response.data)
+
+    def test_closing_one_flower_does_not_touch_other_flower_catalogs(self):
+        # florist ikki xil gul olgan: qizil tugadi deyilsa faqat qizil buketlarga tushadi
+        profile = self._florist_with_rates("fl-two-flowers")
+        second = StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="API-2", height_cm=60, stems_per_bunch=20,
+            received_stems=300, remaining_stems=300, cost_per_stem=10000,
+            sale_price_per_stem=20000, sale_price_per_bunch=400000,
+        )
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 200)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 200}, format="json")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": second.id, "quantity_stems": 300}, format="json")
+        first_items = self._make_sized_catalog(profile, "M", count=2, batch=self.batch)
+        second_items = self._make_sized_catalog(profile, "M", count=3, batch=second)
+        # birinchi gulni yopamiz
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(sorted(item.composition.get().quantity_stems for item in first_items), [100, 100])
+        # ikkinchi guldan yasalganlarga tegilmadi
+        self.assertEqual(sorted(item.composition.get().quantity_stems for item in second_items), [0, 0, 0])
+        # endi ikkinchisini ham yopamiz
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": second.id}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(sorted(item.composition.get().quantity_stems for item in second_items), [100, 100, 100])
+        self.assertEqual(sorted(item.composition.get().quantity_stems for item in first_items), [100, 100])
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 0)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=second).remaining_stems, 0)
 
     def test_florist_catalog_requires_volume(self):
         profile = self._florist_with_rates("fl-no-volume")
@@ -2607,7 +2657,7 @@ class ApiTests(TestCase):
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 50}, format="json")
         response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("guli yozilmagan katalog yo‘q", response.data["detail"])
+        self.assertIn("soni yozilmagan katalog yo‘q", response.data["detail"])
 
     def test_closing_issue_can_return_everything(self):
         profile = self._florist_with_rates("fl-close-6")

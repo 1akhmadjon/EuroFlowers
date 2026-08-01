@@ -329,7 +329,8 @@ def florist_leftover_candidates(florist, batch):
     tannarxi to'g'rilanishi kerak.
     """
     return list(
-        CatalogComposition.objects.filter(stock_batch=batch, catalog_item__florist=florist)
+        # soni hali yozilmagan qatorlar chiqim yopilishini kutayapti, ularga tegilmaydi
+        CatalogComposition.objects.filter(stock_batch=batch, catalog_item__florist=florist, quantity_stems__gt=0)
         .select_related("catalog_item")
         .order_by("catalog_item__created_at", "catalog_item_id")
     )
@@ -382,11 +383,17 @@ def split_stems_by_weight(amount, items):
     return plan, remaining
 
 
-def florist_open_catalog_items(florist):
-    """Guli hali yozilmagan kataloglar — chiqim yopilganda shularga bo'linadi."""
+def florist_open_catalog_rows(florist, batch):
+    """Shu guldan yasalgan, lekin soni hali yozilmagan katalog qatorlari.
+
+    Florist katalogga gulni tanlaydi, sonini yozmaydi — qator soni 0 bo'lib
+    turadi. Chiqim yopilganda aynan shular to'ldiriladi. Shu tufayli qizil
+    atirgul faqat qizildan yasalgan buketlarga tushadi.
+    """
     return list(
-        CatalogItem.objects.filter(florist=florist, composition__isnull=True)
-        .order_by("created_at", "id")
+        CatalogComposition.objects.filter(catalog_item__florist=florist, stock_batch=batch, quantity_stems=0)
+        .select_related("catalog_item")
+        .order_by("catalog_item__created_at", "catalog_item_id")
     )
 
 
@@ -396,7 +403,8 @@ def florist_close_plan(florist, batch, return_stems=0):
     held = balance.remaining_stems if balance else 0
     return_stems = int(return_stems or 0)
     amount = max(held - return_stems, 0)
-    items = florist_open_catalog_items(florist)
+    rows = florist_open_catalog_rows(florist, batch)
+    items = [row.catalog_item for row in rows]
     missing = [item for item in items if florist_volume_weight(florist, item) < 1]
     weighted = [(item, int(item.quantity_total or 1), florist_volume_weight(florist, item)) for item in items]
     plan, unplaced = split_stems_by_weight(amount, weighted) if not missing else ({}, amount)
@@ -459,10 +467,12 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
                 summary=f"{florist} chiqimi yopildi, {return_stems} dona skladga qaytdi", after=result,
             )
             return result
-        items = florist_open_catalog_items(florist)
+        rows = florist_open_catalog_rows(florist, batch)
+        items = [row.catalog_item for row in rows]
         if not items:
             raise ValueError(
-                f"{florist} da guli yozilmagan katalog yo‘q. Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
+                f"{florist} da bu guldan yasalgan, soni yozilmagan katalog yo‘q. "
+                f"Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
             )
         missing = sorted({f"{item.get_arrangement_type_display()} · {item.volume or 'hajmsiz'}" for item in items if florist_volume_weight(florist, item) < 1})
         if missing:
@@ -472,15 +482,16 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
             )
         weighted = [(item, int(item.quantity_total or 1), florist_volume_weight(florist, item)) for item in items]
         plan, unplaced = split_stems_by_weight(amount, weighted)
+        by_item = {row.catalog_item_id: row for row in rows}
         moved = 0
         for item, units, weight in weighted:
             stems = plan.get(item.id, 0)
             if stems < 1:
                 continue
-            CatalogComposition.objects.create(
-                catalog_item=item, stock_batch=batch, quantity_stems=stems,
-                quantity_bunches=(Decimal(stems) / Decimal(batch.stems_per_bunch or 1)).quantize(Decimal("0.01")),
-            )
+            row = by_item[item.id]
+            row.quantity_stems = stems
+            row.quantity_bunches = (Decimal(stems) / Decimal(batch.stems_per_bunch or 1)).quantize(Decimal("0.01"))
+            row.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
             moved += stems * units
             result["items"].append({
                 "catalog_item": item.id,
