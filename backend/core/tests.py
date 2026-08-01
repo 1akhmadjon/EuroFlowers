@@ -2877,6 +2877,38 @@ class ApiTests(TestCase):
         # gul tanlangan, lekin soni hali yozilmagan
         self.assertEqual(sorted(item.composition.get().quantity_stems for item in made), [0, 0])
 
+    def test_close_all_absorbs_small_remainders(self):
+        profile = self._florist_with_rates("fl-close-all")
+        second = StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="API-REM-2", height_cm=60, stems_per_bunch=20,
+            received_stems=100, remaining_stems=100, cost_per_stem=10000,
+            sale_price_per_stem=20000, sale_price_per_bunch=400000,
+        )
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 75)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 75}, format="json")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": second.id, "quantity_stems": 74}, format="json")
+        first_item = self._make_sized_catalog(profile, "M", count=1, quantity_total=7, batch=self.batch)[0]
+        second_item = self._make_sized_catalog(profile, "M", count=1, quantity_total=7, batch=second)[0]
+        first_row = first_item.composition.get()
+        first_row.quantity_stems = 10
+        first_row.save(update_fields=["quantity_stems", "updated_at"])
+        second_row = second_item.composition.get()
+        second_row.quantity_stems = 10
+        second_row.save(update_fields=["quantity_stems", "updated_at"])
+        FloristStockBalance.objects.filter(florist=profile, batch=self.batch).update(remaining_stems=5)
+        FloristStockBalance.objects.filter(florist=profile, batch=second).update(remaining_stems=4)
+        response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "close_all": True}, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.data["closed_batches"], 2)
+        self.assertEqual(response.data["unplaced_stems"], 0)
+        self.assertEqual(response.data["absorbed_remainder"], 9)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 0)
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=second).remaining_stems, 0)
+        first_item.refresh_from_db()
+        second_item.refresh_from_db()
+        self.assertEqual(first_item.composition.get().quantity_stems, 11)
+        self.assertEqual(second_item.composition.get().quantity_stems, 11)
+
     def test_closing_issue_rejects_return_bigger_than_held(self):
         profile = self._florist_with_rates("fl-close-8")
         StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 40)

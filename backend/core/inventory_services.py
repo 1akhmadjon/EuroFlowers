@@ -515,7 +515,7 @@ def florist_open_catalog_rows(florist, batch):
     )
 
 
-def florist_close_plan(florist, batch, return_stems=0):
+def florist_close_plan(florist, batch, return_stems=0, absorb_remainder=False):
     """Chiqim yopilganda nima bo'lishini hisoblaydi. Hech narsani o'zgartirmaydi."""
     balance = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
     held = balance.remaining_stems if balance else 0
@@ -526,6 +526,15 @@ def florist_close_plan(florist, batch, return_stems=0):
     weights, missing, weight_source = florist_weight_plan(florist, items)
     weighted = [(item, int(item.quantity_total or 1), weights.get(item.id, 0)) for item in items]
     plan, unplaced = split_stems_by_weight(amount, weighted) if not missing else ({}, amount)
+    rounded_extra = 0
+    absorbed_remainder = 0
+    if absorb_remainder and unplaced and weighted and not missing:
+        item, units, _ = sorted(weighted, key=lambda row: (row[1], row[0].created_at, row[0].id))[0]
+        step = (unplaced + units - 1) // units
+        plan[item.id] = plan.get(item.id, 0) + step
+        absorbed_remainder = unplaced
+        rounded_extra = step * units - unplaced
+        unplaced = 0
     return {
         "weight_source": weight_source,
         "batch_id": batch.id,
@@ -535,6 +544,8 @@ def florist_close_plan(florist, batch, return_stems=0):
         "return_stems": return_stems,
         "share_stems": amount,
         "unplaced_stems": unplaced,
+        "absorbed_remainder": absorbed_remainder,
+        "rounded_extra_stems": rounded_extra,
         "missing_rates": missing,
         "items": [
             {
@@ -553,7 +564,7 @@ def florist_close_plan(florist, batch, return_stems=0):
     }
 
 
-def close_florist_issue(florist, batch, return_stems=0, user=None):
+def close_florist_issue(florist, batch, return_stems=0, user=None, absorb_remainder=False):
     """Chiqarilgan gul tugadi: ortig'i skladga qaytariladi, qolgani kataloglarga bo'linadi.
 
     Florist katalogga faqat hajmni yozadi, qancha gul ketganini yozmaydi.
@@ -579,6 +590,8 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
             "returned_stems": return_stems,
             "shared_stems": 0,
             "unplaced_stems": 0,
+            "absorbed_remainder": 0,
+            "rounded_extra_stems": 0,
             "items": [],
         }
         if amount < 1:
@@ -591,6 +604,8 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
         rows = florist_open_catalog_rows(florist, batch)
         items = [row.catalog_item for row in rows]
         if not items:
+            if absorb_remainder:
+                return absorb_florist_remainder(florist, batch, user)
             raise ValueError(
                 f"{florist} da bu guldan yasalgan, soni yozilmagan katalog yo‘q. "
                 f"Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
@@ -603,6 +618,15 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
             )
         weighted = [(item, int(item.quantity_total or 1), weights.get(item.id, 0)) for item in items]
         plan, unplaced = split_stems_by_weight(amount, weighted)
+        absorbed_remainder = 0
+        rounded_extra = 0
+        if absorb_remainder and unplaced and weighted:
+            item, units, _ = sorted(weighted, key=lambda row: (row[1], row[0].created_at, row[0].id))[0]
+            step = (unplaced + units - 1) // units
+            plan[item.id] = plan.get(item.id, 0) + step
+            absorbed_remainder = unplaced
+            rounded_extra = step * units - unplaced
+            unplaced = 0
         by_item = {row.catalog_item_id: row for row in rows}
         moved = 0
         for item, units, weight in weighted:
@@ -624,10 +648,15 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
                 "stems_per_item": stems,
                 "stems_total": stems * units,
             })
-        balance.remaining_stems -= moved
+        if absorbed_remainder:
+            balance.remaining_stems = 0
+        else:
+            balance.remaining_stems -= moved
         balance.save(update_fields=["remaining_stems", "updated_at"])
-        result["shared_stems"] = moved
+        result["shared_stems"] = amount if absorbed_remainder else moved
         result["unplaced_stems"] = unplaced
+        result["absorbed_remainder"] = absorbed_remainder
+        result["rounded_extra_stems"] = rounded_extra
         result["weight_source"] = weight_source
         for item, _, _ in weighted:
             sync_catalog_financials(item)
@@ -638,6 +667,108 @@ def close_florist_issue(florist, batch, return_stems=0, user=None):
             after=result,
         )
     return result
+
+
+def absorb_florist_remainder(florist, batch, user=None):
+    with transaction.atomic():
+        balance = florist_balance_row(florist, batch, lock=True)
+        amount = int(balance.remaining_stems or 0)
+        if amount < 1:
+            raise ValueError(f"{florist} qo‘lida bu guldan qoldiq yo‘q")
+        candidates = florist_leftover_candidates(florist, batch)
+        if not candidates:
+            raise ValueError(
+                f"{florist} da bu guldan yasalgan katalog topilmadi. "
+                f"Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
+            )
+        items = [(row, int(row.catalog_item.quantity_total or 1)) for row in candidates]
+        plan, unplaced = split_stems_over_items(amount, items)
+        absorbed_remainder = 0
+        rounded_extra = 0
+        if unplaced:
+            row, units = sorted(items, key=lambda item: (item[1], item[0].catalog_item.created_at, item[0].catalog_item_id))[0]
+            step = (unplaced + units - 1) // units
+            plan[row.id] = plan.get(row.id, 0) + step
+            absorbed_remainder = unplaced
+            rounded_extra = step * units - unplaced
+            unplaced = 0
+        moved = 0
+        result = {
+            "florist": str(florist),
+            "batch_number": batch.batch_number,
+            "weight_source": "existing_catalog",
+            "returned_stems": 0,
+            "shared_stems": amount if absorbed_remainder else 0,
+            "unplaced_stems": unplaced,
+            "absorbed_remainder": absorbed_remainder,
+            "rounded_extra_stems": rounded_extra,
+            "items": [],
+        }
+        touched = {}
+        for row, units in items:
+            step = plan.get(row.id, 0)
+            if step < 1:
+                continue
+            row.quantity_stems += step
+            row.quantity_bunches = (Decimal(row.quantity_stems) / Decimal(batch.stems_per_bunch or 1)).quantize(Decimal("0.01"))
+            row.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+            moved += step * units
+            touched[row.catalog_item_id] = row.catalog_item
+            result["items"].append({
+                "catalog_item": row.catalog_item_id,
+                "catalog_name": row.catalog_item.name_uz,
+                "arrangement_type": row.catalog_item.arrangement_type,
+                "volume": row.catalog_item.volume,
+                "quantity_total": units,
+                "stems_per_item": row.quantity_stems,
+                "stems_total": row.quantity_stems * units,
+                "added_per_item": step,
+            })
+        if absorbed_remainder:
+            balance.remaining_stems = 0
+        else:
+            balance.remaining_stems -= moved
+            result["shared_stems"] = moved
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+        for item in touched.values():
+            sync_catalog_financials(item)
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="florist_issue_remainder_absorbed", entity_type="FloristProfile", entity_id=str(florist.id),
+            summary=f"{florist} qoldig‘i mavjud katalogga qo‘shildi: {amount} dona",
+            after=result,
+        )
+    return result
+
+
+def close_all_florist_issues(florist, user=None, absorb_remainder=True):
+    with transaction.atomic():
+        balances = list(
+            FloristStockBalance.objects.select_for_update()
+            .filter(florist=florist, remaining_stems__gt=0)
+            .select_related("batch__variant__flower")
+            .order_by("batch__batch_number", "batch_id")
+        )
+        if not balances:
+            raise ValueError(f"{florist} qo‘lida yopiladigan qoldiq yo‘q")
+        result = {
+            "florist": str(florist),
+            "closed_batches": 0,
+            "shared_stems": 0,
+            "absorbed_remainder": 0,
+            "rounded_extra_stems": 0,
+            "unplaced_stems": 0,
+            "batches": [],
+        }
+        for balance in balances:
+            row = close_florist_issue(florist, balance.batch, 0, user, absorb_remainder)
+            result["closed_batches"] += 1
+            result["shared_stems"] += int(row.get("shared_stems") or 0)
+            result["absorbed_remainder"] += int(row.get("absorbed_remainder") or 0)
+            result["rounded_extra_stems"] += int(row.get("rounded_extra_stems") or 0)
+            result["unplaced_stems"] += int(row.get("unplaced_stems") or 0)
+            result["batches"].append(row)
+        return result
 
 
 TO_CATALOG = "to_catalog"

@@ -405,11 +405,21 @@ class FloristCloseIssueSerializer(serializers.Serializer):
     """Chiqarilgan gul tugadi: ortig'i skladga, qolgani kataloglarga."""
 
     florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
-    batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all(), required=False, allow_null=True)
     return_stems = serializers.IntegerField(
         required=False, min_value=0, default=0,
         help_text="Ortib qolgan va skladga qaytariladigan gul soni. Qolgani kataloglarga bo‘linadi.",
     )
+    close_all = serializers.BooleanField(required=False, default=False)
+    absorb_remainder = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if not attrs.get("close_all") and not attrs.get("batch"):
+            raise serializers.ValidationError({"batch": "Bitta gulni yopishda partiyani tanlash kerak"})
+        if attrs.get("close_all") and attrs.get("return_stems"):
+            raise serializers.ValidationError({"return_stems": "Umumiy yopishda return_stems ishlatilmaydi"})
+        return attrs
 
 
 class FloristLeftoverRequestSerializer(serializers.Serializer):
