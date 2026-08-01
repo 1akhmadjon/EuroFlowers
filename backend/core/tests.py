@@ -1386,7 +1386,10 @@ class ApiTests(TestCase):
 
     def _florist(self, username="fl-stock"):
         user = User.objects.create_user(username, password="p", first_name="Stock")
-        return FloristProfile.objects.create(user=user, staff_type="florist")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        # standart katalogda haq hajm tarifidan olinadi, shuning uchun tarif kerak
+        FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="M", default_stems=25, florist_fee=Decimal("50000"))
+        return profile
 
     def test_issue_stock_to_florist_moves_balance(self):
         florist = self._florist()
@@ -2345,6 +2348,7 @@ class ApiTests(TestCase):
         self._leftover_seq = getattr(self, "_leftover_seq", 0) + 1
         user = User.objects.create_user(f"fl-leftover-{self._leftover_seq}", password="p")
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="M", default_stems=per_item, florist_fee=Decimal("50000"))
         # bir nechta florist ketma-ket sinalganda skladda gul tugab qolmasin
         StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + issued)
         self.batch.refresh_from_db()
@@ -2639,13 +2643,22 @@ class ApiTests(TestCase):
         self.assertGreater(after, before)
 
     def test_closing_issue_needs_volume_rate(self):
+        # tarif katalog qo'shilayotgandayoq talab qilinadi, keyin ham tekshiriladi
         user = User.objects.create_user("fl-close-norate", password="p")
         profile = FloristProfile.objects.create(user=user, staff_type="florist")
         FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="M", default_stems=25, florist_fee=Decimal("50000"))
         StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        blocked = self.client.post("/api/catalog/", {
+            "name_uz": "XL buket", "arrangement_type": "bouquet", "volume": "XL",
+            "florist": profile.id, "price": "500000", "quantity_total": 1,
+            "composition": [{"stock_batch": self.batch.id}],
+        }, format="json")
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("hajm tarifi belgilanmagan", str(blocked.data))
+        # tarif o'chirilgan bo'lsa yopishda ham xato beriladi
         self._make_sized_catalog(profile, "M")
-        self._make_sized_catalog(profile, "XL")
+        FloristVolumeRate.objects.filter(florist=profile, volume="M").update(is_active=False)
         response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("hajm tarifi belgilanmagan", response.data["detail"])
