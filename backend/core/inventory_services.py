@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, StockBatch, StockMovement
+from .models import AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
 
 
 def money(value):
@@ -30,13 +30,14 @@ def catalog_snapshot(item):
     }
 
 
-def create_catalog_history(item, action, user=None, quantity=0, listed_unit_price=None, sold_unit_price=None, discount_reason="", note="", snapshot=None):
+def create_catalog_history(item, action, user=None, quantity=0, listed_unit_price=None, sold_unit_price=None, discount_reason="", note="", snapshot=None, reservation=None):
     listed = money(listed_unit_price if listed_unit_price is not None else item.price)
     sold = money(sold_unit_price if sold_unit_price is not None else listed)
     quantity = int(quantity or 0)
     discount = max((listed - sold) * Decimal(quantity), Decimal("0"))
     return CatalogHistory.objects.create(
         catalog_item=item,
+        reservation=reservation,
         action=action,
         quantity=quantity,
         listed_unit_price=listed,
@@ -48,6 +49,28 @@ def create_catalog_history(item, action, user=None, quantity=0, listed_unit_pric
         snapshot=snapshot if snapshot is not None else catalog_snapshot(item),
         created_by=user if getattr(user, "is_authenticated", False) else None,
     )
+
+
+def reservation_paid_amount(reservation):
+    if not reservation:
+        return Decimal("0")
+    return sum((Decimal(row.amount or 0) for row in reservation.payments.all()), Decimal("0"))
+
+
+def sync_reservation_payment_status(reservation):
+    reservation = Reservation.objects.get(pk=reservation.pk)
+    paid = reservation_paid_amount(reservation)
+    estimated = Decimal(reservation.estimated_price or 0)
+    if paid <= 0:
+        status = "unpaid"
+    elif estimated and paid >= estimated:
+        status = "paid"
+    else:
+        status = "deposit"
+    if reservation.payment_status != status:
+        reservation.payment_status = status
+        reservation.save(update_fields=["payment_status", "updated_at"])
+    return reservation
 
 
 def catalog_component_total(item):
@@ -221,6 +244,55 @@ def issue_stock_to_florist(florist, batch, quantity_stems, reason="", user=None)
     return issue
 
 
+def issue_multiple_stock_to_florist(florist, items, reason="", user=None):
+    if not items:
+        raise ValueError("Kamida bitta gul tanlash kerak")
+    with transaction.atomic():
+        batch_ids = [row["batch"].id for row in items]
+        batches = {row.id: row for row in StockBatch.objects.select_for_update().filter(id__in=batch_ids)}
+        totals = {}
+        for row in items:
+            batch = batches.get(row["batch"].id)
+            quantity = int(row.get("quantity_stems") or 0)
+            if not batch:
+                raise ValueError("Partiya topilmadi")
+            if quantity < 1:
+                raise ValueError("Chiqariladigan gul soni 1 dan kam bo‘lmasligi kerak")
+            totals[batch.id] = totals.get(batch.id, 0) + quantity
+        for batch_id, quantity in totals.items():
+            batch = batches[batch_id]
+            if batch.remaining_stems < quantity:
+                raise ValueError(f"{batch.batch_number} partiyasida atigi {batch.remaining_stems} dona qolgan")
+        issues = []
+        for row in items:
+            batch = batches[row["batch"].id]
+            quantity = int(row.get("quantity_stems") or 0)
+            batch.remaining_stems -= quantity
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            balance = florist_balance_row(florist, batch, lock=True)
+            balance.remaining_stems += quantity
+            balance.save(update_fields=["remaining_stems", "updated_at"])
+            issue = FloristStockIssue.objects.create(
+                florist=florist, batch=batch, kind="issue", quantity_stems=quantity,
+                reason=reason, performed_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+            StockMovement.objects.create(
+                batch=batch, movement_type="out", quantity_stems=-quantity,
+                quantity_bunches=Decimal(quantity) / Decimal(batch.stems_per_bunch or 1),
+                reference_type="florist_issue", reference_id=issue.id,
+                reason=reason or f"{florist} ga chiqarildi",
+                performed_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+            issues.append(issue)
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="florist_stock_bulk_issued", entity_type="FloristProfile", entity_id=str(florist.id),
+            summary=f"{florist} ga {len(issues)} tur gul chiqarildi",
+            after={"items": [{"issue": issue.id, "batch": issue.batch_id, "quantity_stems": issue.quantity_stems} for issue in issues]},
+        )
+    return issues
+
+
 def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=None, kind="return"):
     """Floristdan gulni skladga qaytaradi yoki chiqitga chiqaradi."""
     quantity_stems = int(quantity_stems or 0)
@@ -252,6 +324,72 @@ def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=No
             performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
     return issue
+
+
+def restore_catalog_flowers(item, florist, old_batch, new_batch, quantity_stems, reason="", user=None):
+    quantity_stems = int(quantity_stems or 0)
+    if quantity_stems < 1:
+        raise ValueError("Restavratsiya soni 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        old_batch = StockBatch.objects.select_for_update().get(pk=old_batch.pk)
+        new_batch = StockBatch.objects.select_for_update().get(pk=new_batch.pk)
+        old_row = CatalogComposition.objects.select_for_update().filter(catalog_item=item, stock_batch=old_batch).first()
+        if not old_row:
+            raise ValueError("Katalog ichida eski gul topilmadi")
+        if old_row.quantity_stems < quantity_stems:
+            raise ValueError(f"Katalogda eski guldan bir donasiga {old_row.quantity_stems} dona yozilgan")
+        if new_batch.remaining_stems < quantity_stems:
+            raise ValueError(f"{new_batch.batch_number} partiyasida atigi {new_batch.remaining_stems} dona qolgan")
+        old_row.quantity_stems -= quantity_stems
+        old_row.quantity_bunches = (Decimal(old_row.quantity_stems) / Decimal(old_batch.stems_per_bunch or 1)).quantize(Decimal("0.01"))
+        if old_row.quantity_stems:
+            old_row.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+        else:
+            old_row.delete()
+        new_row = CatalogComposition.objects.select_for_update().filter(catalog_item=item, stock_batch=new_batch).first()
+        if new_row:
+            new_row.quantity_stems += quantity_stems
+            new_row.quantity_bunches = (Decimal(new_row.quantity_stems) / Decimal(new_batch.stems_per_bunch or 1)).quantize(Decimal("0.01"))
+            new_row.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+        else:
+            new_row = CatalogComposition.objects.create(
+                catalog_item=item,
+                stock_batch=new_batch,
+                quantity_stems=quantity_stems,
+                quantity_bunches=(Decimal(quantity_stems) / Decimal(new_batch.stems_per_bunch or 1)).quantize(Decimal("0.01")),
+            )
+        StockMovement.objects.create(
+            batch=old_batch,
+            movement_type="waste",
+            quantity_stems=-quantity_stems,
+            quantity_bunches=-(Decimal(quantity_stems) / Decimal(old_batch.stems_per_bunch or 1)),
+            reference_type="catalog_restoration",
+            reference_id=item.id,
+            reason=reason or f"{item.name_uz} restavratsiya eski gul chiqiti",
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        issue = issue_stock_to_florist(florist, new_batch, quantity_stems, reason or f"{item.name_uz} restavratsiya uchun", user)
+        balance = florist_balance_row(florist, new_batch, lock=True)
+        if balance.remaining_stems < quantity_stems:
+            raise ValueError(f"{florist} qo‘lida yangi guldan atigi {balance.remaining_stems} dona bor")
+        balance.remaining_stems -= quantity_stems
+        balance.save(update_fields=["remaining_stems", "updated_at"])
+        item = sync_catalog_financials(item)
+        create_catalog_history(
+            item,
+            "updated",
+            user=user,
+            note=f"Restavratsiya: {quantity_stems} dona {old_batch.variant} chiqit, {new_batch.variant} qo‘yildi",
+            snapshot=catalog_snapshot(item),
+        )
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="catalog_restored_flowers", entity_type="CatalogItem", entity_id=str(item.id),
+            summary=f"{item.name_uz} restavratsiya qilindi: {quantity_stems} dona",
+            after={"old_batch": old_batch.id, "new_batch": new_batch.id, "florist": florist.id, "quantity_stems": quantity_stems, "issue": issue.id},
+        )
+    return item
 
 
 def edit_florist_stock_issue(issue, quantity_stems, reason=None, user=None):
@@ -1130,9 +1268,10 @@ def restore_catalog_inventory(item, user, quantity=None):
     return item
 
 
-def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type="", sold_at=None):
+def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type="", sold_at=None, reservation=None):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        reservation = Reservation.objects.select_for_update().filter(pk=getattr(reservation, "pk", reservation)).first() if reservation else item.reservation
         quantity = int(quantity or 1)
         if quantity < 1:
             raise ValueError("Sotilgan son 1 dan kam bo‘lmasligi kerak")
@@ -1145,20 +1284,36 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
         if sold_price < listed_price and not (discount_reason or "").strip():
             raise ValueError("Skidka bilan sotilganda izoh kiritish majburiy")
         item.quantity_sold += quantity
+        if reservation and not item.reservation_id:
+            item.reservation = reservation
         if item.quantity_sold >= item.quantity_total:
             item.status = "sold"
             item.sold_at = sold_at or timezone.now()
         elif item.status == "draft":
             item.status = "available"
-        item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
+        item.save(update_fields=["quantity_sold", "status", "sold_at", "reservation", "updated_at"])
         snapshot = catalog_snapshot(item)
         snapshot["payment_type"] = payment_type or ""
-        history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason, snapshot=snapshot)
+        if reservation:
+            paid = reservation_paid_amount(reservation)
+            total = sold_price * Decimal(quantity)
+            snapshot["reservation"] = {
+                "id": reservation.id,
+                "customer": str(reservation.customer),
+                "paid_amount": str(paid),
+                "sale_total": str(total),
+                "remaining_due": str(max(total - paid, Decimal("0"))),
+            }
+            reservation.catalog_item = item
+            reservation.status = "fulfilled"
+            reservation.save(update_fields=["catalog_item", "status", "updated_at"])
+            reservation = sync_reservation_payment_status(reservation)
+        history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason, snapshot=snapshot, reservation=reservation)
         if sold_at:
             CatalogHistory.objects.filter(pk=history.pk).update(created_at=sold_at)
             history.created_at = sold_at
         notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
-        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "payment_type": payment_type or "", "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason})
+        AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "payment_type": payment_type or "", "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason, "reservation": reservation.id if reservation else None})
     return item
 
 

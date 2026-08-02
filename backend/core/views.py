@@ -29,11 +29,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .models import MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, FloristCloseIssueSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_inventory, restore_lead_stock
+from .inventory_services import edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -260,6 +260,8 @@ def payment_label(value):
         return "Naqd"
     if value in ["card", "karta"]:
         return "Karta"
+    if value == "transfer":
+        return "O‘tkazma"
     return "Aniqlanmagan"
 
 
@@ -440,6 +442,14 @@ def accounting_report_data(request):
     by_volume = {}
     discount_rows = []
     history_rows = []
+    reservation_payment_rows = []
+    reservation_payment_summary = {
+        "count": 0,
+        "total": Decimal("0"),
+        "cash_total": Decimal("0"),
+        "card_total": Decimal("0"),
+        "transfer_total": Decimal("0"),
+    }
     for history in histories.order_by("-created_at", "-id"):
         item = history.catalog_item
         kind = item.catalog_kind or "standard"
@@ -508,6 +518,33 @@ def accounting_report_data(request):
         history_rows.append(row)
         if discount > 0:
             discount_rows.append(row)
+    if accounting_includes_main(selection):
+        reservation_payments = ReservationPayment.objects.select_related("reservation__customer", "reservation__catalog_item", "created_by")
+        if date_from:
+            reservation_payments = reservation_payments.filter(paid_at__date__gte=date_from)
+        if date_to:
+            reservation_payments = reservation_payments.filter(paid_at__date__lte=date_to)
+        for payment in reservation_payments.order_by("-paid_at", "-id"):
+            method = payment.method if payment.method in ["cash", "card", "transfer"] else "unknown"
+            amount = Decimal(payment.amount or 0)
+            reservation_payment_summary["count"] += 1
+            reservation_payment_summary["total"] += amount
+            if method in ["cash", "card", "transfer"]:
+                reservation_payment_summary[f"{method}_total"] += amount
+            reservation_payment_rows.append({
+                "id": payment.id,
+                "reservation_id": payment.reservation_id,
+                "customer_id": payment.reservation.customer_id,
+                "customer_name": payment.reservation.customer.name,
+                "catalog_id": payment.reservation.catalog_item_id,
+                "catalog_name": payment.reservation.catalog_item.name_uz if payment.reservation.catalog_item_id else "",
+                "amount": amount,
+                "method": method,
+                "method_label": payment_label(method),
+                "paid_at": payment.paid_at,
+                "note": payment.note,
+                "created_by": user_full_name(payment.created_by),
+            })
     # Chiqit faqat asosiy skladda bo'ladi, filiallarda gul saqlanmaydi.
     if accounting_includes_main(selection):
         waste_movements = StockMovement.objects.filter(movement_type="waste").select_related("batch")
@@ -545,6 +582,8 @@ def accounting_report_data(request):
         "by_volume": sorted(by_volume.values(), key=lambda row: (row["catalog_kind"], row["volume"])),
         "discounted_sales": discount_rows,
         "history": history_rows,
+        "reservation_payments_summary": reservation_payment_summary,
+        "reservation_payments": reservation_payment_rows,
     }
 
 
@@ -1186,6 +1225,24 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         write_audit(request.user, "floriststockissue_created", issue, before={}, after=instance_snapshot(issue), request=request)
         return Response(FloristStockIssueSerializer(issue).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=FloristStockIssueBulkRequestSerializer, responses=FloristStockIssueSerializer(many=True))
+    @action(detail=False, methods=["post"], url_path="bulk-issue")
+    def bulk_issue(self, request):
+        if not has_page_permission(request.user, "inventory", True):
+            return forbidden()
+        serializer = FloristStockIssueBulkRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            issues = issue_multiple_stock_to_florist(
+                serializer.validated_data["florist"],
+                serializer.validated_data["items"],
+                serializer.validated_data.get("reason", ""),
+                request.user,
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(FloristStockIssueSerializer(issues, many=True).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(request=FloristStockReturnRequestSerializer, responses=FloristStockIssueSerializer)
     @action(detail=False, methods=["post"], url_path="return")
@@ -2023,6 +2080,28 @@ class CatalogItemViewSet(ScopedViewSet):
                 serializer.validated_data.get("discount_reason", ""),
                 serializer.validated_data.get("payment_type", ""),
                 serializer.validated_data.get("sold_at"),
+                serializer.validated_data.get("reservation"),
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(item).data)
+
+    @extend_schema(request=CatalogRestoreFlowersSerializer, responses=CatalogItemSerializer)
+    @action(detail=True, methods=["post"], url_path="restore-flowers")
+    def restore_flowers(self, request, pk=None):
+        if not has_page_permission(request.user, "catalog", True):
+            return forbidden()
+        serializer = CatalogRestoreFlowersSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            item = restore_catalog_flowers(
+                self.get_object(),
+                serializer.validated_data["florist"],
+                serializer.validated_data["old_batch"],
+                serializer.validated_data["new_batch"],
+                serializer.validated_data["quantity_stems"],
+                serializer.validated_data.get("reason", ""),
+                request.user,
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2219,6 +2298,7 @@ def export_profit_workbook(request):
         ("Naqd", summary["cash_total"]),
         ("Karta", summary["card_total"]),
         ("Aniqlanmagan to‘lov", summary["unknown_total"]),
+        ("Bron/zaklad to‘lovlari", data["reservation_payments_summary"]["total"]),
         ("Sotuvlar soni", summary["sales_count"]),
         ("Sotilgan son", summary["total_quantity"]),
         ("Sotilgan gul donasi", summary["flower_stems"]),
@@ -2300,11 +2380,29 @@ def export_profit_workbook(request):
             row["discount_reason"],
             row["sold_by"],
         ])
+    reservation_sheet = workbook.create_sheet("Bron to‘lovlari")
+    reservation_sheet.append(["To‘langan vaqt", "Bron ID", "Mijoz", "Katalog", "Summa", "To‘lov turi", "Kim qo‘shdi", "Izoh"])
+    for cell in reservation_sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row in data["reservation_payments"]:
+        reservation_sheet.append([
+            local_datetime_label(row["paid_at"]),
+            row["reservation_id"],
+            row["customer_name"],
+            row["catalog_name"],
+            money_label(row["amount"]),
+            row["method_label"],
+            row["created_by"],
+            row["note"],
+        ])
     autosize_sheet(sheet)
     autosize_sheet(branch_sheet)
     autosize_sheet(volume_sheet)
     autosize_sheet(history_sheet)
     autosize_sheet(discount_sheet)
+    autosize_sheet(reservation_sheet)
     return excel_response(workbook, "profit_export.xlsx")
 
 
@@ -2338,6 +2436,54 @@ class CustomerViewSet(ScopedViewSet):
             before_changed, after_changed = changed_snapshot(before, instance_snapshot(customer))
             write_audit(self.request.user, "customer_archived", customer, before=before_changed, after=after_changed, request=self.request)
             return Response({"detail": "Client arxivlandi. Lead tarixi saqlandi.", "id": customer.id, "archived": True})
+
+
+class ReservationViewSet(ScopedViewSet):
+    permission_page = "crm"
+    queryset = Reservation.objects.select_related("customer", "catalog_item", "created_by").prefetch_related("payments").all()
+    serializer_class = ReservationSerializer
+    filterset_fields = ["status", "payment_status", "customer", "catalog_item", "desired_date"]
+    search_fields = ["customer__name", "customer__phone", "request_uz", "note"]
+
+    def perform_create(self, serializer):
+        reservation = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        write_audit(self.request.user, "reservation_created", reservation, before={}, after=instance_snapshot(reservation), request=self.request)
+
+    def perform_update(self, serializer):
+        before = instance_snapshot(self.get_object())
+        reservation = serializer.save()
+        reservation = sync_reservation_payment_status(reservation)
+        write_audit(self.request.user, "reservation_updated", reservation, before=before, after=instance_snapshot(reservation), request=self.request)
+
+    @extend_schema(request=ReservationPaymentRequestSerializer, responses=ReservationPaymentSerializer)
+    @action(detail=True, methods=["post"], url_path="add-payment")
+    def add_payment(self, request, pk=None):
+        serializer = ReservationPaymentRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            reservation = Reservation.objects.select_for_update().get(pk=self.get_object().pk)
+            payment = ReservationPayment.objects.create(
+                reservation=reservation,
+                amount=serializer.validated_data["amount"],
+                method=serializer.validated_data.get("method", "cash"),
+                paid_at=serializer.validated_data.get("paid_at") or timezone.now(),
+                note=serializer.validated_data.get("note", ""),
+                created_by=request.user if request.user.is_authenticated else None,
+            )
+            reservation = sync_reservation_payment_status(reservation)
+            write_audit(request.user, "reservation_payment_created", payment, before={}, after=instance_snapshot(payment), request=request)
+        return Response(ReservationPaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(request=None, responses=ReservationSerializer)
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request, pk=None):
+        with transaction.atomic():
+            reservation = Reservation.objects.select_for_update().get(pk=self.get_object().pk)
+            before = instance_snapshot(reservation)
+            reservation.status = "cancelled"
+            reservation.save(update_fields=["status", "updated_at"])
+            write_audit(request.user, "reservation_cancelled", reservation, before=before, after=instance_snapshot(reservation), request=request)
+        return Response(self.get_serializer(reservation).data)
 
 
 class LeadStatusViewSet(ScopedViewSet):

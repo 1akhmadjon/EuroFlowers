@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -388,6 +388,22 @@ class FloristStockIssueRequestSerializer(serializers.Serializer):
     batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
     quantity_stems = serializers.IntegerField(min_value=1)
     reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class FloristStockIssueBulkItemSerializer(serializers.Serializer):
+    batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    quantity_stems = serializers.IntegerField(min_value=1)
+
+
+class FloristStockIssueBulkRequestSerializer(serializers.Serializer):
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    items = FloristStockIssueBulkItemSerializer(many=True)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Kamida bitta gul tanlash kerak")
+        return value
 
 
 class FloristStockReturnRequestSerializer(FloristStockIssueRequestSerializer):
@@ -1599,7 +1615,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, sync_catalog_financials, sync_catalog_florist_salary
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
         payment_type = validated_data.pop("payment_type", "")
         validated_data["customer"] = resolve_or_create_customer(
             customer=validated_data.pop("customer", None),
@@ -1642,13 +1658,27 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                     from .inventory_services import catalog_snapshot
                     snapshot = catalog_snapshot(item)
                     snapshot["payment_type"] = payment_type
-                create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot)
+                if item.reservation_id:
+                    reservation = item.reservation
+                    if snapshot is None:
+                        from .inventory_services import catalog_snapshot
+                        snapshot = catalog_snapshot(item)
+                    paid = reservation_paid_amount(reservation)
+                    total = Decimal(item.price or 0) * Decimal(item.quantity_sold or 1)
+                    snapshot["reservation"] = {"id": reservation.id, "customer": str(reservation.customer), "paid_amount": str(paid), "sale_total": str(total), "remaining_due": str(max(total - paid, Decimal("0")))}
+                    reservation.catalog_item = item
+                    reservation.status = "fulfilled"
+                    reservation.save(update_fields=["catalog_item", "status", "updated_at"])
+                    reservation = sync_reservation_payment_status(reservation)
+                else:
+                    reservation = None
+                create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot, reservation=reservation)
                 notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             self._sync_social_post_image(item)
         return item
 
     def update(self, instance, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
         payment_type = validated_data.pop("payment_type", "")
         customer_name = validated_data.pop("customer_name", "")
         customer_phone = validated_data.pop("customer_phone", "")
@@ -1712,7 +1742,21 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                     from .inventory_services import catalog_snapshot
                     snapshot = catalog_snapshot(instance)
                     snapshot["payment_type"] = payment_type
-                create_catalog_history(instance, "sold", user=user, quantity=instance.quantity_sold, listed_unit_price=custom_component_unit_price(instance), sold_unit_price=instance.price, discount_reason=instance.discount_reason, snapshot=snapshot)
+                if instance.reservation_id:
+                    reservation = instance.reservation
+                    if snapshot is None:
+                        from .inventory_services import catalog_snapshot
+                        snapshot = catalog_snapshot(instance)
+                    paid = reservation_paid_amount(reservation)
+                    total = Decimal(instance.price or 0) * Decimal(instance.quantity_sold or 1)
+                    snapshot["reservation"] = {"id": reservation.id, "customer": str(reservation.customer), "paid_amount": str(paid), "sale_total": str(total), "remaining_due": str(max(total - paid, Decimal("0")))}
+                    reservation.catalog_item = instance
+                    reservation.status = "fulfilled"
+                    reservation.save(update_fields=["catalog_item", "status", "updated_at"])
+                    reservation = sync_reservation_payment_status(reservation)
+                else:
+                    reservation = None
+                create_catalog_history(instance, "sold", user=user, quantity=instance.quantity_sold, listed_unit_price=custom_component_unit_price(instance), sold_unit_price=instance.price, discount_reason=instance.discount_reason, snapshot=snapshot, reservation=reservation)
                 notify_florist_catalog(instance, "Katalog sotildi", f"{instance.name_uz} katalogidan {instance.quantity_sold} ta sotildi.")
             self._sync_social_post_image(instance)
         return instance
@@ -1777,6 +1821,81 @@ class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
         fields = "__all__"
+
+
+class ReservationPaymentSerializer(serializers.ModelSerializer):
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = ReservationPayment
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+
+class ReservationPaymentRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    method = serializers.ChoiceField(choices=ReservationPayment.METHOD_CHOICES, required=False, default="cash")
+    paid_at = serializers.DateTimeField(required=False)
+    note = serializers.CharField(required=False, allow_blank=True)
+
+
+class ReservationSerializer(serializers.ModelSerializer):
+    customer_detail = CustomerSerializer(source="customer", read_only=True)
+    catalog_detail = serializers.SerializerMethodField()
+    payments = ReservationPaymentSerializer(many=True, read_only=True)
+    paid_amount = serializers.SerializerMethodField()
+    remaining_amount = serializers.SerializerMethodField()
+    customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
+    customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
+
+    class Meta:
+        model = Reservation
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_catalog_detail(self, obj):
+        if not obj.catalog_item_id:
+            return None
+        return {"id": obj.catalog_item_id, "name_uz": obj.catalog_item.name_uz, "price": str(obj.catalog_item.price), "status": obj.catalog_item.status}
+
+    @extend_schema_field(serializers.DecimalField(max_digits=12, decimal_places=2))
+    def get_paid_amount(self, obj):
+        return sum((row.amount for row in obj.payments.all()), Decimal("0"))
+
+    @extend_schema_field(serializers.DecimalField(max_digits=12, decimal_places=2))
+    def get_remaining_amount(self, obj):
+        base = Decimal(obj.estimated_price or 0)
+        if obj.catalog_item_id:
+            base = Decimal(obj.catalog_item.price or 0)
+        return max(base - self.get_paid_amount(obj), Decimal("0"))
+
+    def validate(self, attrs):
+        customer = attrs.get("customer") or getattr(self.instance, "customer", None)
+        if not customer and not attrs.get("customer_name"):
+            raise serializers.ValidationError({"customer_name": "Bron uchun mijoz ismi kerak"})
+        if not customer and not attrs.get("customer_phone"):
+            raise serializers.ValidationError({"customer_phone": "Bron uchun telefon kerak"})
+        return attrs
+
+    def create(self, validated_data):
+        validated_data["customer"] = resolve_or_create_customer(
+            customer=validated_data.pop("customer", None),
+            name=validated_data.pop("customer_name", ""),
+            phone=validated_data.pop("customer_phone", ""),
+        )
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        customer_name = validated_data.pop("customer_name", "")
+        customer_phone = validated_data.pop("customer_phone", "")
+        if "customer" in validated_data or customer_name or customer_phone:
+            validated_data["customer"] = resolve_or_create_customer(
+                customer=validated_data.pop("customer", None),
+                name=customer_name,
+                phone=customer_phone,
+            )
+        return super().update(instance, validated_data)
 
 
 class MessageSerializer(serializers.ModelSerializer):
@@ -2107,6 +2226,15 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     discount_reason = serializers.CharField(required=False, allow_blank=True)
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False)
     sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
+    reservation = serializers.PrimaryKeyRelatedField(queryset=Reservation.objects.all(), required=False, allow_null=True)
+
+
+class CatalogRestoreFlowersSerializer(serializers.Serializer):
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    old_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    new_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    quantity_stems = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(required=False, allow_blank=True)
 
 
 class SimulateResponseSerializer(serializers.Serializer):

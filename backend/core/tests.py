@@ -13,7 +13,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -1145,6 +1145,37 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["customer"], customer.id)
         self.assertEqual(response.data["customer_detail"]["name"], "Ahmad")
+
+    def test_reservation_payment_is_linked_when_catalog_is_sold(self):
+        reservation_response = self.client.post("/api/reservations/", {
+            "customer_name": "Bron Mijoz",
+            "customer_phone": "901112233",
+            "request_uz": "Qizil atirgul bron",
+            "arrangement_type": "bouquet",
+            "estimated_price": "500000",
+        }, format="json")
+        self.assertEqual(reservation_response.status_code, 201, reservation_response.json())
+        reservation_id = reservation_response.data["id"]
+        payment_response = self.client.post(f"/api/reservations/{reservation_id}/add-payment/", {
+            "amount": "200000",
+            "method": "cash",
+        }, format="json")
+        self.assertEqual(payment_response.status_code, 201, payment_response.json())
+        item = CatalogItem.objects.create(name_uz="Bron buket", arrangement_type="bouquet", price=Decimal("500000"), quantity_total=1, status="available")
+        sell_response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1,
+            "sale_price": "500000",
+            "reservation": reservation_id,
+            "payment_type": "cash",
+        }, format="json")
+        self.assertEqual(sell_response.status_code, 200, sell_response.json())
+        history = CatalogHistory.objects.get(catalog_item=item, action="sold")
+        reservation = Reservation.objects.get(pk=reservation_id)
+        self.assertEqual(history.reservation_id, reservation_id)
+        self.assertEqual(reservation.status, "fulfilled")
+        self.assertEqual(reservation.payment_status, "deposit")
+        self.assertEqual(history.snapshot["reservation"]["paid_amount"], "200000.00")
+        self.assertEqual(history.snapshot["reservation"]["remaining_due"], "300000.00")
         self.assertEqual(Customer.objects.count(), 1)
 
     def test_catalog_item_creates_new_customer_from_name_and_phone(self):
@@ -1402,6 +1433,55 @@ class ApiTests(TestCase):
         balance = FloristStockBalance.objects.get(florist=florist, batch=self.batch)
         self.assertEqual(balance.remaining_stems, 30)
         self.assertTrue(StockMovement.objects.filter(reference_type="florist_issue").exists())
+
+    def test_bulk_issue_stock_to_florist_moves_multiple_batches(self):
+        florist = self._florist("bulk-florist")
+        second = StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="API-BULK-2", height_cm=60, stems_per_bunch=20,
+            received_stems=100, remaining_stems=100, cost_per_stem=10000,
+            sale_price_per_stem=20000, sale_price_per_bunch=400000,
+        )
+        response = self.client.post("/api/florist-stock-issues/bulk-issue/", {
+            "florist": florist.id,
+            "items": [
+                {"batch": self.batch.id, "quantity_stems": 10},
+                {"batch": second.id, "quantity_stems": 15},
+            ],
+            "reason": "Bulk test",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(len(response.data), 2)
+        self.batch.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 90)
+        self.assertEqual(second.remaining_stems, 85)
+        self.assertEqual(FloristStockBalance.objects.get(florist=florist, batch=self.batch).remaining_stems, 10)
+        self.assertEqual(FloristStockBalance.objects.get(florist=florist, batch=second).remaining_stems, 15)
+
+    def test_catalog_restoration_wastes_old_flowers_and_issues_new_to_florist(self):
+        florist = self._florist("restore-florist")
+        new_batch = StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="API-RESTORE-2", height_cm=60, stems_per_bunch=20,
+            received_stems=100, remaining_stems=100, cost_per_stem=12000,
+            sale_price_per_stem=22000, sale_price_per_bunch=440000,
+        )
+        item = CatalogItem.objects.create(name_uz="Restavratsa buket", arrangement_type="bouquet", price=Decimal("600000"), quantity_total=1, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=20, quantity_bunches=Decimal("1.00"))
+        response = self.client.post(f"/api/catalog/{item.id}/restore-flowers/", {
+            "florist": florist.id,
+            "old_batch": self.batch.id,
+            "new_batch": new_batch.id,
+            "quantity_stems": 15,
+            "reason": "Restavratsa",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(CatalogComposition.objects.get(catalog_item=item, stock_batch=self.batch).quantity_stems, 5)
+        self.assertEqual(CatalogComposition.objects.get(catalog_item=item, stock_batch=new_batch).quantity_stems, 15)
+        new_batch.refresh_from_db()
+        self.assertEqual(new_batch.remaining_stems, 85)
+        self.assertEqual(FloristStockBalance.objects.get(florist=florist, batch=new_batch).remaining_stems, 0)
+        self.assertTrue(FloristStockIssue.objects.filter(florist=florist, batch=new_batch, quantity_stems=15).exists())
+        self.assertTrue(StockMovement.objects.filter(batch=self.batch, movement_type="waste", quantity_stems=-15, reference_type="catalog_restoration", reference_id=item.id).exists())
 
     def test_issue_rejects_more_than_stock(self):
         florist = self._florist()

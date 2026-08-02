@@ -521,6 +521,7 @@ class CatalogItem(TimeStampedModel):
     image_url = models.URLField(blank=True)
     instagram_story_url = models.URLField(blank=True)
     social_post = models.ForeignKey(SocialPost, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
+    reservation = models.ForeignKey("Reservation", null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     quantity_total = models.PositiveIntegerField(default=1)
     quantity_sold = models.PositiveIntegerField(default=0)
     quantity_stock_deducted = models.PositiveIntegerField(default=0)
@@ -567,6 +568,7 @@ class CatalogMaterialUsage(TimeStampedModel):
 class CatalogHistory(TimeStampedModel):
     ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi")]
     catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="history")
+    reservation = models.ForeignKey("Reservation", null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_history")
     action = models.CharField(max_length=30, choices=ACTION_CHOICES)
     quantity = models.PositiveIntegerField(default=0)
     listed_unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -670,6 +672,47 @@ class LeadCatalogUsage(TimeStampedModel):
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name="catalog_usage")
     catalog_item = models.ForeignKey(CatalogItem, on_delete=models.PROTECT, related_name="lead_usages")
     quantity = models.PositiveIntegerField(default=1)
+
+
+class Reservation(TimeStampedModel):
+    STATUS_CHOICES = [("active", "Bron"), ("fulfilled", "Sotildi"), ("cancelled", "Bekor qilindi")]
+    PAYMENT_STATUS_CHOICES = [("unpaid", "To‘lanmagan"), ("deposit", "Zaklad"), ("paid", "To‘liq to‘langan")]
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="reservations")
+    catalog_item = models.ForeignKey(CatalogItem, null=True, blank=True, on_delete=models.SET_NULL, related_name="reservations")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default="unpaid")
+    request_uz = models.TextField()
+    arrangement_type = models.CharField(max_length=20, choices=[("bouquet", "Buket"), ("basket", "Savat"), ("stems", "Donalab"), ("catalog", "Katalog")], blank=True)
+    estimated_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    desired_date = models.DateField(null=True, blank=True)
+    desired_time = models.CharField(max_length=20, blank=True)
+    fulfillment = models.CharField(max_length=20, choices=[("delivery", "Yetkazib berish"), ("pickup", "Kelib olish")], blank=True)
+    delivery_address = models.CharField(max_length=255, blank=True)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_reservations")
+
+    class Meta:
+        ordering = ["status", "-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.customer} · {self.get_status_display()}"
+
+    @property
+    def paid_amount(self):
+        return sum((row.amount for row in self.payments.all()), Decimal("0"))
+
+
+class ReservationPayment(TimeStampedModel):
+    METHOD_CHOICES = [("cash", "Naqd"), ("card", "Karta"), ("transfer", "O‘tkazma")]
+    reservation = models.ForeignKey(Reservation, on_delete=models.CASCADE, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="cash")
+    paid_at = models.DateTimeField(default=timezone.now)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_reservation_payments")
+
+    class Meta:
+        ordering = ["-paid_at", "-id"]
 
 
 class Notification(TimeStampedModel):
