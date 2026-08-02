@@ -2299,7 +2299,7 @@ class ApiTests(TestCase):
         self.assertEqual(material.quantity, 6)
         history = item.history.get(action="sold")
         self.assertEqual(history.snapshot["sale_materials"][0]["quantity"], 4)
-        self.assertEqual(history.snapshot["sale_decoration"]["amount"], "80000")
+        self.assertEqual(history.snapshot["sale_decoration"]["amount"], "80000.00")
         self.assertTrue(PackagingMovement.objects.filter(packaging=material, reference_type="catalog_sale", reference_id=history.id, quantity=-4).exists())
         self.assertTrue(FloristSalaryEntry.objects.filter(florist=decorator, catalog_item=item, source="sale_decoration", amount=Decimal("80000.00")).exists())
 
