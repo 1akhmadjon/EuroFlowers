@@ -4,7 +4,7 @@ from django.core.files.storage import default_storage
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
 from django.db import transaction
-from django.db.models import Count, DecimalField, F, Max, OuterRef, Q, Subquery, Sum, Value
+from django.db.models import Count, DecimalField, F, IntegerField, Max, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils.dateparse import parse_date, parse_datetime
@@ -971,6 +971,7 @@ def florist_stats_data(profile, request, include_sales=True):
         "salary_total": Decimal("0"),
         "salary_entries_count": len(salary),
         "catalog_salary_total": Decimal("0"),
+        "decoration_salary_total": Decimal("0"),
         "daily_salary_total": Decimal("0"),
         "manual_salary_total": Decimal("0"),
         "catalog_count": 0,
@@ -993,54 +994,59 @@ def florist_stats_data(profile, request, include_sales=True):
         sold = revenue_map.get(row.catalog_item_id, {}) if row.catalog_item_id else {}
         sold_quantity = int(sold.get("sold_quantity") or 0)
         sale_revenue = Decimal(sold.get("revenue") or 0)
+        is_production = bool(item and row.source in ["catalog", "custom_catalog"])
+        produced_quantity = int(item.quantity_total or 1) if is_production else 0
 
         summary["salary_total"] += amount
         if row.source == "daily":
             summary["daily_salary_total"] += amount
         elif row.source == "manual":
             summary["manual_salary_total"] += amount
+        elif row.source in ["decoration", "sale_decoration"]:
+            summary["decoration_salary_total"] += amount
         else:
             summary["catalog_salary_total"] += amount
-        summary["sold_quantity"] += sold_quantity
-        summary["sale_revenue"] += sale_revenue
-        if item:
-            summary["catalog_count"] += 1
+        if is_production:
+            summary["sold_quantity"] += sold_quantity
+            summary["sale_revenue"] += sale_revenue
+            summary["catalog_count"] += produced_quantity
             if arrangement == "bouquet":
-                summary["bouquet_count"] += 1
+                summary["bouquet_count"] += produced_quantity
             elif arrangement == "basket":
-                summary["basket_count"] += 1
+                summary["basket_count"] += produced_quantity
             if kind == "custom":
-                summary["custom_count"] += 1
+                summary["custom_count"] += produced_quantity
             else:
-                summary["standard_count"] += 1
+                summary["standard_count"] += produced_quantity
 
         source_row = by_source.setdefault(row.source, {"source": row.source, "source_label": row.get_source_display(), "count": 0, "amount": Decimal("0")})
         source_row["count"] += 1
         source_row["amount"] += amount
 
-        if arrangement:
+        if arrangement and is_production:
             arr_row = by_arrangement.setdefault(arrangement, {"arrangement_type": arrangement, "arrangement_label": ARRANGEMENT_LABELS.get(arrangement, arrangement), "count": 0, "amount": Decimal("0"), "sold_quantity": 0, "sale_revenue": Decimal("0")})
-            arr_row["count"] += 1
+            arr_row["count"] += produced_quantity
             arr_row["amount"] += amount
             arr_row["sold_quantity"] += sold_quantity
             arr_row["sale_revenue"] += sale_revenue
 
             vol_key = (arrangement, volume)
             vol_row = by_volume.setdefault(vol_key, {"arrangement_type": arrangement, "arrangement_label": ARRANGEMENT_LABELS.get(arrangement, arrangement), "volume": volume, "count": 0, "amount": Decimal("0"), "sold_quantity": 0, "sale_revenue": Decimal("0")})
-            vol_row["count"] += 1
+            vol_row["count"] += produced_quantity
             vol_row["amount"] += amount
             vol_row["sold_quantity"] += sold_quantity
             vol_row["sale_revenue"] += sale_revenue
 
         day_row = by_day.setdefault(row.work_date, {"work_date": row.work_date, "count": 0, "amount": Decimal("0"), "bouquets": 0, "baskets": 0, "sold_quantity": 0, "sale_revenue": Decimal("0")})
-        day_row["count"] += 1
+        day_row["count"] += produced_quantity
         day_row["amount"] += amount
-        day_row["sold_quantity"] += sold_quantity
-        day_row["sale_revenue"] += sale_revenue
-        if arrangement == "bouquet":
-            day_row["bouquets"] += 1
-        elif arrangement == "basket":
-            day_row["baskets"] += 1
+        if is_production:
+            day_row["sold_quantity"] += sold_quantity
+            day_row["sale_revenue"] += sale_revenue
+            if arrangement == "bouquet":
+                day_row["bouquets"] += produced_quantity
+            elif arrangement == "basket":
+                day_row["baskets"] += produced_quantity
 
         entries.append({
             "id": row.id,
@@ -1127,13 +1133,17 @@ def florist_stats_data(profile, request, include_sales=True):
 class FloristProfileViewSet(ScopedViewSet):
     permission_page = "florists"
     write_roles = ["admin", "supervisor"]
-    queryset = FloristProfile.objects.select_related("user").annotate(salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")), catalog_count=Count("catalog_items", distinct=True)).all()
+    queryset = FloristProfile.objects.select_related("user").all()
     serializer_class = FloristProfileSerializer
     filterset_fields = ["staff_type", "is_active"]
     search_fields = ["user__first_name", "user__last_name", "user__username", "phone"]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        catalog_quantity = CatalogItem.objects.filter(florist=OuterRef("pk")).values("florist").annotate(total=Coalesce(Sum("quantity_total"), 0)).values("total")[:1]
+        queryset = super().get_queryset().annotate(
+            salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")),
+            catalog_count=Coalesce(Subquery(catalog_quantity, output_field=IntegerField()), 0),
+        )
         role = getattr(getattr(self.request.user, "profile", None), "role", None)
         if role in ["florist", "apprentice"]:
             return queryset.filter(user=self.request.user)
@@ -2035,7 +2045,7 @@ class BranchReportView(APIView):
 class CatalogItemViewSet(ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
-    queryset = CatalogItem.objects.select_related("social_post", "florist__user", "customer").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
+    queryset = CatalogItem.objects.select_related("social_post", "florist__user", "decoration_florist__user", "customer").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
     serializer_class = CatalogItemSerializer
     filterset_fields = ["status", "arrangement_type", "catalog_kind", "florist", "customer"]
     search_fields = ["name_uz", "description_uz", "description_ru", "customer__name", "customer__phone"]
@@ -2081,6 +2091,8 @@ class CatalogItemViewSet(ScopedViewSet):
                 serializer.validated_data.get("payment_type", ""),
                 serializer.validated_data.get("sold_at"),
                 serializer.validated_data.get("reservation"),
+                serializer.validated_data.get("materials", []),
+                serializer.validated_data.get("decoration_florist"),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2268,18 +2280,20 @@ def export_all_florists_workbook(request):
         sheet.append([
             str(profile),
             profile.get_staff_type_display(),
-            catalog.count(),
-            catalog.filter(catalog_kind="custom").count(),
-            catalog.filter(catalog_kind="standard").count(),
+            sum(int(item.quantity_total or 0) for item in catalog),
+            sum(int(item.quantity_total or 0) for item in catalog.filter(catalog_kind="custom")),
+            sum(int(item.quantity_total or 0) for item in catalog.filter(catalog_kind="standard")),
             money_label(salary.aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"]),
             attendance.filter(check_in_at__isnull=False).count(),
         ])
         daily_rows = {}
         for row in salary.select_related("catalog_item"):
             item = row.catalog_item
+            if not item or row.source not in ["catalog", "custom_catalog"]:
+                continue
             key = (row.work_date, item.catalog_kind if item else "", item.arrangement_type if item else "", item.volume if item else "")
             current = daily_rows.setdefault(key, {"count": 0, "amount": Decimal("0")})
-            current["count"] += int(item.quantity_total or 1) if item else 1
+            current["count"] += int(item.quantity_total or 1)
             current["amount"] += Decimal(row.amount or 0)
         for key, value in sorted(daily_rows.items(), key=lambda row: row[0], reverse=True):
             work_date, catalog_kind, arrangement_type, volume = key

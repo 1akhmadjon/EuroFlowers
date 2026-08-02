@@ -1025,11 +1025,12 @@ class SocialPostCatalogItemSerializer(serializers.ModelSerializer):
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
     history = CatalogHistorySerializer(many=True, read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    decoration_florist_detail = FloristProfileSerializer(source="decoration_florist", read_only=True)
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False, write_only=True)
 
     class Meta:
         model = CatalogItem
-        fields = ["id", "name_uz", "description_uz", "description_ru", "note", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "height_cm", "diameter_cm", "price", "florist_fee", "florist_salary_amount", "calculated_component_price", "discount_amount", "discount_percent", "discount_reason", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials", "history", "payment_type"]
+        fields = ["id", "name_uz", "description_uz", "description_ru", "note", "arrangement_type", "catalog_kind", "volume", "florist", "florist_detail", "decoration_florist", "decoration_florist_detail", "decoration_salary_amount", "height_cm", "diameter_cm", "price", "florist_fee", "florist_salary_amount", "calculated_component_price", "discount_amount", "discount_percent", "discount_reason", "status", "image_url", "instagram_story_url", "quantity_total", "quantity_sold", "quantity_stock_deducted", "composition", "materials", "history", "payment_type"]
         read_only_fields = ["quantity_sold", "quantity_stock_deducted", "calculated_component_price", "discount_amount", "discount_percent"]
 
 
@@ -1306,7 +1307,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
         return attrs
 
     def _sync_catalog_items(self, post, catalog_items):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary
         user = getattr(self.context.get("request"), "user", None)
         for item_data in merge_catalog_item_payloads(catalog_items):
             payment_type = item_data.pop("payment_type", "")
@@ -1363,6 +1364,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
             item = sync_catalog_financials(item)
             validate_catalog_discount_reason(item)
             sync_catalog_florist_salary(item, user)
+            sync_catalog_decoration_salary(item, user)
             if item.florist_id and (not item_id or item.florist_id != old_florist_id):
                 notify_florist_catalog(item, "Yangi ish biriktirildi", f"{item.name_uz} katalogi sizga biriktirildi.")
             if item.catalog_kind == "custom":
@@ -1488,6 +1490,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     history = CatalogHistorySerializer(many=True, read_only=True)
     social_post_detail = SocialPostSerializer(source="social_post", read_only=True)
     florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    decoration_florist_detail = FloristProfileSerializer(source="decoration_florist", read_only=True)
     customer_detail = serializers.SerializerMethodField(read_only=True)
     branch_name = serializers.SerializerMethodField(read_only=True)
     profit = serializers.SerializerMethodField(read_only=True)
@@ -1615,7 +1618,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
         payment_type = validated_data.pop("payment_type", "")
         validated_data["customer"] = resolve_or_create_customer(
             customer=validated_data.pop("customer", None),
@@ -1650,6 +1653,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 item.save(update_fields=["source_price", "updated_at"])
             validate_catalog_discount_reason(item)
             sync_catalog_florist_salary(item, user)
+            sync_catalog_decoration_salary(item, user)
             create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi" if item.catalog_kind == "custom" else "Katalog qo‘shildi")
             notify_florist_catalog(item, "Yangi ish biriktirildi", f"{item.name_uz} katalogi sizga biriktirildi.")
             if item.catalog_kind == "custom":
@@ -1678,7 +1682,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return item
 
     def update(self, instance, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, restore_catalog_inventory, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, restore_catalog_inventory, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
         payment_type = validated_data.pop("payment_type", "")
         customer_name = validated_data.pop("customer_name", "")
         customer_phone = validated_data.pop("customer_phone", "")
@@ -1733,6 +1737,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             instance = sync_catalog_financials(instance)
             validate_catalog_discount_reason(instance)
             sync_catalog_florist_salary(instance, user)
+            sync_catalog_decoration_salary(instance, user)
             if instance.florist_id and instance.florist_id != old_florist_id:
                 notify_florist_catalog(instance, "Yangi ish biriktirildi", f"{instance.name_uz} katalogi sizga biriktirildi.")
             create_catalog_history(instance, "updated", user=user, note="Katalog o‘zgartirildi")
@@ -2228,6 +2233,13 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False)
     sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
     reservation = serializers.PrimaryKeyRelatedField(queryset=Reservation.objects.all(), required=False, allow_null=True)
+    materials = CatalogMaterialUsageSerializer(many=True, required=False)
+    decoration_florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all(), required=False, allow_null=True)
+
+    def validate(self, attrs):
+        if "materials" in attrs:
+            attrs["materials"] = normalize_catalog_material_rows(attrs["materials"])
+        return attrs
 
 
 class CatalogRestoreFlowersSerializer(serializers.Serializer):

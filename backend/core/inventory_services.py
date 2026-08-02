@@ -24,6 +24,8 @@ def catalog_snapshot(item):
         "price": str(item.price),
         "florist_fee": str(item.florist_fee),
         "florist_salary_amount": str(item.florist_salary_amount),
+        "decoration_florist": str(item.decoration_florist) if item.decoration_florist_id else "",
+        "decoration_salary_amount": str(item.decoration_salary_amount),
         "calculated_component_price": str(item.calculated_component_price),
         "composition": [{"batch": row.stock_batch.batch_number, "flower": str(row.stock_batch.variant), "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)} for row in item.composition.select_related("stock_batch__variant__flower")],
         "materials": [{"material": row.packaging.name_uz, "type": row.packaging.packaging_type, "quantity": row.quantity} for row in item.materials.select_related("packaging")],
@@ -82,7 +84,8 @@ def catalog_component_total(item):
     for row in item.materials.select_related("packaging"):
         material_total += Decimal(row.quantity * quantity) * row.packaging.sale_price
     florist_total = Decimal(item.florist_fee or 0) * Decimal(quantity)
-    return stock_total + material_total + florist_total
+    decoration_total = Decimal(item.decoration_salary_amount or 0) * Decimal(quantity)
+    return stock_total + material_total + florist_total + decoration_total
 
 
 def catalog_cost_breakdown(item):
@@ -95,11 +98,13 @@ def catalog_cost_breakdown(item):
     for row in item.materials.select_related("packaging"):
         material_cost += Decimal(row.quantity * quantity) * row.packaging.cost_price
     florist_fee_cost = Decimal(item.florist_fee or 0) * Decimal(quantity)
+    decoration_fee_cost = Decimal(item.decoration_salary_amount or 0) * Decimal(quantity)
     return {
         "flower_cost": flower_cost,
         "material_cost": material_cost,
-        "florist_fee_cost": florist_fee_cost,
-        "total": flower_cost + material_cost + florist_fee_cost,
+        "florist_fee_cost": florist_fee_cost + decoration_fee_cost,
+        "decoration_fee_cost": decoration_fee_cost,
+        "total": flower_cost + material_cost + florist_fee_cost + decoration_fee_cost,
     }
 
 
@@ -118,9 +123,18 @@ def apply_volume_rate(item):
     return item
 
 
+def apply_decoration_fee(item):
+    if item.decoration_florist_id:
+        item.decoration_salary_amount = item.decoration_florist.decoration_fee or 0
+    else:
+        item.decoration_salary_amount = 0
+    return item
+
+
 def sync_catalog_financials(item):
-    item = CatalogItem.objects.get(pk=item.pk)
+    item = CatalogItem.objects.select_related("decoration_florist").get(pk=item.pk)
     apply_volume_rate(item)
+    apply_decoration_fee(item)
     total = catalog_component_total(item)
     cost_total = catalog_cost_total(item)
     sale_total = Decimal(item.price or 0) * Decimal(item.quantity_total or 1)
@@ -128,17 +142,17 @@ def sync_catalog_financials(item):
     item.calculated_component_price = total
     item.discount_amount = max(total - sale_total, Decimal("0"))
     item.discount_percent = discount_percent(item.discount_amount, total)
-    item.save(update_fields=["florist_salary_amount", "calculated_cost_price", "calculated_component_price", "discount_amount", "discount_percent", "updated_at"])
+    item.save(update_fields=["florist_salary_amount", "decoration_salary_amount", "calculated_cost_price", "calculated_component_price", "discount_amount", "discount_percent", "updated_at"])
     return item
 
 
 def sync_catalog_florist_salary(item, user):
     item = CatalogItem.objects.select_related("florist").get(pk=item.pk)
     if not item.florist_id or not item.florist_salary_amount:
-        FloristSalaryEntry.objects.filter(catalog_item=item).delete()
+        FloristSalaryEntry.objects.filter(catalog_item=item, source__in=["catalog", "custom_catalog"]).delete()
         return None
     source = "custom_catalog" if item.catalog_kind == "custom" else "catalog"
-    FloristSalaryEntry.objects.filter(catalog_item=item).exclude(florist=item.florist, source=source).delete()
+    FloristSalaryEntry.objects.filter(catalog_item=item, source__in=["catalog", "custom_catalog"]).exclude(florist=item.florist, source=source).delete()
     amount = Decimal(item.florist_salary_amount) * Decimal(item.quantity_total or 1)
     existing = FloristSalaryEntry.objects.filter(florist=item.florist, source=source, catalog_item=item).first()
     old_amount = existing.amount if existing else None
@@ -164,6 +178,82 @@ def sync_catalog_florist_salary(item, user):
             reference_type="florist_salary",
             reference_id=entry.id,
         )
+    return entry
+
+
+def sync_catalog_decoration_salary(item, user):
+    item = CatalogItem.objects.select_related("decoration_florist").get(pk=item.pk)
+    if not item.decoration_florist_id or not item.decoration_salary_amount:
+        FloristSalaryEntry.objects.filter(catalog_item=item, source="decoration").delete()
+        return None
+    FloristSalaryEntry.objects.filter(catalog_item=item, source="decoration").exclude(florist=item.decoration_florist).delete()
+    amount = Decimal(item.decoration_salary_amount) * Decimal(item.quantity_total or 1)
+    entry, _ = FloristSalaryEntry.objects.update_or_create(
+        florist=item.decoration_florist,
+        source="decoration",
+        catalog_item=item,
+        defaults={
+            "amount": amount,
+            "work_date": timezone.localtime(item.created_at).date() if item.created_at else timezone.localdate(),
+            "note": f"{item.name_uz} uchun oformleniya haqi",
+            "created_by": user if getattr(user, "is_authenticated", False) else None,
+        },
+    )
+    return entry
+
+
+def deduct_catalog_sale_materials(item, materials, quantity, history, user):
+    rows = []
+    for row in materials or []:
+        packaging = row["packaging"]
+        amount = int(row.get("quantity") or 1) * int(quantity or 1)
+        rows.append((packaging, amount))
+    if not rows:
+        return []
+    locked = {row.id: row for row in Packaging.objects.select_for_update().filter(id__in=[packaging.id for packaging, _ in rows])}
+    shortages = [locked[packaging.id].name_uz for packaging, amount in rows if locked[packaging.id].quantity < amount]
+    if shortages:
+        raise ValueError("Sotuv uchun material qoldig‘i yetarli emas: " + ", ".join(shortages))
+    snapshot_rows = []
+    for packaging, amount in rows:
+        packaging = locked[packaging.id]
+        packaging.quantity -= amount
+        packaging.save(update_fields=["quantity", "updated_at"])
+        PackagingMovement.objects.create(
+            packaging=packaging,
+            movement_type="out",
+            quantity=-amount,
+            reference_type="catalog_sale",
+            reference_id=history.id,
+            reason=f"{item.name_uz} sotuviga ishlatildi",
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        snapshot_rows.append({"material": packaging.name_uz, "type": packaging.packaging_type, "quantity": amount})
+    return snapshot_rows
+
+
+def add_catalog_sale_decoration_salary(item, florist, quantity, user, sold_at=None):
+    if not florist:
+        return None
+    amount = Decimal(florist.decoration_fee or 0) * Decimal(quantity or 1)
+    if amount <= 0:
+        return None
+    entry, created = FloristSalaryEntry.objects.get_or_create(
+        florist=florist,
+        source="sale_decoration",
+        catalog_item=item,
+        defaults={
+            "amount": amount,
+            "work_date": timezone.localtime(sold_at).date() if sold_at else timezone.localdate(),
+            "note": f"{item.name_uz} sotuv oformleniyasi",
+            "created_by": user if getattr(user, "is_authenticated", False) else None,
+        },
+    )
+    if not created:
+        entry.amount = Decimal(entry.amount or 0) + amount
+        entry.work_date = timezone.localtime(sold_at).date() if sold_at else entry.work_date
+        entry.created_by = user if getattr(user, "is_authenticated", False) else entry.created_by
+        entry.save(update_fields=["amount", "work_date", "created_by", "updated_at"])
     return entry
 
 
@@ -1268,7 +1358,7 @@ def restore_catalog_inventory(item, user, quantity=None):
     return item
 
 
-def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type="", sold_at=None, reservation=None):
+def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="", payment_type="", sold_at=None, reservation=None, materials=None, decoration_florist=None):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
         reservation = Reservation.objects.select_for_update().filter(pk=getattr(reservation, "pk", reservation)).first() if reservation else item.reservation
@@ -1309,6 +1399,23 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
             reservation.save(update_fields=["catalog_item", "status", "updated_at"])
             reservation = sync_reservation_payment_status(reservation)
         history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason, snapshot=snapshot, reservation=reservation)
+        material_rows = deduct_catalog_sale_materials(item, materials, quantity, history, user)
+        if material_rows:
+            snapshot["sale_materials"] = material_rows
+            history.snapshot = snapshot
+            history.save(update_fields=["snapshot", "updated_at"])
+        decoration_entry = add_catalog_sale_decoration_salary(item, decoration_florist, quantity, user, sold_at=sold_at)
+        if decoration_entry:
+            decoration_amount = Decimal(decoration_florist.decoration_fee or 0) * Decimal(quantity or 1)
+            snapshot["sale_decoration"] = {
+                "florist_id": decoration_florist.id,
+                "florist": str(decoration_florist),
+                "unit_amount": str(decoration_florist.decoration_fee or 0),
+                "amount": str(decoration_amount),
+                "salary_entry_id": decoration_entry.id,
+            }
+            history.snapshot = snapshot
+            history.save(update_fields=["snapshot", "updated_at"])
         if sold_at:
             CatalogHistory.objects.filter(pk=history.pk).update(created_at=sold_at)
             history.created_at = sold_at

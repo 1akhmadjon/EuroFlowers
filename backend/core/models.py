@@ -329,6 +329,7 @@ class FloristProfile(TimeStampedModel):
     shop_longitude = models.DecimalField(max_digits=16, decimal_places=10, null=True, blank=True)
     arrival_radius_meters = models.PositiveIntegerField(default=50)
     departure_radius_meters = models.PositiveIntegerField(default=80)
+    decoration_fee = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -423,7 +424,7 @@ class FloristFaceSample(TimeStampedModel):
 
 
 class FloristSalaryEntry(TimeStampedModel):
-    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("daily", "Kunlik"), ("manual", "Qo‘lda")]
+    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("decoration", "Oformleniya"), ("sale_decoration", "Sotuv oformleniya"), ("daily", "Kunlik"), ("manual", "Qo‘lda")]
     florist = models.ForeignKey(FloristProfile, on_delete=models.CASCADE, related_name="salary_entries")
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     source = models.CharField(max_length=30, choices=SOURCE_CHOICES)
@@ -507,11 +508,13 @@ class CatalogItem(TimeStampedModel):
     source_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     customer = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
+    decoration_florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.SET_NULL, related_name="decorated_catalog_items")
     height_cm = models.PositiveIntegerField(null=True, blank=True)
     diameter_cm = models.PositiveIntegerField(null=True, blank=True)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     florist_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("50000"))
     florist_salary_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    decoration_salary_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     calculated_cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     calculated_component_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
