@@ -1852,6 +1852,7 @@ class ReservationSerializer(serializers.ModelSerializer):
         model = Reservation
         fields = "__all__"
         read_only_fields = ["created_by"]
+        extra_kwargs = {"customer": {"required": False}}
 
     @extend_schema_field(serializers.DictField(allow_null=True))
     def get_catalog_detail(self, obj):
