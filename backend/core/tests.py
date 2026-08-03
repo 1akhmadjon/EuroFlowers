@@ -1162,7 +1162,7 @@ class ApiTests(TestCase):
         }, format="json")
         self.assertEqual(payment_response.status_code, 201, payment_response.json())
         item = CatalogItem.objects.create(name_uz="Bron buket", arrangement_type="bouquet", price=Decimal("500000"), quantity_total=1, status="available")
-        sell_response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+        sell_response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1,
             "sale_price": "500000",
             "reservation": reservation_id,
@@ -1343,7 +1343,7 @@ class ApiTests(TestCase):
     def _sell_catalog(self, price="6700000", quantity=1, sold_at=None):
         item = CatalogItem.objects.create(name_uz="Sotuv buketi", arrangement_type="bouquet", price=Decimal(price), quantity_total=quantity, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
-        payload = {"quantity": quantity}
+        payload = {"quantity": quantity, "sale_image_url": "https://example.com/sale.jpg"}
         if sold_at:
             payload["sold_at"] = sold_at
         response = self.client.post(f"/api/catalog/{item.id}/sell/", payload, format="json")
@@ -1789,7 +1789,7 @@ class ApiTests(TestCase):
         changed = client.patch(f"/api/catalog/{target_id}/", {"price": "500000"}, format="json")
         self.assertEqual(changed.status_code, 200)
         # keyin chegirma bilan sotadi
-        sold = client.post(f"/api/catalog/{target_id}/sell/", {"quantity": 1, "sale_price": "420000", "discount_reason": "Doimiy mijoz"}, format="json")
+        sold = client.post(f"/api/catalog/{target_id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", "quantity": 1, "sale_price": "420000", "discount_reason": "Doimiy mijoz"}, format="json")
         self.assertEqual(sold.status_code, 200)
         history = CatalogHistory.objects.get(catalog_item_id=target_id, action="sold")
         self.assertEqual(history.listed_unit_price, Decimal("500000.00"))
@@ -2330,7 +2330,7 @@ class ApiTests(TestCase):
         decorator_user = User.objects.create_user("sale-decorator", password="password")
         decorator = FloristProfile.objects.create(user=decorator_user, staff_type="florist", decoration_fee=Decimal("40000"))
         item = CatalogItem.objects.create(name_uz="Sotuv material buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=3, status="available")
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 2,
             "sale_price": "300000.00",
             "materials": [{"packaging": material.id, "quantity": 2}],
@@ -2349,9 +2349,9 @@ class ApiTests(TestCase):
 
     def test_catalog_sell_api_accepts_discounted_price_with_reason(self):
         item = CatalogItem.objects.create(name_uz="API skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00"}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", "quantity": 1, "sale_price": "450000.00"}, format="json")
         self.assertEqual(response.status_code, 400)
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "sale_price": "450000.00", "discount_reason": "VIP mijoz", "payment_type": "card"}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", "quantity": 1, "sale_price": "450000.00", "discount_reason": "VIP mijoz", "payment_type": "card"}, format="json")
         self.assertEqual(response.status_code, 200, response.json())
         item.refresh_from_db()
         self.assertEqual(item.quantity_sold, 1)
@@ -3294,7 +3294,7 @@ class ApiTests(TestCase):
 
     def test_debt_sale_creates_debt_with_new_customer(self):
         item = self._debt_catalog()
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt",
             "customer_name": "Aziz Karimov", "customer_phone": "+998901234567",
             "debt_note": "Hafta oxirida to‘laydi",
@@ -3310,7 +3310,7 @@ class ApiTests(TestCase):
     def test_debt_sale_attaches_to_existing_customer(self):
         customer = Customer.objects.create(name="Malika", phone="+998939876543")
         item = self._debt_catalog(name="Bor mijoz buketi")
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt", "customer": customer.id,
         }, format="json")
         self.assertEqual(response.status_code, 200, response.data)
@@ -3319,14 +3319,14 @@ class ApiTests(TestCase):
 
     def test_debt_sale_requires_customer_or_contact(self):
         item = self._debt_catalog(name="Mijozsiz")
-        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "debt"}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", "quantity": 1, "payment_type": "debt"}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("customer", response.data)
         self.assertEqual(Debt.objects.count(), 0)
 
     def test_debt_uses_discounted_price(self):
         item = self._debt_catalog(name="Chegirmali qarz", price="300000")
-        self.client.post(f"/api/catalog/{item.id}/sell/", {
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "sale_price": "250000", "discount_reason": "Doimiy mijoz",
             "payment_type": "debt", "customer_name": "Sardor", "customer_phone": "+998901112233",
         }, format="json")
@@ -3334,7 +3334,7 @@ class ApiTests(TestCase):
 
     def test_unpaid_debt_stays_out_of_accounting(self):
         item = self._debt_catalog(name="Hisobsiz qarz")
-        self.client.post(f"/api/catalog/{item.id}/sell/", {
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt",
             "customer_name": "Qarzdor", "customer_phone": "+998900000001",
         }, format="json")
@@ -3344,7 +3344,7 @@ class ApiTests(TestCase):
 
     def test_paid_debt_enters_accounting_on_payment_day(self):
         item = self._debt_catalog(name="To‘langan qarz")
-        self.client.post(f"/api/catalog/{item.id}/sell/", {
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt",
             "customer_name": "Bekzod", "customer_phone": "+998900000002",
         }, format="json")
@@ -3359,7 +3359,7 @@ class ApiTests(TestCase):
 
     def test_debt_cannot_be_paid_twice(self):
         item = self._debt_catalog(name="Ikki marta")
-        self.client.post(f"/api/catalog/{item.id}/sell/", {
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt",
             "customer_name": "Jasur", "customer_phone": "+998900000003",
         }, format="json")
@@ -3373,12 +3373,12 @@ class ApiTests(TestCase):
         first = self._debt_catalog(name="Qarz A", price="300000")
         second = self._debt_catalog(name="Qarz B", price="150000")
         for item in [first, second]:
-            self.client.post(f"/api/catalog/{item.id}/sell/", {
+            self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
                 "quantity": 1, "payment_type": "debt",
                 "customer_name": "Aziz Karimov", "customer_phone": "+998901234567",
             }, format="json")
         third = self._debt_catalog(name="Qarz C", price="200000")
-        self.client.post(f"/api/catalog/{third.id}/sell/", {
+        self.client.post(f"/api/catalog/{third.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt",
             "customer_name": "Malika", "customer_phone": "+998939999999",
         }, format="json")
@@ -3399,7 +3399,7 @@ class ApiTests(TestCase):
 
     def test_debtors_page_hides_paid_by_default(self):
         item = self._debt_catalog(name="Yopilgan qarz")
-        self.client.post(f"/api/catalog/{item.id}/sell/", {
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", 
             "quantity": 1, "payment_type": "debt",
             "customer_name": "To‘lagan", "customer_phone": "+998900000004",
         }, format="json")
@@ -3755,7 +3755,7 @@ class ApiTests(TestCase):
             "quantity_total": 1, "status": "available",
             "composition": [{"stock_batch": created["id"], "quantity_stems": 20}],
         }, format="json").json()
-        self.client.post(f"/api/catalog/{item['id']}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.client.post(f"/api/catalog/{item['id']}/sell/", {"sale_image_url": "https://example.com/sale.jpg", "quantity": 1, "payment_type": "cash"}, format="json")
         return StockBatch.objects.get(id=created["id"]), CatalogItem.objects.get(id=item["id"]), other
 
     def test_florist_issue_can_be_backdated(self):
@@ -3860,6 +3860,61 @@ class ApiTests(TestCase):
         response = self.client.patch(f"/api/catalog/{created['id']}/", {"created_at": "2026-07-26T15:00:00+05:00"}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(CatalogItem.objects.get(id=created["id"]).created_at.date().isoformat(), "2026-07-26")
+
+    def test_sale_requires_image(self):
+        item = self._debt_catalog(name="Rasmsiz sotuv", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("sale_image", response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 0)
+
+    def test_sale_image_is_stored_on_history(self):
+        item = self._debt_catalog(name="Rasmli sotuv", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "card", "sale_image_url": "https://example.com/buket.jpg",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        self.assertEqual(history.snapshot.get("sale_image_url"), "https://example.com/buket.jpg")
+
+    def test_sale_group_caption_shows_payment_and_amount(self):
+        from .inventory_services import sale_group_caption
+
+        item = self._debt_catalog(name="Guruh xabari", price="300000", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "cash", "sale_image_url": "https://example.com/x.jpg",
+        }, format="json")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        caption = sale_group_caption(item, history, "cash", "https://example.com/x.jpg")
+        self.assertIn("Guruh xabari", caption)
+        self.assertIn("Naqd", caption)
+        self.assertIn("300 000", caption)
+
+    def test_sale_group_caption_shows_card_and_discount(self):
+        from .inventory_services import sale_group_caption
+
+        item = self._debt_catalog(name="Chegirmali", price="300000", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "sale_price": "250000", "discount_reason": "Doimiy mijoz",
+            "payment_type": "card", "sale_image_url": "https://example.com/x.jpg",
+        }, format="json")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        caption = sale_group_caption(item, history, "card", "https://example.com/x.jpg")
+        self.assertIn("Karta", caption)
+        self.assertIn("250 000", caption)
+        self.assertIn("Chegirma", caption)
+        self.assertIn("Doimiy mijoz", caption)
+
+    def test_sale_works_when_group_not_configured(self):
+        # bot sozlanmagan bo'lsa ham sotuv bajariladi
+        item = self._debt_catalog(name="Sozlanmagan guruh", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "cash", "sale_image_url": "https://example.com/x.jpg",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 1)
 
     def test_export_labels_are_in_uzbek(self):
         from .views import arrangement_text, catalog_kind_text, volume_text
