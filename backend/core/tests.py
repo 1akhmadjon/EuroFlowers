@@ -2993,7 +2993,7 @@ class ApiTests(TestCase):
         self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 50}, format="json")
         response = self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": self.batch.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("soni yozilmagan katalog yo‘q", response.data["detail"])
+        self.assertIn("yasalgan katalog topilmadi", response.data["detail"])
 
     def test_closing_issue_can_return_everything(self):
         profile = self._florist_with_rates("fl-close-6")
