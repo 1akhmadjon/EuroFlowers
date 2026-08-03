@@ -3861,6 +3861,50 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(CatalogItem.objects.get(id=created["id"]).created_at.date().isoformat(), "2026-07-26")
 
+    def test_lists_show_newest_first(self):
+        # oxirgi qo'shilgani ro'yxatda birinchi turishi kerak
+        first = self.client.post("/api/stock-deliveries/", {"number": "ORD-1", "received_at": "2026-08-01"}, format="json").json()
+        second = self.client.post("/api/stock-deliveries/", {"number": "ORD-2", "received_at": "2026-08-01"}, format="json").json()
+        rows = self.client.get("/api/stock-deliveries/").data["results"]
+        self.assertEqual(rows[0]["id"], second["id"])
+        self.assertEqual(rows[1]["id"], first["id"])
+
+        payload = {
+            "delivery": second["id"], "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 25,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }
+        batch_one = self.client.post("/api/stock-batches/", payload, format="json").json()
+        batch_two = self.client.post("/api/stock-batches/", payload, format="json").json()
+        batches = self.client.get("/api/stock-batches/").data["results"]
+        self.assertEqual(batches[0]["id"], batch_two["id"])
+        self.assertEqual(batches[1]["id"], batch_one["id"])
+
+        catalog_payload = {
+            "name_uz": "Tartib buketi", "arrangement_type": "bouquet", "price": "300000",
+            "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 5}],
+        }
+        cat_one = self.client.post("/api/catalog/", catalog_payload, format="json").json()
+        cat_two = self.client.post("/api/catalog/", catalog_payload, format="json").json()
+        catalogs = self.client.get("/api/catalog/").data["results"]
+        self.assertEqual(catalogs[0]["id"], cat_two["id"])
+        self.assertEqual(catalogs[1]["id"], cat_one["id"])
+
+    def test_ordering_can_still_be_reversed(self):
+        first = self.client.post("/api/stock-deliveries/", {"number": "ORD-A", "received_at": "2026-08-01"}, format="json").json()
+        second = self.client.post("/api/stock-deliveries/", {"number": "ORD-B", "received_at": "2026-08-01"}, format="json").json()
+        rows = self.client.get("/api/stock-deliveries/?ordering=created_at").data["results"]
+        self.assertEqual(rows[0]["id"], first["id"])
+        self.assertEqual(rows[-1]["id"], second["id"])
+
+    def test_material_deliveries_show_newest_first(self):
+        first = self.client.post("/api/material-deliveries/", {"number": "MORD-1", "received_at": "2026-08-01"}, format="json").json()
+        second = self.client.post("/api/material-deliveries/", {"number": "MORD-2", "received_at": "2026-08-01"}, format="json").json()
+        rows = self.client.get("/api/material-deliveries/").data["results"]
+        self.assertEqual(rows[0]["id"], second["id"])
+        self.assertEqual(rows[1]["id"], first["id"])
+
     def test_batch_usage_summary_is_reported(self):
         batch, item, _ = self._used_batch_with_sale()
         response = self.client.get(f"/api/stock-batches/{batch.id}/usage/")

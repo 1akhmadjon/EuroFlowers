@@ -1696,6 +1696,7 @@ class StockDeliveryViewSet(ScopedViewSet):
     filterset_fields = ["supplier", "is_active", "received_at"]
     search_fields = ["number", "note", "supplier__name"]
     ordering_fields = ["received_at", "number", "created_at"]
+    ordering = ["-created_at", "-id"]
 
     def perform_create(self, serializer):
         delivery = serializer.save(created_by=self.request.user)
@@ -1716,7 +1717,9 @@ class StockBatchViewSet(ScopedViewSet):
     serializer_class = StockBatchSerializer
     filterset_class = StockBatchFilter
     search_fields = ["batch_number", "variant__flower__name_uz", "variant__name_uz", "variant__color_uz", "supplier__name", "supplier__phone"]
-    ordering_fields = ["received_at", "remaining_stems", "sale_price_per_stem", "height_cm", "height_from_cm", "height_to_cm"]
+    ordering_fields = ["received_at", "created_at", "remaining_stems", "sale_price_per_stem", "height_cm", "height_from_cm", "height_to_cm"]
+    # oxirgi qo'shilgani birinchi turadi
+    ordering = ["-created_at", "-id"]
 
     def perform_create(self, serializer):
         batch = serializer.save()
@@ -1908,6 +1911,7 @@ class MaterialDeliveryViewSet(ScopedViewSet):
     filterset_fields = ["supplier", "is_active", "received_at"]
     search_fields = ["number", "note", "supplier__name"]
     ordering_fields = ["received_at", "number", "created_at"]
+    ordering = ["-created_at", "-id"]
 
     def perform_create(self, serializer):
         delivery = serializer.save(created_by=self.request.user)
@@ -2273,6 +2277,9 @@ class CatalogItemViewSet(ScopedViewSet):
     queryset = CatalogItem.objects.select_related("social_post", "florist__user", "decoration_florist__user", "customer").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
     serializer_class = CatalogItemSerializer
     filterset_fields = ["status", "arrangement_type", "catalog_kind", "florist", "customer"]
+    ordering_fields = ["created_at", "sold_at", "price", "name_uz", "quantity_total"]
+    # oxirgi qo'shilgani birinchi turadi
+    ordering = ["-created_at", "-id"]
     search_fields = ["name_uz", "description_uz", "description_ru", "customer__name", "customer__phone"]
 
     def get_queryset(self):
