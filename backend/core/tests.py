@@ -3282,6 +3282,8 @@ class ApiTests(TestCase):
         self.assertEqual(len(items.data), 2)
 
     def _debt_catalog(self, name="Qarz buketi", price="300000", quantity=2, stems=25):
+        # ketma-ket bir nechta katalog sinalganda skladda gul tugab qolmasin
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + stems * quantity)
         created = self.client.post("/api/catalog/", {
             "name_uz": name, "arrangement_type": "bouquet", "price": price,
             "quantity_total": quantity, "status": "available", "image_url": "https://example.com/b.jpg",
