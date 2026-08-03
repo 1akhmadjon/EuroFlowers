@@ -1641,6 +1641,48 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
             create_user_notification(entry.florist.user, "florist_salary", "Ish haqi o‘zgartirildi", f"{entry.work_date} uchun ish haqi {entry.amount} so‘m qilib yangilandi.", "florist_salary", entry.id)
 
 
+def stock_batch_is_used(batch):
+    """Bu partiyadan gul allaqachon ishlatilganmi.
+
+    Ishlatilgan bo'lsa nav almashtirilsa tarix buziladi: buketlar ichidagi
+    gul ham o'zgarib ketadi.
+    """
+    if batch.received_stems != batch.remaining_stems:
+        return True
+    if CatalogComposition.objects.filter(stock_batch=batch).exists():
+        return True
+    if FloristStockIssue.objects.filter(batch=batch).exists():
+        return True
+    if LeadStockUsage.objects.filter(stock_batch=batch).exists():
+        return True
+    return StockMovement.objects.filter(batch=batch).exclude(movement_type="in").exists()
+
+
+def recalculate_stem_prices(batch):
+    """Pochkadagi dona o'zgarganda dona narxlarini pochka narxidan qayta hisoblaydi."""
+    from .serializers import round_stem_price
+
+    per_bunch = Decimal(batch.stems_per_bunch or 0)
+    if per_bunch <= 0:
+        return batch
+    fields = []
+    if batch.cost_per_bunch:
+        exact = (Decimal(batch.cost_per_bunch) / per_bunch).quantize(Decimal("0.0001"))
+        batch.cost_per_stem_exact = exact
+        batch.cost_per_stem = Decimal("0") if batch.is_free else round_stem_price(exact)
+        if batch.is_free:
+            batch.cost_per_stem_exact = Decimal("0")
+        fields += ["cost_per_stem", "cost_per_stem_exact"]
+    if batch.sale_price_per_bunch:
+        exact = (Decimal(batch.sale_price_per_bunch) / per_bunch).quantize(Decimal("0.0001"))
+        batch.sale_price_per_stem_exact = exact
+        batch.sale_price_per_stem = round_stem_price(exact)
+        fields += ["sale_price_per_stem", "sale_price_per_stem_exact"]
+    if fields:
+        batch.save(update_fields=fields + ["updated_at"])
+    return batch
+
+
 class StockDeliveryViewSet(ScopedViewSet):
     """Partiya. Avval ochiladi, keyin ichiga gullar qo'shiladi."""
 
@@ -1694,8 +1736,17 @@ class StockBatchViewSet(ScopedViewSet):
 
         Xato kiritilgan son tuzatilganda allaqachon ishlatilgan gul unutilib
         qolmasligi kerak: qoldiq farq qancha bo'lsa o'shancha siljiydi.
+
+        Ishlatilgan partiyada gul navini almashtirib bo'lmaydi — aks holda
+        o'sha guldan yasalgan buketlarning tarkibi ham o'zgarib ketadi.
         """
         instance = serializer.instance
+        new_variant = serializer.validated_data.get("variant")
+        if new_variant is not None and new_variant.id != instance.variant_id and stock_batch_is_used(instance):
+            raise serializers.ValidationError({
+                "variant": "Bu partiyadan allaqachon gul ishlatilgan, navini almashtirib bo‘lmaydi. "
+                           "Xato bo‘lsa partiyani arxivlab, to‘g‘ri nav bilan yangisini kiriting.",
+            })
         old_received = instance.received_stems
         old_remaining = instance.remaining_stems
         used = max(old_received - old_remaining, 0)
@@ -1706,7 +1757,12 @@ class StockBatchViewSet(ScopedViewSet):
                 "received_stems": f"Bu partiyadan allaqachon {used} dona ishlatilgan. "
                                   f"Kelgan sonni undan kam qilib bo‘lmaydi.",
             })
+        old_per_bunch = instance.stems_per_bunch
         batch = serializer.save()
+        new_per_bunch = batch.stems_per_bunch
+        if new_per_bunch and new_per_bunch != old_per_bunch and "cost_per_stem" not in serializer.validated_data:
+            # pochkadagi dona o'zgarsa dona narxi pochka narxidan qayta hisoblanadi
+            recalculate_stem_prices(batch)
         if new_received != old_received and not explicit_remaining:
             batch.remaining_stems = max(new_received - used, 0)
             batch.save(update_fields=["remaining_stems", "updated_at"])

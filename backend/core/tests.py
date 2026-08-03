@@ -3706,6 +3706,73 @@ class ApiTests(TestCase):
         self.assertEqual(batch.remaining_stems, 70)
         self.assertEqual(batch.sale_price_per_bunch, Decimal("60000.00"))
 
+    def test_unused_batch_variant_can_be_fixed(self):
+        # xato nav tanlangan bo'lsa, hali ishlatilmagan partiyada tuzatiladi
+        other = FlowerVariant.objects.create(flower=self.batch.variant.flower, name_uz="Boshqa nav", color_uz="Oq")
+        created = self.client.post("/api/stock-batches/", {
+            "batch_number": "VAR-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 50,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json").json()
+        response = self.client.patch(f"/api/stock-batches/{created['id']}/", {"variant": other.id}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(StockBatch.objects.get(id=created["id"]).variant_id, other.id)
+
+    def test_used_batch_variant_cannot_be_changed(self):
+        other = FlowerVariant.objects.create(flower=self.batch.variant.flower, name_uz="Almashtirilmas", color_uz="Sariq")
+        batch = self._batch_with_usage(received=100, used=30)
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"variant": other.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("navini almashtirib bo‘lmaydi", str(response.data["variant"]))
+        batch.refresh_from_db()
+        self.assertEqual(batch.variant_id, self.batch.variant_id)
+
+    def test_batch_used_in_catalog_cannot_change_variant(self):
+        other = FlowerVariant.objects.create(flower=self.batch.variant.flower, name_uz="Katalogli", color_uz="Pushti")
+        created = self.client.post("/api/stock-batches/", {
+            "batch_number": "VAR-2", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json").json()
+        self.client.post("/api/catalog/", {
+            "name_uz": "Navli buket", "arrangement_type": "bouquet", "price": "300000",
+            "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": created["id"], "quantity_stems": 20}],
+        }, format="json")
+        response = self.client.patch(f"/api/stock-batches/{created['id']}/", {"variant": other.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("variant", response.data)
+
+    def test_changing_stems_per_bunch_recalculates_stem_prices(self):
+        created = self.client.post("/api/stock-batches/", {
+            "batch_number": "BUNCH-CH", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json").json()
+        self.assertEqual(Decimal(created["cost_per_stem"]), Decimal("1000.00"))
+        self.assertEqual(Decimal(created["sale_price_per_stem"]), Decimal("2000.00"))
+        response = self.client.patch(f"/api/stock-batches/{created['id']}/", {"stems_per_bunch": 50}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        batch = StockBatch.objects.get(id=created["id"])
+        # 25 000 / 50 = 500,  50 000 / 50 = 1 000
+        self.assertEqual(batch.cost_per_stem, Decimal("500.00"))
+        self.assertEqual(batch.sale_price_per_stem, Decimal("1000.00"))
+        # pochka narxlari o'zgarmaydi
+        self.assertEqual(batch.cost_per_bunch, Decimal("25000.00"))
+        self.assertEqual(batch.sale_price_per_bunch, Decimal("50000.00"))
+
+    def test_typed_stem_price_wins_over_recalculation(self):
+        created = self.client.post("/api/stock-batches/", {
+            "batch_number": "BUNCH-CH2", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json").json()
+        response = self.client.patch(f"/api/stock-batches/{created['id']}/", {
+            "stems_per_bunch": 50, "cost_per_stem": "700",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(StockBatch.objects.get(id=created["id"]).cost_per_stem, Decimal("700.00"))
+
     def test_free_batch_needs_no_cost_price(self):
         # postavshik tekinga qo'shib bergan gul: faqat sotuv narxi yoziladi
         response = self.client.post("/api/stock-batches/", {
