@@ -3861,6 +3861,42 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(CatalogItem.objects.get(id=created["id"]).created_at.date().isoformat(), "2026-07-26")
 
+    def test_export_labels_are_in_uzbek(self):
+        from .views import arrangement_text, catalog_kind_text, volume_text
+
+        self.assertEqual(volume_text("small"), "Kichik")
+        self.assertEqual(volume_text("medium"), "O‘rta")
+        self.assertEqual(volume_text("large"), "Katta")
+        self.assertEqual(volume_text("M"), "M")
+        self.assertEqual(volume_text(""), "Belgilanmagan")
+        self.assertEqual(catalog_kind_text("standard"), "Standart")
+        self.assertEqual(catalog_kind_text("custom"), "Maxsus")
+        self.assertEqual(arrangement_text("bouquet"), "Buket")
+        self.assertEqual(arrangement_text("basket"), "Savat")
+
+    def test_florist_stats_carry_uzbek_volume_label(self):
+        profile = self._florist_with_rates("fl-uz-label")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        FloristVolumeRate.objects.create(florist=profile, arrangement_type="bouquet", volume="small", default_stems=15, florist_fee=Decimal("10000"))
+        self.client.post("/api/catalog/", {
+            "name_uz": "Kichik buket", "arrangement_type": "bouquet", "volume": "small",
+            "florist": profile.id, "price": "300000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id}],
+        }, format="json")
+        response = self.client.get(f"/api/florists/{profile.id}/stats/")
+        row = next(r for r in response.data["salary_entries"] if r["catalog_name"] == "Kichik buket")
+        self.assertEqual(row["volume"], "small")
+        self.assertEqual(row["volume_label"], "Kichik")
+        self.assertEqual(row["catalog_kind_label"], "Standart")
+        self.assertEqual(row["arrangement_label"], "Buket")
+
+    def test_florist_excel_export_opens(self):
+        profile = self._florist_with_rates("fl-excel-uz")
+        response = self.client.get(f"/api/exports/florists/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("spreadsheet", response["Content-Type"])
+
     def test_lists_show_newest_first(self):
         # oxirgi qo'shilgani ro'yxatda birinchi turishi kerak
         first = self.client.post("/api/stock-deliveries/", {"number": "ORD-1", "received_at": "2026-08-01"}, format="json").json()

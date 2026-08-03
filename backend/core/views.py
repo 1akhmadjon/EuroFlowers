@@ -951,7 +951,25 @@ class FloristVolumeRateViewSet(ScopedViewSet):
 
 
 ARRANGEMENT_LABELS = {"bouquet": "Buket", "basket": "Savat", "box": "Quti"}
-CATALOG_KIND_LABELS = {"standard": "Standart", "custom": "Custom"}
+CATALOG_KIND_LABELS = {"standard": "Standart", "custom": "Maxsus"}
+# Hajmlar bazada inglizcha kalit bilan saqlanadi, ko'rsatishda o'zbekcha bo'ladi.
+VOLUME_LABELS = {
+    "small": "Kichik", "medium": "O‘rta", "large": "Katta",
+    "xs": "XS", "s": "S", "m": "M", "l": "L", "xl": "XL",
+}
+
+
+def volume_text(value):
+    key = (value or "").strip().lower()
+    return VOLUME_LABELS.get(key, (value or "").strip() or "Belgilanmagan")
+
+
+def arrangement_text(value):
+    return ARRANGEMENT_LABELS.get((value or "").strip().lower(), (value or "").strip() or "Belgilanmagan")
+
+
+def catalog_kind_text(value):
+    return CATALOG_KIND_LABELS.get((value or "").strip().lower(), (value or "").strip() or "Belgilanmagan")
 
 
 def florist_salary_queryset(profile, date_from, date_to):
@@ -1078,9 +1096,10 @@ def florist_stats_data(profile, request, include_sales=True):
             "catalog_item_id": row.catalog_item_id,
             "catalog_name": item.name_uz if item else "",
             "catalog_kind": kind,
-            "catalog_kind_label": CATALOG_KIND_LABELS.get(kind, kind),
+            "catalog_kind_label": catalog_kind_text(kind),
             "arrangement_type": arrangement,
-            "arrangement_label": ARRANGEMENT_LABELS.get(arrangement, ""),
+            "arrangement_label": arrangement_text(arrangement) if arrangement else "",
+            "volume_label": volume_text(volume) if volume else "",
             "volume": item.volume if item else "",
             "quantity_total": int(item.quantity_total or 0) if item else 0,
             "quantity_sold": int(item.quantity_sold or 0) if item else 0,
@@ -2414,7 +2433,7 @@ def export_florist_workbook(profile, request, include_sales=True):
             row["catalog_name"],
             row["catalog_kind_label"],
             row["arrangement_label"],
-            row["volume"],
+            row.get("volume_label") or volume_text(row["volume"]),
             row["quantity_total"] or "",
             row.get("sold_quantity") or "",
             money_label(row["listed_price"]) if row.get("listed_price") else "",
@@ -2448,7 +2467,7 @@ def export_florist_workbook(profile, request, include_sales=True):
         ("Buket", summary["bouquet_count"]),
         ("Savat", summary["basket_count"]),
         ("Standart", summary["standard_count"]),
-        ("Custom", summary["custom_count"]),
+        ("Maxsus", summary["custom_count"]),
         ("Sotilgan dona", summary.get("sold_quantity", "")),
         ("Sotilmagan", summary.get("unsold_quantity", "")),
         ("Sotuvdan tushgan", money_label(summary["sale_revenue"]) if "sale_revenue" in summary else ""),
@@ -2472,7 +2491,7 @@ def export_florist_workbook(profile, request, include_sales=True):
     _style_header(volume_sheet)
     for row in data["by_volume"]:
         volume_sheet.append([
-            row["arrangement_label"], row["volume"], row["count"], row.get("sold_quantity", ""),
+            row["arrangement_label"], volume_text(row["volume"]), row["count"], row.get("sold_quantity", ""),
             money_label(row["sale_revenue"]) if "sale_revenue" in row else "", money_label(row["amount"]),
         ])
 
@@ -2541,7 +2560,7 @@ def export_all_florists_workbook(request):
             current["amount"] += Decimal(row.amount or 0)
         for key, value in sorted(daily_rows.items(), key=lambda row: row[0], reverse=True):
             work_date, catalog_kind, arrangement_type, volume = key
-            detail_sheet.append([str(profile), work_date.isoformat(), catalog_kind, arrangement_type, volume or "Belgilanmagan", value["count"], money_label(value["amount"])])
+            detail_sheet.append([str(profile), work_date.isoformat(), catalog_kind_text(catalog_kind), arrangement_text(arrangement_type), volume_text(volume), value["count"], money_label(value["amount"])])
     autosize_sheet(sheet)
     autosize_sheet(detail_sheet)
     return excel_response(workbook, "all_florists_export.xlsx")
@@ -2590,7 +2609,7 @@ def export_profit_workbook(request):
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
     for row in data["by_volume"]:
-        volume_sheet.append([row["catalog_kind"], row["volume"], row["quantity"], money_label(row["sales"]), money_label(row["discount"])])
+        volume_sheet.append([catalog_kind_text(row["catalog_kind"]), volume_text(row["volume"]), row["quantity"], money_label(row["sales"]), money_label(row["discount"])])
     history_sheet = workbook.create_sheet("Sotuv history")
     history_sheet.append(["Sotilgan vaqt", "Katalogga qo‘shilgan vaqt", "Filial", "Katalog", "Turi", "Arrangement", "Hajm", "Florist", "Soni", "Gul donasi", "Asl jami", "Sotuv jami", "Cost", "Sof foyda", "To‘lov", "Skidka", "Skidka foiz", "Kim sotdi", "Izoh"])
     for cell in history_sheet[1]:
@@ -2603,9 +2622,9 @@ def export_profit_workbook(request):
             local_datetime_label(row["catalog_created_at"]),
             row["branch_name"],
             row["catalog_name"],
-            row["catalog_kind"],
-            row["arrangement_type"],
-            row["volume"] or "Belgilanmagan",
+            catalog_kind_text(row["catalog_kind"]),
+            arrangement_text(row["arrangement_type"]),
+            volume_text(row["volume"]),
             row["florist_name"],
             row["quantity"],
             row["flower_stems"],
@@ -2630,8 +2649,8 @@ def export_profit_workbook(request):
             local_datetime_label(row["sold_at"]),
             row["branch_name"],
             row["catalog_name"],
-            row["catalog_kind"],
-            row["volume"] or "Belgilanmagan",
+            catalog_kind_text(row["catalog_kind"]),
+            volume_text(row["volume"]),
             row["quantity"],
             money_label(row["discount_amount"]),
             row["discount_percent"],
