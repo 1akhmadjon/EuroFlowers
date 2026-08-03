@@ -888,15 +888,14 @@ def supplier_rollup_queryset():
     )
     last_paid = Subquery(SupplierPayment.objects.filter(supplier=OuterRef("pk")).order_by("-paid_at", "-id").values("paid_at")[:1])
     zero = Value(Decimal("0"), output_field=money)
-    return (
-        Supplier.objects.annotate(
-            batches_count=Count("stock_batches", distinct=True),
-            total_received_stems=Coalesce(Sum("stock_batches__received_stems"), 0),
-            purchase_total=Coalesce(purchase, zero),
-            paid_total=Coalesce(paid, zero),
-            last_payment_at=last_paid,
-        )
-        .annotate(outstanding=F("purchase_total") - F("paid_total"))
+    # Postavshikdan har safar to'liq to'lab olinadi, qarz tushunchasi yo'q.
+    # Shuning uchun faqat umumiy sotib olingan summa hisoblanadi.
+    return Supplier.objects.annotate(
+        batches_count=Count("stock_batches", distinct=True),
+        total_received_stems=Coalesce(Sum("stock_batches__received_stems"), 0),
+        purchase_total=Coalesce(purchase, zero),
+        paid_total=Coalesce(paid, zero),
+        last_payment_at=last_paid,
     )
 
 
@@ -907,7 +906,7 @@ class SupplierViewSet(ScopedViewSet):
     serializer_class = SupplierSerializer
     filterset_fields = ["is_active", "supplier_type"]
     search_fields = ["name", "phone", "notes"]
-    ordering_fields = ["name", "purchase_total", "paid_total", "outstanding", "last_payment_at", "created_at"]
+    ordering_fields = ["name", "purchase_total", "paid_total", "last_payment_at", "created_at"]
 
 
 class SupplierPaymentViewSet(ScopedViewSet):

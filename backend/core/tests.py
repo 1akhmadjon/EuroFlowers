@@ -2003,7 +2003,8 @@ class ApiTests(TestCase):
         # 100*7000 + 50*8000 = 1 100 000
         self.assertEqual(Decimal(detail.data["purchase_total"]), Decimal("1100000.00"))
         self.assertEqual(Decimal(detail.data["paid_total"]), Decimal("700000.00"))
-        self.assertEqual(Decimal(detail.data["outstanding"]), Decimal("400000.00"))
+        # qarz ko'rsatkichi yo'q — postavshikdan har safar to'liq to'lab olinadi
+        self.assertNotIn("outstanding", detail.data)
         self.assertEqual(str(detail.data["last_payment_at"]), "2026-07-30")
 
     def test_supplier_without_payments_reports_zero_paid(self):
@@ -2011,7 +2012,50 @@ class ApiTests(TestCase):
         response = self.client.get(f"/api/suppliers/{supplier.id}/")
         self.assertEqual(Decimal(response.data["purchase_total"]), Decimal("0"))
         self.assertEqual(Decimal(response.data["paid_total"]), Decimal("0"))
-        self.assertEqual(Decimal(response.data["outstanding"]), Decimal("0"))
+        self.assertNotIn("outstanding", response.data)
+
+    def test_supplier_shows_total_purchased_without_debt(self):
+        # postavshikdan har safar to'liq to'lab olinadi: faqat umumiy sotib olingan turadi
+        supplier = Supplier.objects.create(name="Umumiy xarid")
+        StockBatch.objects.create(
+            variant=self.batch.variant, supplier=supplier, batch_number="BUY-1", height_cm=50,
+            stems_per_bunch=25, received_stems=100, remaining_stems=100,
+            cost_per_stem=7000, sale_price_per_stem=12000, sale_price_per_bunch=300000,
+        )
+        StockBatch.objects.create(
+            variant=self.batch.variant, supplier=supplier, batch_number="BUY-2", height_cm=50,
+            stems_per_bunch=25, received_stems=50, remaining_stems=50,
+            cost_per_stem=8000, sale_price_per_stem=14000, sale_price_per_bunch=350000,
+        )
+        detail = self.client.get(f"/api/suppliers/{supplier.id}/")
+        # 100*7000 + 50*8000 = 1 100 000
+        self.assertEqual(Decimal(detail.data["purchase_total"]), Decimal("1100000.00"))
+        self.assertEqual(detail.data["total_received_stems"], 150)
+        self.assertEqual(detail.data["batches_count"], 2)
+        self.assertNotIn("outstanding", detail.data)
+
+    def test_free_batch_not_counted_in_total_purchased(self):
+        supplier = Supplier.objects.create(name="Tekin qo‘shgan")
+        StockBatch.objects.create(
+            variant=self.batch.variant, supplier=supplier, batch_number="BUY-3", height_cm=50,
+            stems_per_bunch=25, received_stems=100, remaining_stems=100,
+            cost_per_stem=5000, sale_price_per_stem=10000, sale_price_per_bunch=250000,
+        )
+        StockBatch.objects.create(
+            variant=self.batch.variant, supplier=supplier, batch_number="BUY-4", height_cm=50,
+            stems_per_bunch=25, received_stems=40, remaining_stems=40, is_free=True,
+            cost_per_stem=0, sale_price_per_stem=10000, sale_price_per_bunch=250000,
+        )
+        detail = self.client.get(f"/api/suppliers/{supplier.id}/")
+        # faqat sotib olingani: 100 * 5 000
+        self.assertEqual(Decimal(detail.data["purchase_total"]), Decimal("500000.00"))
+        self.assertEqual(detail.data["total_received_stems"], 140)
+
+    def test_suppliers_can_be_ordered_by_total_purchased(self):
+        response = self.client.get("/api/suppliers/?ordering=-purchase_total")
+        self.assertEqual(response.status_code, 200)
+        bad = self.client.get("/api/suppliers/?ordering=outstanding")
+        self.assertEqual(bad.status_code, 200)
 
     def test_supplier_payment_rejects_non_positive_amount(self):
         supplier = Supplier.objects.create(name="Test Postavshik")

@@ -198,9 +198,10 @@ class FlowerVariantSerializer(serializers.ModelSerializer):
 class SupplierSerializer(serializers.ModelSerializer):
     batches_count = serializers.IntegerField(read_only=True)
     total_received_stems = serializers.IntegerField(read_only=True)
+    # Postavshikdan har safar to'liq to'lab olinadi — qarz ko'rsatkichi yo'q,
+    # faqat umumiy sotib olingan summa turadi.
     purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     paid_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
-    outstanding = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     last_payment_at = serializers.DateField(read_only=True)
 
     class Meta:
