@@ -3861,13 +3861,15 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(CatalogItem.objects.get(id=created["id"]).created_at.date().isoformat(), "2026-07-26")
 
-    def test_sale_requires_image(self):
+    def test_sale_works_without_image(self):
+        # rasm hozircha ixtiyoriy — busiz ham sotiladi, guruhga xabar ketmaydi
         item = self._debt_catalog(name="Rasmsiz sotuv", quantity=1)
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("sale_image", response.data)
+        self.assertEqual(response.status_code, 200, response.data)
         item.refresh_from_db()
-        self.assertEqual(item.quantity_sold, 0)
+        self.assertEqual(item.quantity_sold, 1)
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        self.assertIsNone((history.snapshot or {}).get("sale_image_url"))
 
     def test_sale_image_is_stored_on_history(self):
         item = self._debt_catalog(name="Rasmli sotuv", quantity=1)
