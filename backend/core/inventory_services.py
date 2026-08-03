@@ -1706,3 +1706,65 @@ def mark_debt_paid(debt, method, user=None, paid_at=None):
             after={"amount": str(debt.amount), "method": method, "paid_at": debt.paid_at.isoformat()},
         )
     return debt
+
+
+def stock_batch_usage_summary(batch):
+    """Partiya qayerlarda ishlatilganini sanaydi. Almashtirishdan oldin ko'rsatish uchun."""
+    catalog_rows = CatalogComposition.objects.filter(stock_batch=batch).select_related("catalog_item")
+    catalog_ids = {row.catalog_item_id for row in catalog_rows}
+    sold = CatalogItem.objects.filter(id__in=catalog_ids, quantity_sold__gt=0).count()
+    return {
+        "catalog_items": len(catalog_ids),
+        "sold_catalog_items": sold,
+        "florist_issues": FloristStockIssue.objects.filter(batch=batch).count(),
+        "lead_usages": LeadStockUsage.objects.filter(stock_batch=batch).count(),
+        "stock_movements": StockMovement.objects.filter(batch=batch).count(),
+        "used_stems": max(int(batch.received_stems or 0) - int(batch.remaining_stems or 0), 0),
+    }
+
+
+def change_stock_batch_variant(batch, variant, reason="", user=None):
+    """Partiyaning gul navini almashtiradi va ishlatilgan joylarni ham moslaydi.
+
+    Katalog tarkibi, sklad harakatlari va floristdagi qoldiq partiyaga
+    bog'langani uchun ular o'zi yangi navni ko'rsatadi. Sotuv tarixidagi
+    muzlatilgan nom esa qo'lda yangilanadi, aks holda eski nom qolib ketardi.
+
+    Narxlar partiyada saqlanadi, shuning uchun pul o'zgarmaydi.
+    """
+    if variant is None:
+        raise ValueError("Yangi navni tanlang")
+    if variant.id == batch.variant_id:
+        raise ValueError("Bu nav allaqachon tanlangan")
+    if not (reason or "").strip():
+        raise ValueError("Almashtirish sababini yozing")
+    with transaction.atomic():
+        batch = StockBatch.objects.select_for_update().select_related("variant__flower").get(pk=batch.pk)
+        old_label = str(batch.variant)
+        usage = stock_batch_usage_summary(batch)
+        batch.variant = variant
+        batch.save(update_fields=["variant", "updated_at"])
+        new_label = str(variant)
+        # sotuv tarixidagi muzlatilgan nomni ham yangilaymiz
+        touched = 0
+        histories = CatalogHistory.objects.filter(catalog_item__composition__stock_batch=batch).distinct()
+        for history in histories:
+            snapshot = history.snapshot or {}
+            rows = snapshot.get("composition") or []
+            changed = False
+            for row in rows:
+                if row.get("batch") == batch.batch_number and row.get("flower") == old_label:
+                    row["flower"] = new_label
+                    changed = True
+            if changed:
+                history.snapshot = snapshot
+                history.save(update_fields=["snapshot", "updated_at"])
+                touched += 1
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="stock_batch_variant_changed", entity_type="StockBatch", entity_id=str(batch.id),
+            summary=f"{batch.batch_number} partiyada nav {old_label} dan {new_label} ga almashtirildi",
+            before={"variant": old_label},
+            after={"variant": new_label, "reason": reason, "usage": usage, "history_rows_updated": touched},
+        )
+    return {"batch": batch, "old_variant": old_label, "new_variant": new_label, "usage": usage, "history_rows_updated": touched}

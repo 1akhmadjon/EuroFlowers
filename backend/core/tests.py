@@ -3743,6 +3743,86 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("variant", response.data)
 
+    def _used_batch_with_sale(self, name="Nav buketi"):
+        other = FlowerVariant.objects.create(flower=self.batch.variant.flower, name_uz="Yangi nav", color_uz="Oq")
+        created = self.client.post("/api/stock-batches/", {
+            "batch_number": "CHG-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json").json()
+        item = self.client.post("/api/catalog/", {
+            "name_uz": name, "arrangement_type": "bouquet", "price": "300000",
+            "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": created["id"], "quantity_stems": 20}],
+        }, format="json").json()
+        self.client.post(f"/api/catalog/{item['id']}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        return StockBatch.objects.get(id=created["id"]), CatalogItem.objects.get(id=item["id"]), other
+
+    def test_batch_usage_summary_is_reported(self):
+        batch, item, _ = self._used_batch_with_sale()
+        response = self.client.get(f"/api/stock-batches/{batch.id}/usage/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_used"])
+        self.assertEqual(response.data["catalog_items"], 1)
+        self.assertEqual(response.data["sold_catalog_items"], 1)
+        self.assertEqual(response.data["used_stems"], 20)
+
+    def test_used_batch_variant_can_be_changed_with_reason(self):
+        batch, item, other = self._used_batch_with_sale()
+        old_cost = CatalogItem.objects.get(pk=item.pk).calculated_cost_price
+        response = self.client.post(f"/api/stock-batches/{batch.id}/change-variant/", {
+            "variant": other.id, "reason": "Kirimda xato yozilgan",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.variant_id, other.id)
+        # katalog tarkibi ham yangi navni ko'rsatadi
+        self.assertEqual(item.composition.get().stock_batch.variant_id, other.id)
+        # pul o'zgarmaydi
+        self.assertEqual(CatalogItem.objects.get(pk=item.pk).calculated_cost_price, old_cost)
+
+    def test_variant_change_updates_frozen_sale_snapshot(self):
+        batch, item, other = self._used_batch_with_sale()
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        self.assertIn("Freedom", json.dumps(history.snapshot, ensure_ascii=False))
+        self.client.post(f"/api/stock-batches/{batch.id}/change-variant/", {
+            "variant": other.id, "reason": "Xato nav",
+        }, format="json")
+        history.refresh_from_db()
+        self.assertIn("Yangi nav", json.dumps(history.snapshot, ensure_ascii=False))
+        self.assertNotIn("Freedom", json.dumps(history.snapshot, ensure_ascii=False))
+
+    def test_variant_change_requires_reason(self):
+        batch, _, other = self._used_batch_with_sale()
+        response = self.client.post(f"/api/stock-batches/{batch.id}/change-variant/", {"variant": other.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("reason", response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.variant_id, self.batch.variant_id)
+
+    def test_variant_change_rejects_same_variant(self):
+        batch, _, _ = self._used_batch_with_sale()
+        response = self.client.post(f"/api/stock-batches/{batch.id}/change-variant/", {
+            "variant": batch.variant_id, "reason": "Bir xil",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_variant_change_is_written_to_audit(self):
+        batch, _, other = self._used_batch_with_sale()
+        self.client.post(f"/api/stock-batches/{batch.id}/change-variant/", {
+            "variant": other.id, "reason": "Kirimda xato yozilgan",
+        }, format="json")
+        row = AuditLog.objects.filter(action="stock_batch_variant_changed").first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.after["reason"], "Kirimda xato yozilgan")
+        self.assertEqual(row.after["usage"]["catalog_items"], 1)
+
+    def test_plain_patch_still_blocks_variant_and_points_to_action(self):
+        batch, _, other = self._used_batch_with_sale()
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"variant": other.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("change-variant", str(response.data["variant"]))
+
     def test_changing_stems_per_bunch_recalculates_stem_prices(self):
         created = self.client.post("/api/stock-batches/", {
             "batch_number": "BUNCH-CH", "variant": self.batch.variant_id, "height_cm": 50,

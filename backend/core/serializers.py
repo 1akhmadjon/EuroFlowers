@@ -2280,6 +2280,13 @@ class DebtSerializer(serializers.ModelSerializer):
         }
 
 
+class StockBatchVariantChangeSerializer(serializers.Serializer):
+    """Ishlatilgan partiyada gul navini almashtirish."""
+
+    variant = serializers.PrimaryKeyRelatedField(queryset=FlowerVariant.objects.all())
+    reason = serializers.CharField(help_text="Nega almashtirilayotgani — audit jurnaliga yoziladi.")
+
+
 class DebtPayRequestSerializer(serializers.Serializer):
     """Qarzni to'landi deb belgilash."""
 
