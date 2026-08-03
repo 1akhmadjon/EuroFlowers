@@ -1730,6 +1730,16 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         old_florist_id = instance.florist_id
         edited_created_at = validated_data.pop("created_at", None)
         composition = validated_data.pop("composition", None)
+        # Florist katalogida gul soni chiqim yopilganda yoziladi. Keyin katalogga
+        # yana gul qo'shilsa, sonsiz kelgan qatorlar avvalgi sonini saqlab qolishi
+        # kerak — aks holda allaqachon taqsimlangan gul nolga tushib ketardi.
+        if composition is not None and (validated_data.get("florist") or instance.florist_id):
+            existing = {row.stock_batch_id: row.quantity_stems for row in instance.composition.all()}
+            for row in composition:
+                batch = row.get("stock_batch")
+                batch_id = getattr(batch, "id", batch)
+                if not row.get("quantity_stems") and existing.get(batch_id):
+                    row["quantity_stems"] = existing[batch_id]
         materials = validated_data.pop("materials", None)
         if composition is not None:
             composition = normalize_catalog_composition_rows(composition)

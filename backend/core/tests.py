@@ -3918,6 +3918,79 @@ class ApiTests(TestCase):
         item.refresh_from_db()
         self.assertEqual(item.quantity_sold, 1)
 
+    def _three_issued_batches(self, profile, stems=100):
+        batches = []
+        for index in range(3):
+            batch = StockBatch.objects.create(
+                variant=self.batch.variant, batch_number=f"MULTI-{index}", height_cm=50, stems_per_bunch=25,
+                received_stems=stems, remaining_stems=stems, cost_per_stem=1000,
+                sale_price_per_stem=2000, sale_price_per_bunch=50000,
+            )
+            self.client.post("/api/florist-stock-issues/issue/", {
+                "florist": profile.id, "batch": batch.id, "quantity_stems": stems,
+            }, format="json")
+            batches.append(batch)
+        return batches
+
+    def _florist_catalog(self, profile, batches, name="Ko‘p gulli buket"):
+        response = self.client.post("/api/catalog/", {
+            "name_uz": name, "arrangement_type": "bouquet", "volume": "M",
+            "florist": profile.id, "price": "500000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": b.id} for b in batches],
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        return CatalogItem.objects.get(id=response.json()["id"])
+
+    def test_third_flower_can_be_added_and_closed(self):
+        # 2 ta gul bilan katalog qo'shilib, keyin 3-chisi qo'shiladi
+        profile = self._florist_with_rates("fl-multi-1")
+        batches = self._three_issued_batches(profile)
+        item = self._florist_catalog(profile, batches[:2])
+        response = self.client.patch(f"/api/catalog/{item.id}/", {
+            "composition": [{"stock_batch": b.id} for b in batches],
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(item.composition.count(), 3)
+        closed = self.client.post("/api/florist-stock-balances/close-issue/", {
+            "florist": profile.id, "batch": batches[2].id,
+        }, format="json")
+        self.assertEqual(closed.status_code, 200, closed.data)
+
+    def test_editing_catalog_keeps_already_shared_stems(self):
+        # yopilgan gul soni katalog tahrirlanganda yo'qolmasligi kerak
+        profile = self._florist_with_rates("fl-multi-2")
+        batches = self._three_issued_batches(profile)
+        item = self._florist_catalog(profile, batches[:2])
+        for batch in batches[:2]:
+            self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": batch.id}, format="json")
+        before = {row.stock_batch_id: row.quantity_stems for row in item.composition.all()}
+        self.assertEqual(sorted(before.values()), [100, 100])
+
+        response = self.client.patch(f"/api/catalog/{item.id}/", {
+            "composition": [{"stock_batch": b.id} for b in batches],
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        after = {row.stock_batch_id: row.quantity_stems for row in item.composition.all()}
+        # eski ikkitasi saqlanadi, yangisi 0 bo'lib qo'shiladi
+        self.assertEqual(after[batches[0].id], 100)
+        self.assertEqual(after[batches[1].id], 100)
+        self.assertEqual(after[batches[2].id], 0)
+
+    def test_editing_catalog_keeps_florist_balance_correct(self):
+        profile = self._florist_with_rates("fl-multi-3")
+        batches = self._three_issued_batches(profile)
+        item = self._florist_catalog(profile, batches[:2])
+        for batch in batches[:2]:
+            self.client.post("/api/florist-stock-balances/close-issue/", {"florist": profile.id, "batch": batch.id}, format="json")
+        for batch in batches[:2]:
+            self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=batch).remaining_stems, 0)
+        self.client.patch(f"/api/catalog/{item.id}/", {
+            "composition": [{"stock_batch": b.id} for b in batches],
+        }, format="json")
+        # gul katalogda qolgani uchun floristga qaytib kelmasligi kerak
+        for batch in batches[:2]:
+            self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=batch).remaining_stems, 0)
+
     def test_api_returns_local_time_everywhere(self):
         # sotuv vaqti hamma endpointda bir xil, mahalliy vaqtda (+05:00) chiqishi kerak
         item = self._debt_catalog(name="Vaqt buketi", quantity=1)
