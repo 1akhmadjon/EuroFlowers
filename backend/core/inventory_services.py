@@ -1645,3 +1645,64 @@ def apply_packaging_movement(packaging, movement_type, quantity, reason, user):
         )
         AuditLog.objects.create(user=user, action="packaging_movement", summary=f"{packaging.name_uz} materialida {movement_type} harakati", entity_type="Packaging", entity_id=str(packaging.id), before={"quantity": before}, after={"material": packaging.name_uz, "type": packaging.packaging_type, "movement": movement.id, "movement_type": movement_type, "quantity_delta": delta, "quantity": packaging.quantity, "reason": reason})
     return movement
+
+
+def open_debt_for_sale(item, user, customer=None, name="", phone="", note=""):
+    """Katalog qarzga sotilganda qarz yozuvini ochadi.
+
+    Mijoz tanlanmagan bo'lsa ism va telefon bo'yicha topiladi yoki yangisi ochiladi.
+    Summa oxirgi sotuv yozuvidan olinadi — chegirma bilan sotilgan bo'lsa qarz ham
+    chegirmali summa bo'ladi.
+    """
+    from .models import Debt
+    from .serializers import resolve_or_create_customer
+
+    history = CatalogHistory.objects.filter(catalog_item=item, action="sold").order_by("-created_at", "-id").first()
+    if history is None:
+        raise ValueError("Sotuv yozuvi topilmadi")
+    resolved = resolve_or_create_customer(customer=customer, name=name, phone=phone)
+    if resolved is None:
+        raise ValueError("Qarzga sotishda mijozni tanlang yoki ism bilan telefon raqamini kiriting")
+    quantity = int(history.quantity or 1)
+    amount = Decimal(history.sold_unit_price or 0) * Decimal(quantity)
+    with transaction.atomic():
+        debt = Debt.objects.create(
+            customer=resolved,
+            catalog_item=item,
+            catalog_history=history,
+            quantity=quantity,
+            amount=amount,
+            note=note,
+            created_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="debt_opened", entity_type="Debt", entity_id=str(debt.id),
+            summary=f"{resolved} ga {item.name_uz} qarzga berildi: {amount}",
+            after={"customer": str(resolved), "catalog": item.name_uz, "quantity": quantity, "amount": str(amount), "note": note},
+        )
+    return debt
+
+
+def mark_debt_paid(debt, method, user=None, paid_at=None):
+    """Qarz to'landi deb belgilaydi. Savdoga aynan shu kunda kiradi."""
+    from .models import Debt
+
+    if method not in [key for key, _ in Debt.METHOD_CHOICES]:
+        raise ValueError("To‘lov usuli naqd yoki karta bo‘lishi kerak")
+    with transaction.atomic():
+        debt = Debt.objects.select_for_update().get(pk=debt.pk)
+        if debt.is_paid:
+            raise ValueError("Bu qarz allaqachon to‘langan")
+        debt.is_paid = True
+        debt.paid_at = paid_at or timezone.now()
+        debt.paid_method = method
+        debt.paid_by = user if getattr(user, "is_authenticated", False) else None
+        debt.save(update_fields=["is_paid", "paid_at", "paid_method", "paid_by", "updated_at"])
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="debt_paid", entity_type="Debt", entity_id=str(debt.id),
+            summary=f"{debt.customer} qarzi to‘landi: {debt.amount}",
+            after={"amount": str(debt.amount), "method": method, "paid_at": debt.paid_at.isoformat()},
+        )
+    return debt

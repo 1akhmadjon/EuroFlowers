@@ -4,7 +4,7 @@ from django.core.files.storage import default_storage
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
 from django.db import transaction
-from django.db.models import Count, DecimalField, F, IntegerField, Max, OuterRef, Q, Subquery, Sum, Value
+from django.db.models import Case, Count, DateTimeField, DecimalField, F, IntegerField, Max, OuterRef, Q, Subquery, Sum, Value, When
 from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils.dateparse import parse_date, parse_datetime
@@ -29,11 +29,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .models import Debt, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
+from .inventory_services import open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
@@ -238,6 +238,11 @@ def excel_response(workbook, filename):
 
 
 def catalog_payment_type(item, history=None):
+    if history is not None:
+        # qarz to'langanda savdo o'sha to'lov usuli bilan hisoblanadi
+        debt = next(iter(history.debts.all()), None) if hasattr(history, "debts") else None
+        if debt and debt.is_paid and debt.paid_method:
+            return debt.paid_method
     sources = []
     if history:
         sources.append(history.snapshot or {})
@@ -340,17 +345,30 @@ def sold_catalog_history_queryset(request):
     rows = (
         CatalogHistory.objects.filter(action="sold")
         .select_related("catalog_item__florist__user", "catalog_item__branch", "created_by")
-        .prefetch_related("catalog_item__composition")
+        .prefetch_related("catalog_item__composition", "debts")
     )
     selection = accounting_branch_selection(request)
     if selection["mode"] == "branch":
         rows = rows.filter(catalog_item__branch=selection["branch"])
     elif selection["mode"] == "main":
         rows = rows.filter(catalog_item__branch__isnull=True)
+    # Qarzga sotilgan katalog sotilgan kunda savdoga kirmaydi — u to'langan
+    # kuni, to'langan usul bilan hisobga tushadi. Shuning uchun sana filtri
+    # qarz uchun to'lov sanasi bo'yicha ishlaydi.
+    rows = rows.annotate(
+        debt_id=Subquery(Debt.objects.filter(catalog_history=OuterRef("pk")).values("id")[:1]),
+        debt_paid_at=Subquery(Debt.objects.filter(catalog_history=OuterRef("pk")).values("paid_at")[:1]),
+    ).exclude(debt_id__isnull=False, debt_paid_at__isnull=True)
+    effective = Case(
+        When(debt_id__isnull=False, then=F("debt_paid_at")),
+        default=F("created_at"),
+        output_field=DateTimeField(),
+    )
+    rows = rows.annotate(effective_at=effective)
     if date_from:
-        rows = rows.filter(created_at__date__gte=date_from)
+        rows = rows.filter(effective_at__date__gte=date_from)
     if date_to:
-        rows = rows.filter(created_at__date__lte=date_to)
+        rows = rows.filter(effective_at__date__lte=date_to)
     return rows, date_from, date_to
 
 
@@ -496,7 +514,8 @@ def accounting_report_data(request):
             "is_main_branch": item.branch_id is None,
             "created_at": history.created_at,
             "catalog_created_at": item.created_at,
-            "sold_at": history.created_at,
+            "sold_at": getattr(history, "effective_at", None) or history.created_at,
+            "paid_from_debt": bool(getattr(history, "debt_id", None)),
             "florist_id": item.florist_id,
             "florist_name": str(item.florist) if item.florist_id else "",
             "listed_unit_price": history.listed_unit_price,
@@ -2063,6 +2082,81 @@ class CatalogTransferViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset.filter(branch=branch) if branch else queryset
 
 
+class DebtViewSet(ScopedViewSet):
+    """Qarzga berilgan kataloglar."""
+
+    permission_page = "crm"
+    write_roles = ["admin", "operator"]
+    queryset = Debt.objects.select_related("customer", "catalog_item", "catalog_history", "created_by", "paid_by").prefetch_related("catalog_item__composition").all()
+    serializer_class = DebtSerializer
+    filterset_fields = ["customer", "is_paid", "paid_method"]
+    search_fields = ["customer__name", "customer__phone", "note", "catalog_item__name_uz"]
+    ordering_fields = ["created_at", "amount", "paid_at"]
+
+    @extend_schema(request=DebtPayRequestSerializer, responses=DebtSerializer)
+    @action(detail=True, methods=["post"], url_path="pay")
+    def pay(self, request, pk=None):
+        """Qarz to'landi. Savdoga aynan shu kunda kiradi."""
+        if not has_page_permission(request.user, "crm", True):
+            return forbidden()
+        serializer = DebtPayRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            debt = mark_debt_paid(
+                self.get_object(), serializer.validated_data["method"], request.user,
+                serializer.validated_data.get("paid_at"),
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(DebtSerializer(debt).data)
+
+    @extend_schema(
+        parameters=[OpenApiParameter("include_paid", str, description="true bo‘lsa to‘langanlar ham chiqadi")],
+        responses=OpenApiResponse(description="Mijoz bo‘yicha qarzdorlar"),
+    )
+    @action(detail=False, methods=["get"], url_path="by-customer")
+    def by_customer(self, request):
+        """Qarzdorlar sahifasi: har mijoz bitta qator, ichida qarz sotuvlari."""
+        if not has_page_permission(request.user, "crm", False):
+            return forbidden()
+        rows = self.filter_queryset(self.get_queryset())
+        if (request.query_params.get("include_paid") or "").lower() != "true":
+            rows = rows.filter(is_paid=False)
+        grouped = {}
+        for debt in rows.order_by("customer__name", "-created_at", "-id"):
+            bucket = grouped.setdefault(debt.customer_id, {
+                "customer": debt.customer_id,
+                "name": debt.customer.name,
+                "phone": debt.customer.phone,
+                "debt_count": 0,
+                "unpaid_total": Decimal("0"),
+                "paid_total": Decimal("0"),
+                "total": Decimal("0"),
+                "first_debt_at": debt.created_at,
+                "last_debt_at": debt.created_at,
+                "items": [],
+            })
+            bucket["debt_count"] += 1
+            bucket["total"] += Decimal(debt.amount or 0)
+            if debt.is_paid:
+                bucket["paid_total"] += Decimal(debt.amount or 0)
+            else:
+                bucket["unpaid_total"] += Decimal(debt.amount or 0)
+            bucket["first_debt_at"] = min(bucket["first_debt_at"], debt.created_at)
+            bucket["last_debt_at"] = max(bucket["last_debt_at"], debt.created_at)
+            bucket["items"].append(DebtSerializer(debt).data)
+        customers = sorted(grouped.values(), key=lambda row: -row["unpaid_total"])
+        return Response({
+            "customers": customers,
+            "totals": {
+                "customer_count": len(customers),
+                "debt_count": sum(row["debt_count"] for row in customers),
+                "unpaid_total": sum((row["unpaid_total"] for row in customers), Decimal("0")),
+                "paid_total": sum((row["paid_total"] for row in customers), Decimal("0")),
+            },
+        })
+
+
 class BranchReportView(APIView):
     """Admin uchun: filialga qancha katalog yuborilgan, qanchasi sotilgan,
     qanchasi chegirma bilan sotilgan."""
@@ -2130,6 +2224,18 @@ class CatalogItemViewSet(ScopedViewSet):
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if serializer.validated_data.get("payment_type") == "debt":
+            try:
+                open_debt_for_sale(
+                    item,
+                    request.user,
+                    customer=serializer.validated_data.get("customer"),
+                    name=serializer.validated_data.get("customer_name", ""),
+                    phone=serializer.validated_data.get("customer_phone", ""),
+                    note=serializer.validated_data.get("debt_note", ""),
+                )
+            except (ValueError, TypeError) as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(item).data)
 
     @extend_schema(request=CatalogRestoreFlowersSerializer, responses=CatalogItemSerializer)

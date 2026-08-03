@@ -13,7 +13,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Debt, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -3280,6 +3280,134 @@ class ApiTests(TestCase):
         self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("1050000.00"))
         items = self.client.get(f"/api/material-deliveries/{delivery_id}/items/")
         self.assertEqual(len(items.data), 2)
+
+    def _debt_catalog(self, name="Qarz buketi", price="300000", quantity=2, stems=25):
+        created = self.client.post("/api/catalog/", {
+            "name_uz": name, "arrangement_type": "bouquet", "price": price,
+            "quantity_total": quantity, "status": "available", "image_url": "https://example.com/b.jpg",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": stems}],
+        }, format="json")
+        self.assertEqual(created.status_code, 201, created.json())
+        return CatalogItem.objects.get(id=created.json()["id"])
+
+    def test_debt_sale_creates_debt_with_new_customer(self):
+        item = self._debt_catalog()
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "debt",
+            "customer_name": "Aziz Karimov", "customer_phone": "+998901234567",
+            "debt_note": "Hafta oxirida to‘laydi",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        debt = Debt.objects.get(catalog_item=item)
+        self.assertEqual(debt.customer.name, "Aziz Karimov")
+        self.assertEqual(debt.amount, Decimal("300000.00"))
+        self.assertEqual(debt.quantity, 1)
+        self.assertEqual(debt.note, "Hafta oxirida to‘laydi")
+        self.assertFalse(debt.is_paid)
+
+    def test_debt_sale_attaches_to_existing_customer(self):
+        customer = Customer.objects.create(name="Malika", phone="+998939876543")
+        item = self._debt_catalog(name="Bor mijoz buketi")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "debt", "customer": customer.id,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(Customer.objects.filter(name="Malika").count(), 1)
+        self.assertEqual(Debt.objects.get(catalog_item=item).customer_id, customer.id)
+
+    def test_debt_sale_requires_customer_or_contact(self):
+        item = self._debt_catalog(name="Mijozsiz")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "debt"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("customer", response.data)
+        self.assertEqual(Debt.objects.count(), 0)
+
+    def test_debt_uses_discounted_price(self):
+        item = self._debt_catalog(name="Chegirmali qarz", price="300000")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "sale_price": "250000", "discount_reason": "Doimiy mijoz",
+            "payment_type": "debt", "customer_name": "Sardor", "customer_phone": "+998901112233",
+        }, format="json")
+        self.assertEqual(Debt.objects.get(catalog_item=item).amount, Decimal("250000.00"))
+
+    def test_unpaid_debt_stays_out_of_accounting(self):
+        item = self._debt_catalog(name="Hisobsiz qarz")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "debt",
+            "customer_name": "Qarzdor", "customer_phone": "+998900000001",
+        }, format="json")
+        report = self.client.get("/api/accounting/")
+        self.assertEqual(Decimal(report.data["summary"]["total_sales"]), Decimal("0"))
+        self.assertEqual(report.data["summary"]["sales_count"], 0)
+
+    def test_paid_debt_enters_accounting_on_payment_day(self):
+        item = self._debt_catalog(name="To‘langan qarz")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "debt",
+            "customer_name": "Bekzod", "customer_phone": "+998900000002",
+        }, format="json")
+        debt = Debt.objects.get(catalog_item=item)
+        paid = self.client.post(f"/api/debts/{debt.id}/pay/", {"method": "card"}, format="json")
+        self.assertEqual(paid.status_code, 200, paid.data)
+        report = self.client.get("/api/accounting/")
+        self.assertEqual(Decimal(report.data["summary"]["total_sales"]), Decimal("300000.00"))
+        # to'lov usuli karta bo'lgani uchun karta ustuniga tushadi
+        self.assertEqual(Decimal(report.data["summary"]["card_total"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(report.data["summary"]["cash_total"]), Decimal("0"))
+
+    def test_debt_cannot_be_paid_twice(self):
+        item = self._debt_catalog(name="Ikki marta")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "debt",
+            "customer_name": "Jasur", "customer_phone": "+998900000003",
+        }, format="json")
+        debt = Debt.objects.get(catalog_item=item)
+        self.client.post(f"/api/debts/{debt.id}/pay/", {"method": "cash"}, format="json")
+        again = self.client.post(f"/api/debts/{debt.id}/pay/", {"method": "cash"}, format="json")
+        self.assertEqual(again.status_code, 400)
+        self.assertIn("allaqachon to‘langan", again.data["detail"])
+
+    def test_debtors_page_groups_by_customer(self):
+        first = self._debt_catalog(name="Qarz A", price="300000")
+        second = self._debt_catalog(name="Qarz B", price="150000")
+        for item in [first, second]:
+            self.client.post(f"/api/catalog/{item.id}/sell/", {
+                "quantity": 1, "payment_type": "debt",
+                "customer_name": "Aziz Karimov", "customer_phone": "+998901234567",
+            }, format="json")
+        third = self._debt_catalog(name="Qarz C", price="200000")
+        self.client.post(f"/api/catalog/{third.id}/sell/", {
+            "quantity": 1, "payment_type": "debt",
+            "customer_name": "Malika", "customer_phone": "+998939999999",
+        }, format="json")
+        response = self.client.get("/api/debts/by-customer/")
+        self.assertEqual(response.status_code, 200)
+        rows = response.data["customers"]
+        self.assertEqual(len(rows), 2)
+        aziz = next(row for row in rows if row["name"] == "Aziz Karimov")
+        self.assertEqual(aziz["debt_count"], 2)
+        self.assertEqual(aziz["unpaid_total"], Decimal("450000.00"))
+        self.assertEqual(len(aziz["items"]), 2)
+        # rasm, gul soni va summa qatorda bo'ladi
+        row = aziz["items"][0]
+        self.assertEqual(row["catalog_detail"]["image_url"], "https://example.com/b.jpg")
+        self.assertEqual(row["catalog_detail"]["stems_per_item"], 25)
+        self.assertEqual(response.data["totals"]["unpaid_total"], Decimal("650000.00"))
+        self.assertEqual(response.data["totals"]["customer_count"], 2)
+
+    def test_debtors_page_hides_paid_by_default(self):
+        item = self._debt_catalog(name="Yopilgan qarz")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "debt",
+            "customer_name": "To‘lagan", "customer_phone": "+998900000004",
+        }, format="json")
+        debt = Debt.objects.get(catalog_item=item)
+        self.client.post(f"/api/debts/{debt.id}/pay/", {"method": "cash"}, format="json")
+        hidden = self.client.get("/api/debts/by-customer/")
+        self.assertEqual(hidden.data["customers"], [])
+        shown = self.client.get("/api/debts/by-customer/?include_paid=true")
+        self.assertEqual(len(shown.data["customers"]), 1)
+        self.assertEqual(shown.data["customers"][0]["paid_total"], Decimal("300000.00"))
 
     def test_suppliers_can_be_filtered_by_type(self):
         Supplier.objects.create(name="Gul postavshigi", supplier_type="flower")

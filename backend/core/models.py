@@ -679,6 +679,34 @@ class LeadCatalogUsage(TimeStampedModel):
     quantity = models.PositiveIntegerField(default=1)
 
 
+class Debt(TimeStampedModel):
+    """Katalog qarzga sotilganda ochiladi.
+
+    Qarz to'lanmaguncha savdoga kirmaydi — to'langan kuni, to'langan usul
+    bilan hisob-kitobga tushadi.
+    """
+
+    METHOD_CHOICES = [("cash", "Naqd"), ("card", "Karta")]
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="debts")
+    catalog_item = models.ForeignKey(CatalogItem, null=True, blank=True, on_delete=models.SET_NULL, related_name="debts")
+    catalog_history = models.ForeignKey(CatalogHistory, null=True, blank=True, on_delete=models.SET_NULL, related_name="debts")
+    quantity = models.PositiveIntegerField(default=1)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    note = models.TextField(blank=True)
+    is_paid = models.BooleanField(default=False)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    paid_method = models.CharField(max_length=20, choices=METHOD_CHOICES, blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_debts")
+    paid_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="closed_debts")
+
+    class Meta:
+        ordering = ["is_paid", "-created_at", "-id"]
+        indexes = [models.Index(fields=["customer", "is_paid"])]
+
+    def __str__(self):
+        return f"{self.customer} · {self.amount}"
+
+
 class Reservation(TimeStampedModel):
     STATUS_CHOICES = [("active", "Bron"), ("fulfilled", "Sotildi"), ("cancelled", "Bekor qilindi")]
     PAYMENT_STATUS_CHOICES = [("unpaid", "To‘lanmagan"), ("deposit", "Zaklad"), ("paid", "To‘liq to‘langan")]

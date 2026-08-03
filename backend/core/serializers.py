@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, Debt, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -2240,19 +2240,78 @@ class SendResponseSerializer(serializers.Serializer):
     platform_response = serializers.CharField(required=False, allow_blank=True)
 
 
+class DebtSerializer(serializers.ModelSerializer):
+    customer_detail = serializers.SerializerMethodField(read_only=True)
+    catalog_detail = serializers.SerializerMethodField(read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+    paid_by_detail = UserSerializer(source="paid_by", read_only=True)
+    paid_method_label = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Debt
+        fields = "__all__"
+        read_only_fields = ["created_by", "paid_by", "paid_at", "is_paid", "paid_method"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_customer_detail(self, obj):
+        return {"id": obj.customer_id, "name": obj.customer.name, "phone": obj.customer.phone}
+
+    @extend_schema_field(serializers.CharField())
+    def get_paid_method_label(self, obj):
+        return obj.get_paid_method_display() if obj.paid_method else ""
+
+    @extend_schema_field(serializers.DictField())
+    def get_catalog_detail(self, obj):
+        """Qarzdorlar sahifasida rasm, gul soni va nomi ko'rinishi uchun."""
+        item = obj.catalog_item
+        if not item:
+            snapshot = (obj.catalog_history.snapshot or {}) if obj.catalog_history_id else {}
+            return {"id": None, "name_uz": snapshot.get("catalog", ""), "image_url": "", "stems_per_item": 0, "stems_total": 0}
+        stems = sum(row.quantity_stems for row in item.composition.all())
+        return {
+            "id": item.id,
+            "name_uz": item.name_uz,
+            "image_url": item.image_url,
+            "arrangement_type": item.arrangement_type,
+            "volume": item.volume,
+            "catalog_kind": item.catalog_kind,
+            "stems_per_item": stems,
+            "stems_total": stems * int(obj.quantity or 1),
+        }
+
+
+class DebtPayRequestSerializer(serializers.Serializer):
+    """Qarzni to'landi deb belgilash."""
+
+    method = serializers.ChoiceField(choices=["cash", "card"])
+    paid_at = serializers.DateTimeField(required=False, help_text="Berilmasa hozirgi vaqt.")
+
+
 class CatalogSellRequestSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, required=False, default=1)
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     discount_reason = serializers.CharField(required=False, allow_blank=True)
-    payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False)
+    payment_type = serializers.ChoiceField(choices=["cash", "card", "debt"], required=False)
     sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
     reservation = serializers.PrimaryKeyRelatedField(queryset=Reservation.objects.all(), required=False, allow_null=True)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
     decoration_florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all(), required=False, allow_null=True)
+    # Qarzga sotilganda mijoz majburiy: bor mijoz tanlanadi yoki ism-raqamdan yangisi ochiladi
+    customer = serializers.PrimaryKeyRelatedField(queryset=Customer.objects.all(), required=False, allow_null=True)
+    customer_name = serializers.CharField(required=False, allow_blank=True, max_length=160)
+    customer_phone = serializers.CharField(required=False, allow_blank=True, max_length=30)
+    debt_note = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
         if "materials" in attrs:
             attrs["materials"] = normalize_catalog_material_rows(attrs["materials"])
+        if attrs.get("payment_type") == "debt":
+            has_customer = attrs.get("customer") is not None
+            has_contact = bool((attrs.get("customer_name") or "").strip()) and bool((attrs.get("customer_phone") or "").strip())
+            if not has_customer and not has_contact:
+                raise serializers.ValidationError({
+                    "customer": "Qarzga sotishda mijozni tanlang yoki ism bilan telefon raqamini kiriting",
+                })
         return attrs
 
 
