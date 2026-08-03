@@ -742,7 +742,10 @@ class StockBatchSerializer(serializers.ModelSerializer):
         data = self._fill_prices(data)
         if not data.get("received_stems") and data.get("received_bunches") and data.get("stems_per_bunch"):
             data["received_stems"] = int(Decimal(str(data["received_bunches"])) * Decimal(str(data["stems_per_bunch"])))
-        if data.get("received_stems") and not data.get("remaining_stems"):
+        # Qoldiqni kelgan songa tenglash faqat yangi partiyada to'g'ri.
+        # Tahrirda ishlatilgan gul unutilib qolmasligi uchun qoldiq
+        # viewset da farq bo'yicha siljitiladi.
+        if data.get("received_stems") and not data.get("remaining_stems") and not self.instance:
             data["remaining_stems"] = data["received_stems"]
         return super().to_internal_value(data)
 

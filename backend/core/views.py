@@ -1670,6 +1670,41 @@ class StockBatchViewSet(ScopedViewSet):
                 except Exception as exc:
                     print(f"SUPPLIER_STOCK_TELEGRAM_FAILED batch={batch.id} error={exc}", flush=True)
 
+    def perform_update(self, serializer):
+        """Kelgan son tahrirlanganda qoldiq va kirim yozuvi ham to'g'rilanadi.
+
+        Xato kiritilgan son tuzatilganda allaqachon ishlatilgan gul unutilib
+        qolmasligi kerak: qoldiq farq qancha bo'lsa o'shancha siljiydi.
+        """
+        instance = serializer.instance
+        old_received = instance.received_stems
+        old_remaining = instance.remaining_stems
+        used = max(old_received - old_remaining, 0)
+        new_received = serializer.validated_data.get("received_stems", old_received)
+        explicit_remaining = "remaining_stems" in serializer.validated_data
+        if new_received != old_received and not explicit_remaining and new_received < used:
+            raise serializers.ValidationError({
+                "received_stems": f"Bu partiyadan allaqachon {used} dona ishlatilgan. "
+                                  f"Kelgan sonni undan kam qilib bo‘lmaydi.",
+            })
+        batch = serializer.save()
+        if new_received != old_received and not explicit_remaining:
+            batch.remaining_stems = max(new_received - used, 0)
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            # kirim yozuvi ham yangi songa moslanadi, aks holda jurnal to'g'ri kelmaydi
+            movement = StockMovement.objects.filter(batch=batch, movement_type="in").order_by("created_at", "id").first()
+            if movement:
+                movement.quantity_stems = new_received
+                movement.quantity_bunches = Decimal(new_received) / Decimal(batch.stems_per_bunch or 1)
+                movement.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+            write_audit(
+                self.request.user, "stock_batch_quantity_edited", batch,
+                before={"received_stems": old_received, "remaining_stems": old_remaining},
+                after={"received_stems": batch.received_stems, "remaining_stems": batch.remaining_stems, "used": used},
+                request=self.request,
+                summary=f"{batch.batch_number} partiyada kelgan son {old_received} dan {new_received} ga o‘zgartirildi",
+            )
+
     def destroy(self, request, *args, **kwargs):
         batch = self.get_object()
         try:

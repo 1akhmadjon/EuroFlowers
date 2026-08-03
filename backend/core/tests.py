@@ -3512,6 +3512,70 @@ class ApiTests(TestCase):
         self.assertEqual(Decimal(detail.data["total_cost_exact"]), Decimal("99800.00"))
         self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("200.00"))
 
+    def _batch_with_usage(self, received=100, used=30):
+        created = self.client.post("/api/stock-batches/", {
+            "batch_number": "EDIT-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": received,
+            "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
+        }, format="json").json()
+        if used:
+            self.client.post(f"/api/stock-batches/{created['id']}/movement/", {
+                "movement_type": "out", "quantity_stems": used, "reason": "test",
+            }, format="json")
+        return StockBatch.objects.get(id=created["id"])
+
+    def test_batch_received_stems_can_be_edited_upwards(self):
+        # xato kiritilgan son tuzatilganda ishlatilgan gul unutilmasligi kerak
+        batch = self._batch_with_usage(received=100, used=30)
+        self.assertEqual(batch.remaining_stems, 70)
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"received_stems": 120}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.received_stems, 120)
+        self.assertEqual(batch.remaining_stems, 90)
+
+    def test_batch_received_stems_can_be_edited_downwards(self):
+        batch = self._batch_with_usage(received=100, used=30)
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"received_stems": 80}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.received_stems, 80)
+        self.assertEqual(batch.remaining_stems, 50)
+
+    def test_batch_received_stems_cannot_drop_below_used(self):
+        batch = self._batch_with_usage(received=100, used=30)
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"received_stems": 10}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("received_stems", response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.received_stems, 100)
+        self.assertEqual(batch.remaining_stems, 70)
+
+    def test_batch_edit_updates_incoming_movement(self):
+        batch = self._batch_with_usage(received=100, used=30)
+        self.client.patch(f"/api/stock-batches/{batch.id}/", {"received_stems": 120}, format="json")
+        incoming = StockMovement.objects.filter(batch=batch, movement_type="in").order_by("created_at", "id").first()
+        self.assertEqual(incoming.quantity_stems, 120)
+        # chiqim yozuvi tegilmaydi
+        outgoing = StockMovement.objects.filter(batch=batch, movement_type="out").first()
+        self.assertEqual(outgoing.quantity_stems, -30)
+
+    def test_batch_remaining_can_still_be_set_directly(self):
+        batch = self._batch_with_usage(received=100, used=30)
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"received_stems": 120, "remaining_stems": 65}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.received_stems, 120)
+        self.assertEqual(batch.remaining_stems, 65)
+
+    def test_batch_edit_without_quantity_change_keeps_remaining(self):
+        batch = self._batch_with_usage(received=100, used=30)
+        response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"sale_price_per_bunch": "60000"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.remaining_stems, 70)
+        self.assertEqual(batch.sale_price_per_bunch, Decimal("60000.00"))
+
     def test_free_batch_needs_no_cost_price(self):
         # postavshik tekinga qo'shib bergan gul: faqat sotuv narxi yoziladi
         response = self.client.post("/api/stock-batches/", {
