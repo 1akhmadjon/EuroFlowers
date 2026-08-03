@@ -3918,6 +3918,32 @@ class ApiTests(TestCase):
         item.refresh_from_db()
         self.assertEqual(item.quantity_sold, 1)
 
+    def test_api_returns_local_time_everywhere(self):
+        # sotuv vaqti hamma endpointda bir xil, mahalliy vaqtda (+05:00) chiqishi kerak
+        item = self._debt_catalog(name="Vaqt buketi", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "cash", "sale_image_url": "https://example.com/x.jpg",
+        }, format="json")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        local = timezone.localtime(history.created_at)
+
+        catalog = self.client.get(f"/api/catalog/{item.id}/")
+        self.assertTrue(catalog.data["created_at"].endswith("+05:00"), catalog.data["created_at"])
+
+        report = self.client.get("/api/accounting/")
+        row = next(r for r in report.data["history"] if r["catalog_id"] == item.id)
+        self.assertIn("+05:00", str(row["sold_at"]), str(row["sold_at"]))
+        self.assertNotIn("Z", str(row["sold_at"]))
+        self.assertIn(local.strftime("%H:%M"), str(row["sold_at"]))
+
+    def test_json_safe_keeps_local_time(self):
+        from .views import json_safe
+
+        now = timezone.now()
+        value = json_safe({"at": now})["at"]
+        self.assertTrue(value.endswith("+05:00"), value)
+        self.assertIn(timezone.localtime(now).strftime("%H:%M"), value)
+
     def test_export_labels_are_in_uzbek(self):
         from .views import arrangement_text, catalog_kind_text, volume_text
 

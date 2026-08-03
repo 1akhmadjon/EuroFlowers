@@ -35,6 +35,7 @@ from .serializers import backdate_record, StockBatchVariantChangeSerializer, Deb
 from . import face_services
 from .inventory_services import store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
+from .renderers import to_local
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
 
@@ -614,8 +615,15 @@ def forbidden():
     return Response({"detail": "Sizda bu sahifa uchun ruxsat yo‘q."}, status=status.HTTP_403_FORBIDDEN)
 
 
+class LocalTimeDjangoJSONEncoder(DjangoJSONEncoder):
+    """Vaqtni UTC emas, mahalliy vaqtda yozadi."""
+
+    def default(self, o):
+        return super().default(to_local(o))
+
+
 def json_safe(value):
-    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
+    return json.loads(json.dumps(value, cls=LocalTimeDjangoJSONEncoder))
 
 
 def instance_snapshot(instance):
