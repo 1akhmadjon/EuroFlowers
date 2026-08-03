@@ -180,6 +180,8 @@ class StockBatch(TimeStampedModel):
     stems_per_bunch = models.PositiveIntegerField(default=10)
     received_stems = models.PositiveIntegerField()
     remaining_stems = models.PositiveIntegerField()
+    # Postavshik tekinga qo'shib bergan gul: tannarx yozilmaydi, faqat sotuv narxi.
+    is_free = models.BooleanField(default=False)
     cost_per_bunch = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     cost_per_stem = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
     sale_price_per_stem = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])

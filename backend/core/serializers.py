@@ -683,12 +683,21 @@ class StockBatchSerializer(serializers.ModelSerializer):
             }
         return rows
 
+    def _is_free(self, data):
+        value = data.get("is_free") if "is_free" in data else getattr(self.instance, "is_free", False)
+        return value in [True, "true", "True", 1, "1"]
+
     def _fill_prices(self, data):
         """Pochka narxidan dona narxini, dona narxidan pochka narxini to'ldiradi.
 
         Yaxlitlangan narx bilan birga yaxlitlanmagan aniq hisob ham saqlanadi —
         partiya detalida ikkalasini yonma-yon ko'rsatish uchun.
         """
+        if self._is_free(data):
+            # tekin gul: tannarx yozilmaydi, sotuv narxi odatdagidek hisoblanadi
+            data["cost_per_bunch"] = "0"
+            data["cost_per_stem"] = "0"
+            data["cost_per_stem_exact"] = "0"
         stems = data.get("stems_per_bunch") or getattr(self.instance, "stems_per_bunch", None)
         try:
             stems = int(stems)
@@ -739,8 +748,9 @@ class StockBatchSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         if not self.instance:
-            # narxni pochkada ham, donada ham berish mumkin, lekin biri bo'lishi shart
-            if attrs.get("cost_per_stem") is None and not attrs.get("cost_per_bunch"):
+            # narxni pochkada ham, donada ham berish mumkin, lekin biri bo'lishi shart.
+            # Tekin gulda tannarx umuman yozilmaydi.
+            if not attrs.get("is_free") and attrs.get("cost_per_stem") is None and not attrs.get("cost_per_bunch"):
                 raise serializers.ValidationError({"cost_per_bunch": "Pochka tannarxini yoki dona tannarxini kiriting"})
             if attrs.get("sale_price_per_stem") is None and attrs.get("sale_price_per_bunch") is None:
                 raise serializers.ValidationError({"sale_price_per_bunch": "Pochka sotuv narxini yoki dona sotuv narxini kiriting"})

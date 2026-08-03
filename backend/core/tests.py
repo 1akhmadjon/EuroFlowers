@@ -3468,6 +3468,77 @@ class ApiTests(TestCase):
         self.assertEqual(Decimal(detail.data["total_cost_exact"]), Decimal("99800.00"))
         self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("200.00"))
 
+    def test_free_batch_needs_no_cost_price(self):
+        # postavshik tekinga qo'shib bergan gul: faqat sotuv narxi yoziladi
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "FREE-1", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 100, "is_free": True,
+            "sale_price_per_bunch": "50000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        data = response.json()
+        self.assertTrue(data["is_free"])
+        self.assertEqual(Decimal(data["cost_per_stem"]), Decimal("0.00"))
+        self.assertEqual(Decimal(data["cost_per_bunch"]), Decimal("0.00"))
+        self.assertEqual(Decimal(data["cost_per_stem_exact"]), Decimal("0.0000"))
+        # sotuv narxi odatdagidek hisoblanadi
+        self.assertEqual(Decimal(data["sale_price_per_stem"]), Decimal("2000.00"))
+
+    def test_free_batch_ignores_typed_cost(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "FREE-2", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 50, "is_free": True,
+            "cost_per_bunch": "99000", "sale_price_per_bunch": "50000",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("0.00"))
+        self.assertEqual(Decimal(response.json()["cost_per_bunch"]), Decimal("0.00"))
+
+    def test_free_batch_needs_sale_price(self):
+        response = self.client.post("/api/stock-batches/", {
+            "batch_number": "FREE-3", "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 25, "received_stems": 50, "is_free": True,
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("sale_price_per_bunch", response.data)
+
+    def test_free_batch_adds_nothing_to_supplier_debt(self):
+        supplier = Supplier.objects.create(name="Tekin beruvchi")
+        self.client.post("/api/stock-batches/", {
+            "batch_number": "FREE-4", "variant": self.batch.variant_id, "supplier": supplier.id,
+            "height_cm": 50, "stems_per_bunch": 25, "received_stems": 100, "is_free": True,
+            "sale_price_per_bunch": "50000",
+        }, format="json")
+        row = next(r for r in self.client.get("/api/suppliers/").data["results"] if r["name"] == "Tekin beruvchi")
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("0.00"))
+
+    def test_free_batch_makes_catalog_flower_cost_zero(self):
+        free = StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="FREE-5", height_cm=50, stems_per_bunch=25,
+            received_stems=100, remaining_stems=100, is_free=True, cost_per_stem=0,
+            sale_price_per_stem=2000, sale_price_per_bunch=50000,
+        )
+        created = self.client.post("/api/catalog/", {
+            "name_uz": "Tekin guldan buket", "arrangement_type": "bouquet",
+            "price": "300000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": free.id, "quantity_stems": 20}],
+        }, format="json")
+        self.assertEqual(created.status_code, 201, created.json())
+        item = CatalogItem.objects.get(id=created.json()["id"])
+        from .inventory_services import catalog_cost_breakdown
+        self.assertEqual(catalog_cost_breakdown(item)["flower_cost"], Decimal("0"))
+
+    def test_free_batches_can_be_filtered(self):
+        StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="FREE-6", height_cm=50, stems_per_bunch=25,
+            received_stems=50, remaining_stems=50, is_free=True, cost_per_stem=0,
+            sale_price_per_stem=2000, sale_price_per_bunch=50000,
+        )
+        free = self.client.get("/api/stock-batches/?is_free=true")
+        self.assertEqual([row["batch_number"] for row in free.data["results"]], ["FREE-6"])
+        paid = self.client.get("/api/stock-batches/?is_free=false")
+        self.assertIn("API-1", [row["batch_number"] for row in paid.data["results"]])
+
     def test_batch_without_any_price_is_rejected(self):
         response = self.client.post("/api/stock-batches/", {
             "batch_number": "NOPRICE-1", "variant": self.batch.variant_id, "height_cm": 50,

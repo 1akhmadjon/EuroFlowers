@@ -141,7 +141,7 @@ class PackagingMovementFilter(CreatedAtRangeFilter):
 class StockBatchFilter(CreatedAtRangeFilter):
     class Meta:
         model = StockBatch
-        fields = ["variant", "supplier", "height_cm", "height_from_cm", "height_to_cm", "is_active", "created_at"]
+        fields = ["variant", "supplier", "delivery", "is_free", "height_cm", "height_from_cm", "height_to_cm", "is_active", "created_at"]
 
 
 class FloristAttendanceFilter(CreatedAtRangeFilter):
