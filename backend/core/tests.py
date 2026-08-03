@@ -3723,7 +3723,7 @@ class ApiTests(TestCase):
         batch = self._batch_with_usage(received=100, used=30)
         response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"variant": other.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("navini almashtirib bo‘lmaydi", str(response.data["variant"]))
+        self.assertIn("change-variant", str(response.data["variant"]))
         batch.refresh_from_db()
         self.assertEqual(batch.variant_id, self.batch.variant_id)
 

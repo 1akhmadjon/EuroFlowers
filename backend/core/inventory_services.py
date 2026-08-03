@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, Branch, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
+from .models import AuditLog, Branch, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
 
 
 def money(value):
