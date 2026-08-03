@@ -1784,3 +1784,58 @@ def change_stock_batch_variant(batch, variant, reason="", user=None):
             after={"variant": new_label, "reason": reason, "usage": usage, "history_rows_updated": touched},
         )
     return {"batch": batch, "old_variant": old_label, "new_variant": new_label, "usage": usage, "history_rows_updated": touched}
+
+
+def store_sale_image(uploaded=None, image_url=""):
+    """Sotuv rasmini saqlaydi va URL qaytaradi."""
+    from django.core.files.storage import default_storage
+
+    if uploaded is not None:
+        path = default_storage.save(f"sales/{uploaded.name}", uploaded)
+        return default_storage.url(path)
+    return (image_url or "").strip()
+
+
+def sale_group_caption(item, history, payment_type, image_url=""):
+    """Guruhga boradigan markdown xabar: naqd yoki karta va sotuv summasi."""
+    labels = {"cash": "Naqd", "card": "Karta", "debt": "Qarz"}
+    quantity = int(history.quantity or 1)
+    total = Decimal(history.sold_unit_price or 0) * Decimal(quantity)
+    listed = Decimal(history.listed_unit_price or 0) * Decimal(quantity)
+    lines = [
+        f"*{item.name_uz}*",
+        f"To‘lov: *{labels.get(payment_type, 'Aniqlanmagan')}*",
+        f"Summa: *{total:,.0f} so‘m*".replace(",", " "),
+    ]
+    if quantity > 1:
+        lines.append(f"Soni: {quantity} ta")
+    if listed > total:
+        chegirma = listed - total
+        lines.append(f"Chegirma: {chegirma:,.0f} so‘m".replace(",", " "))
+        if history.discount_reason:
+            lines.append(f"Sabab: {history.discount_reason}")
+    if item.branch_id:
+        lines.append(f"Filial: {item.branch.name}")
+    return "\n".join(lines)
+
+
+def notify_sale_to_group(item, history, payment_type, image_url):
+    """Sotilgan mahsulot rasmini alohida telegram guruhga yuboradi."""
+    from .models import IntegrationSettings
+    from .platform_services import telegram_send_photo_with
+
+    if not image_url:
+        return None
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    token = (integration.sale_bot_token or "").strip()
+    chat_id = (integration.sale_group_chat_id or "").strip()
+    if not token or not chat_id:
+        print(f"SALE_GROUP_NOT_CONFIGURED catalog={item.id}", flush=True)
+        return None
+    caption = sale_group_caption(item, history, payment_type, image_url)
+    try:
+        return telegram_send_photo_with(token, chat_id, image_url, caption)
+    except Exception as error:
+        # xabar ketmasa ham sotuv bekor bo'lmaydi
+        print(f"SALE_GROUP_SEND_FAILED catalog={item.id} error={error}", flush=True)
+        return None

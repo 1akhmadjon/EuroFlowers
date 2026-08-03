@@ -819,6 +819,9 @@ class IntegrationSettings(TimeStampedModel):
     instagram_verify_token = models.CharField(max_length=180, blank=True)
     telegram_bot_token = models.CharField(max_length=180, blank=True)
     telegram_group_chat_id = models.CharField(max_length=120, blank=True)
+    # Sotuv xabari alohida bot va guruhga boradi
+    sale_bot_token = models.CharField(max_length=180, blank=True)
+    sale_group_chat_id = models.CharField(max_length=120, blank=True)
     extra = models.JSONField(default=dict, blank=True)
 
 

@@ -2333,10 +2333,15 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     customer_name = serializers.CharField(required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(required=False, allow_blank=True, max_length=30)
     debt_note = serializers.CharField(required=False, allow_blank=True)
+    # Sotilgan mahsulot rasmi majburiy — u guruhga yuboriladi
+    sale_image = serializers.FileField(required=False, write_only=True)
+    sale_image_url = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
         if "materials" in attrs:
             attrs["materials"] = normalize_catalog_material_rows(attrs["materials"])
+        if not attrs.get("sale_image") and not (attrs.get("sale_image_url") or "").strip():
+            raise serializers.ValidationError({"sale_image": "Sotuvda mahsulot rasmi majburiy"})
         if attrs.get("payment_type") == "debt":
             has_customer = attrs.get("customer") is not None
             has_contact = bool((attrs.get("customer_name") or "").strip()) and bool((attrs.get("customer_phone") or "").strip())

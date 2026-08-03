@@ -202,6 +202,25 @@ def telegram_send_image(chat_id, image_url):
     return telegram_api("sendPhoto", {"chat_id": chat_id, "photo": image_url})
 
 
+def telegram_send_photo_with(token, chat_id, photo, caption="", parse_mode="Markdown"):
+    """Alohida bot orqali rasm yuboradi.
+
+    Sotuv xabari uchun boshqa bot va guruh ishlatiladi, shuning uchun token
+    tashqaridan beriladi. Rasm URL bo'lsa link yuboriladi, bayt bo'lsa fayl.
+    """
+    if not token or not chat_id:
+        return {"skipped": True, "reason": "token yoki chat_id yo‘q"}
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    data = {"chat_id": str(chat_id), "caption": caption[:1024], "parse_mode": parse_mode}
+    if isinstance(photo, (bytes, bytearray)):
+        response = requests.post(url, data=data, files={"photo": ("sale.jpg", photo)}, timeout=30)
+    else:
+        data["photo"] = photo
+        response = requests.post(url, data=data, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
 def telegram_sender_action(chat_id, action="typing"):
     return telegram_api("sendChatAction", {"chat_id": chat_id, "action": action})
 
