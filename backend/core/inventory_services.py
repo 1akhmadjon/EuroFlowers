@@ -298,6 +298,16 @@ def ensure_catalog_materials_available(item, quantity=None):
 
 
 
+def stamp_created_at(instance, created_at=None):
+    """auto_now_add tufayli created_at yozilmaydi. O'tib ketgan kun uchun
+    yozuv yaratilgandan keyin to'g'ridan-to'g'ri yangilanadi."""
+    if not created_at:
+        return instance
+    type(instance).objects.filter(pk=instance.pk).update(created_at=created_at)
+    instance.created_at = created_at
+    return instance
+
+
 def florist_balance_row(florist, batch, lock=False):
     queryset = FloristStockBalance.objects.select_for_update() if lock else FloristStockBalance.objects
     row = queryset.filter(florist=florist, batch=batch).first()
@@ -306,7 +316,7 @@ def florist_balance_row(florist, batch, lock=False):
     return FloristStockBalance.objects.create(florist=florist, batch=batch, remaining_stems=0)
 
 
-def issue_stock_to_florist(florist, batch, quantity_stems, reason="", user=None):
+def issue_stock_to_florist(florist, batch, quantity_stems, reason="", user=None, created_at=None):
     """Skladdan floristga gul chiqaradi. Sklad qoldig'i kamayadi, floristda ko'payadi."""
     quantity_stems = int(quantity_stems or 0)
     if quantity_stems < 1:
@@ -324,17 +334,19 @@ def issue_stock_to_florist(florist, batch, quantity_stems, reason="", user=None)
             florist=florist, batch=batch, kind="issue", quantity_stems=quantity_stems,
             reason=reason, performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
-        StockMovement.objects.create(
+        movement = StockMovement.objects.create(
             batch=batch, movement_type="out", quantity_stems=-quantity_stems,
             quantity_bunches=Decimal(quantity_stems) / Decimal(batch.stems_per_bunch or 1),
             reference_type="florist_issue", reference_id=issue.id,
             reason=reason or f"{florist} ga chiqarildi",
             performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
+        stamp_created_at(issue, created_at)
+        stamp_created_at(movement, created_at)
     return issue
 
 
-def issue_multiple_stock_to_florist(florist, items, reason="", user=None):
+def issue_multiple_stock_to_florist(florist, items, reason="", user=None, created_at=None):
     if not items:
         raise ValueError("Kamida bitta gul tanlash kerak")
     with transaction.atomic():
@@ -366,13 +378,15 @@ def issue_multiple_stock_to_florist(florist, items, reason="", user=None):
                 florist=florist, batch=batch, kind="issue", quantity_stems=quantity,
                 reason=reason, performed_by=user if getattr(user, "is_authenticated", False) else None,
             )
-            StockMovement.objects.create(
+            movement = StockMovement.objects.create(
                 batch=batch, movement_type="out", quantity_stems=-quantity,
                 quantity_bunches=Decimal(quantity) / Decimal(batch.stems_per_bunch or 1),
                 reference_type="florist_issue", reference_id=issue.id,
                 reason=reason or f"{florist} ga chiqarildi",
                 performed_by=user if getattr(user, "is_authenticated", False) else None,
             )
+            stamp_created_at(issue, created_at)
+            stamp_created_at(movement, created_at)
             issues.append(issue)
         AuditLog.objects.create(
             user=user if getattr(user, "is_authenticated", False) else None,
@@ -383,7 +397,7 @@ def issue_multiple_stock_to_florist(florist, items, reason="", user=None):
     return issues
 
 
-def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=None, kind="return"):
+def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=None, kind="return", created_at=None):
     """Floristdan gulni skladga qaytaradi yoki chiqitga chiqaradi."""
     quantity_stems = int(quantity_stems or 0)
     if quantity_stems < 1:
@@ -404,7 +418,7 @@ def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=No
             florist=florist, batch=batch, kind=kind, quantity_stems=quantity_stems,
             reason=reason, performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
-        StockMovement.objects.create(
+        movement = StockMovement.objects.create(
             batch=batch,
             movement_type="in" if kind == "return" else "waste",
             quantity_stems=quantity_stems if kind == "return" else -quantity_stems,
@@ -413,6 +427,8 @@ def return_stock_from_florist(florist, batch, quantity_stems, reason="", user=No
             reason=reason or (f"{florist} qaytardi" if kind == "return" else f"{florist} chiqitga chiqardi"),
             performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
+        stamp_created_at(issue, created_at)
+        stamp_created_at(movement, created_at)
     return issue
 
 

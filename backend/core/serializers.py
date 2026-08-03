@@ -389,6 +389,10 @@ class FloristStockIssueRequestSerializer(serializers.Serializer):
     batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
     quantity_stems = serializers.IntegerField(min_value=1)
     reason = serializers.CharField(required=False, allow_blank=True)
+    created_at = serializers.DateTimeField(
+        required=False,
+        help_text="Chiqim qachon bo‘lgani. O‘tib ketgan kun uchun belgilanadi, berilmasa hozirgi vaqt.",
+    )
 
 
 class FloristStockIssueBulkItemSerializer(serializers.Serializer):
@@ -400,6 +404,10 @@ class FloristStockIssueBulkRequestSerializer(serializers.Serializer):
     florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
     items = FloristStockIssueBulkItemSerializer(many=True)
     reason = serializers.CharField(required=False, allow_blank=True)
+    created_at = serializers.DateTimeField(
+        required=False,
+        help_text="Chiqim qachon bo‘lgani. O‘tib ketgan kun uchun belgilanadi.",
+    )
 
     def validate_items(self, value):
         if not value:
@@ -1511,6 +1519,11 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
     payment_type = serializers.ChoiceField(choices=["cash", "card"], required=False, write_only=True)
+    created_at = serializers.DateTimeField(
+        required=False,
+        help_text="Katalog qachon qo‘shilgani. O‘tib ketgan kun uchun belgilanadi, berilmasa hozirgi vaqt.",
+    )
+
     class Meta:
         model = CatalogItem
         fields = "__all__"
@@ -1641,6 +1654,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         )
         composition = normalize_catalog_composition_rows(validated_data.pop("composition", []))
         materials = normalize_catalog_material_rows(validated_data.pop("materials", []))
+        created_at = validated_data.pop("created_at", None)
         validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
         validated_data = self._sync_social_post_image_data(validated_data)
         if validated_data.get("catalog_kind") == "custom":
@@ -1693,6 +1707,12 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot, reservation=reservation)
                 notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             self._sync_social_post_image(item)
+            if created_at:
+                # katalog o'tib ketgan kunga yozilsa, tarix va florist ish haqi
+                # sanasi ham o'sha kunga qo'yiladi
+                backdate_record(item, created_at)
+                CatalogHistory.objects.filter(catalog_item=item).update(created_at=created_at)
+                FloristSalaryEntry.objects.filter(catalog_item=item).update(work_date=timezone.localtime(created_at).date())
         return item
 
     def update(self, instance, validated_data):
@@ -1708,6 +1728,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             )
             validated_data["customer"] = resolved
         old_florist_id = instance.florist_id
+        edited_created_at = validated_data.pop("created_at", None)
         composition = validated_data.pop("composition", None)
         materials = validated_data.pop("materials", None)
         if composition is not None:
@@ -1751,6 +1772,10 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             instance = sync_catalog_financials(instance)
             validate_catalog_discount_reason(instance)
             sync_catalog_florist_salary(instance, user)
+            if edited_created_at:
+                backdate_record(instance, edited_created_at)
+                CatalogHistory.objects.filter(catalog_item=instance, action="created").update(created_at=edited_created_at)
+                FloristSalaryEntry.objects.filter(catalog_item=instance).update(work_date=timezone.localtime(edited_created_at).date())
             sync_catalog_decoration_salary(instance, user)
             if instance.florist_id and instance.florist_id != old_florist_id:
                 notify_florist_catalog(instance, "Yangi ish biriktirildi", f"{instance.name_uz} katalogi sizga biriktirildi.")

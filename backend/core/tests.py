@@ -3758,6 +3758,109 @@ class ApiTests(TestCase):
         self.client.post(f"/api/catalog/{item['id']}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
         return StockBatch.objects.get(id=created["id"]), CatalogItem.objects.get(id=item["id"]), other
 
+    def test_florist_issue_can_be_backdated(self):
+        # o'tib ketgan kun uchun chiqim sanasini belgilash
+        user = User.objects.create_user("fl-backdate", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        when = "2026-07-28T10:00:00+05:00"
+        response = self.client.post("/api/florist-stock-issues/issue/", {
+            "florist": profile.id, "batch": self.batch.id, "quantity_stems": 20, "created_at": when,
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        issue = FloristStockIssue.objects.get(id=response.data["id"])
+        self.assertEqual(issue.created_at.date().isoformat(), "2026-07-28")
+        # sklad harakati ham o'sha kunga tushadi
+        movement = StockMovement.objects.get(reference_type="florist_issue", reference_id=issue.id)
+        self.assertEqual(movement.created_at.date().isoformat(), "2026-07-28")
+        # qoldiqlar odatdagidek o'zgaradi
+        self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=self.batch).remaining_stems, 20)
+
+    def test_florist_issue_without_date_uses_now(self):
+        user = User.objects.create_user("fl-nodate", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        response = self.client.post("/api/florist-stock-issues/issue/", {
+            "florist": profile.id, "batch": self.batch.id, "quantity_stems": 10,
+        }, format="json")
+        issue = FloristStockIssue.objects.get(id=response.data["id"])
+        self.assertEqual(issue.created_at.date(), timezone.localdate())
+
+    def test_florist_return_can_be_backdated(self):
+        user = User.objects.create_user("fl-ret-backdate", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 30}, format="json")
+        response = self.client.post("/api/florist-stock-issues/return/", {
+            "florist": profile.id, "batch": self.batch.id, "quantity_stems": 10,
+            "created_at": "2026-07-29T09:00:00+05:00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(FloristStockIssue.objects.get(id=response.data["id"]).created_at.date().isoformat(), "2026-07-29")
+
+    def test_bulk_issue_can_be_backdated(self):
+        user = User.objects.create_user("fl-bulk-backdate", password="p")
+        profile = FloristProfile.objects.create(user=user, staff_type="florist")
+        second = StockBatch.objects.create(
+            variant=self.batch.variant, batch_number="BD-2", height_cm=50, stems_per_bunch=25,
+            received_stems=100, remaining_stems=100, cost_per_stem=5000,
+            sale_price_per_stem=10000, sale_price_per_bunch=250000,
+        )
+        response = self.client.post("/api/florist-stock-issues/bulk-issue/", {
+            "florist": profile.id,
+            "items": [{"batch": self.batch.id, "quantity_stems": 10}, {"batch": second.id, "quantity_stems": 20}],
+            "created_at": "2026-07-27T08:00:00+05:00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        for row in response.data:
+            self.assertEqual(FloristStockIssue.objects.get(id=row["id"]).created_at.date().isoformat(), "2026-07-27")
+
+    def test_catalog_can_be_backdated(self):
+        profile = self._florist_with_rates("fl-cat-backdate")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "O‘tgan kungi buket", "arrangement_type": "bouquet", "volume": "M",
+            "florist": profile.id, "price": "500000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id}],
+            "created_at": "2026-07-30T12:00:00+05:00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        item = CatalogItem.objects.get(id=response.json()["id"])
+        self.assertEqual(item.created_at.date().isoformat(), "2026-07-30")
+        # tarix yozuvi ham o'sha kunga tushadi
+        self.assertEqual(CatalogHistory.objects.filter(catalog_item=item).first().created_at.date().isoformat(), "2026-07-30")
+
+    def test_backdated_catalog_moves_florist_salary_date(self):
+        profile = self._florist_with_rates("fl-salary-backdate")
+        StockBatch.objects.filter(pk=self.batch.pk).update(remaining_stems=F("remaining_stems") + 100)
+        self.client.post("/api/florist-stock-issues/issue/", {"florist": profile.id, "batch": self.batch.id, "quantity_stems": 100}, format="json")
+        response = self.client.post("/api/catalog/", {
+            "name_uz": "Ish haqi sanasi", "arrangement_type": "bouquet", "volume": "M",
+            "florist": profile.id, "price": "500000", "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id}],
+            "created_at": "2026-07-25T12:00:00+05:00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        entry = FloristSalaryEntry.objects.get(catalog_item_id=response.json()["id"])
+        self.assertEqual(entry.work_date.isoformat(), "2026-07-25")
+
+    def test_catalog_without_date_uses_now(self):
+        created = self.client.post("/api/catalog/", {
+            "name_uz": "Bugungi buket", "arrangement_type": "bouquet", "price": "300000",
+            "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
+        }, format="json")
+        self.assertEqual(created.status_code, 201, created.json())
+        self.assertEqual(CatalogItem.objects.get(id=created.json()["id"]).created_at.date(), timezone.localdate())
+
+    def test_catalog_date_can_be_fixed_later(self):
+        created = self.client.post("/api/catalog/", {
+            "name_uz": "Sanasi tuzatiladi", "arrangement_type": "bouquet", "price": "300000",
+            "quantity_total": 1, "status": "available",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
+        }, format="json").json()
+        response = self.client.patch(f"/api/catalog/{created['id']}/", {"created_at": "2026-07-26T15:00:00+05:00"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(CatalogItem.objects.get(id=created["id"]).created_at.date().isoformat(), "2026-07-26")
+
     def test_batch_usage_summary_is_reported(self):
         batch, item, _ = self._used_batch_with_sale()
         response = self.client.get(f"/api/stock-batches/{batch.id}/usage/")

@@ -1248,6 +1248,7 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
             issue = issue_stock_to_florist(
                 serializer.validated_data["florist"], serializer.validated_data["batch"],
                 serializer.validated_data["quantity_stems"], serializer.validated_data.get("reason", ""), request.user,
+                serializer.validated_data.get("created_at"),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1267,6 +1268,7 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
                 serializer.validated_data["items"],
                 serializer.validated_data.get("reason", ""),
                 request.user,
+                serializer.validated_data.get("created_at"),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1284,6 +1286,7 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
                 serializer.validated_data["florist"], serializer.validated_data["batch"],
                 serializer.validated_data["quantity_stems"], serializer.validated_data.get("reason", ""),
                 request.user, serializer.validated_data.get("kind", "return"),
+                serializer.validated_data.get("created_at"),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
