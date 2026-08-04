@@ -5156,6 +5156,54 @@ class SaleGroupMessageTests(TestCase):
         self.assertIn("100", caption)
         self.assertIn("200", caption)
 
+    def test_branch_sale_goes_to_branch_group_only(self):
+        from unittest.mock import patch
+        # asosiy filial sozlangan, Parkentniki boshqa bot
+        self._configure_group()
+        branch = Branch.objects.create(name="Parkent", sale_bot_token="parkent-token", sale_group_chat_id="-900900")
+        item = self._item(branch=branch)
+        with patch("core.platform_services.telegram_send_photo_with") as sender:
+            sender.return_value = {"ok": True}
+            mark_catalog_sold(item, self.user, 1, payment_type="cash")
+            from .inventory_services import notify_sale_to_group
+            history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+            item.refresh_from_db()
+            notify_sale_to_group(item, history, "cash")
+        self.assertEqual(sender.call_args[0][0], "parkent-token")
+        self.assertEqual(sender.call_args[0][1], "-900900")
+
+    def test_branch_without_group_sends_nothing(self):
+        from unittest.mock import patch
+        self._configure_group()
+        branch = Branch.objects.create(name="Chilonzor")
+        item = self._item(branch=branch)
+        with patch("core.platform_services.telegram_send_photo_with") as sender:
+            mark_catalog_sold(item, self.user, 1, payment_type="cash")
+            from .inventory_services import notify_sale_to_group
+            history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+            item.refresh_from_db()
+            notify_sale_to_group(item, history, "cash")
+        # boshqa filialning guruhiga tushib qolmasligi kerak
+        self.assertEqual(sender.call_count, 0)
+
+    def test_main_branch_sale_uses_main_settings(self):
+        from unittest.mock import patch
+        self._configure_group()
+        Branch.objects.create(name="Parkent", sale_bot_token="parkent-token", sale_group_chat_id="-900900")
+        item = self._item()
+        with patch("core.platform_services.telegram_send_photo_with") as sender:
+            sender.return_value = {"ok": True}
+            self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.assertEqual(sender.call_args[0][0], "test-token")
+        self.assertEqual(sender.call_args[0][1], "-100500")
+
+    def test_branch_token_is_not_exposed_in_api(self):
+        branch = Branch.objects.create(name="Parkent", sale_bot_token="maxfiy-token", sale_group_chat_id="-900900")
+        row = self.client.get(f"/api/branches/{branch.id}/").json()
+        self.assertNotIn("sale_bot_token", row)
+        self.assertNotIn("sale_group_chat_id", row)
+        self.assertTrue(row["sale_group_configured"])
+
     def test_caption_shows_branch_name(self):
         from .inventory_services import sale_group_caption
         branch = Branch.objects.create(name="Parkent")

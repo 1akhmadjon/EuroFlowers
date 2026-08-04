@@ -1864,21 +1864,35 @@ def sale_group_caption(item, history, payment_type, image_url=""):
     return "\n".join(lines)
 
 
+def sale_group_target(item):
+    """Sotuv xabari qaysi bot va guruhga ketadi.
+
+    Har filialning o'z guruhi bor: filial katalogi sotilsa o'sha filialning
+    boti ishlatiladi. Asosiy filial sotuvi umumiy sozlamadagi botga ketadi.
+    Sozlanmagan bo'lsa xabar yuborilmaydi — boshqa filialning guruhiga
+    tushib qolmasligi kerak.
+    """
+    from .models import IntegrationSettings
+
+    if item.branch_id:
+        branch = item.branch
+        return (branch.sale_bot_token or "").strip(), (branch.sale_group_chat_id or "").strip()
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    return (integration.sale_bot_token or "").strip(), (integration.sale_group_chat_id or "").strip()
+
+
 def notify_sale_to_group(item, history, payment_type, image_url=""):
-    """Sotilgan mahsulot rasmini alohida telegram guruhga yuboradi.
+    """Sotilgan mahsulot rasmini o'z filialining telegram guruhiga yuboradi.
 
     Sotuvda rasm yuklanmagan bo'lsa katalogdagi gul rasmi ketadi.
     """
-    from .models import IntegrationSettings
     from .platform_services import telegram_send_photo_with
 
     photo = image_url or item.image_url
     if not photo:
         print(f"SALE_GROUP_NO_IMAGE catalog={item.id}", flush=True)
         return None
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    token = (integration.sale_bot_token or "").strip()
-    chat_id = (integration.sale_group_chat_id or "").strip()
+    token, chat_id = sale_group_target(item)
     if not token or not chat_id:
         print(f"SALE_GROUP_NOT_CONFIGURED catalog={item.id}", flush=True)
         return None

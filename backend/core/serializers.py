@@ -1424,9 +1424,21 @@ class SocialPostSerializer(serializers.ModelSerializer):
 
 
 class BranchSerializer(serializers.ModelSerializer):
+    # Bot tokeni javobda qaytmaydi — faqat yozish uchun.
+    sale_group_configured = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Branch
         fields = "__all__"
+        extra_kwargs = {
+            "sale_bot_token": {"write_only": True, "required": False, "allow_blank": True},
+            "sale_group_chat_id": {"write_only": True, "required": False, "allow_blank": True},
+        }
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_sale_group_configured(self, obj):
+        """Sotuv xabari uchun bot va guruh sozlanganmi."""
+        return bool((obj.sale_bot_token or "").strip() and (obj.sale_group_chat_id or "").strip())
 
 
 def request_user_branch(serializer):

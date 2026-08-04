@@ -20,6 +20,9 @@ class Branch(TimeStampedModel):
     is_main = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     note = models.TextField(blank=True)
+    # Har filialning sotuv xabari o'z guruhiga ketadi.
+    sale_bot_token = models.CharField(max_length=120, blank=True)
+    sale_group_chat_id = models.CharField(max_length=60, blank=True)
 
     class Meta:
         ordering = ["-is_main", "name"]
