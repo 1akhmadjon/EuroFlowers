@@ -2329,6 +2329,106 @@ class DebtPayRequestSerializer(serializers.Serializer):
     paid_at = serializers.DateTimeField(required=False, help_text="Berilmasa hozirgi vaqt.")
 
 
+class CatalogSaleRowSerializer(serializers.ModelSerializer):
+    """Katalog sahifasidagi sotuv tarixi qatori."""
+
+    catalog_item = serializers.IntegerField(source="catalog_item_id", read_only=True)
+    catalog_name = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
+    arrangement_type = serializers.SerializerMethodField()
+    volume = serializers.SerializerMethodField()
+    volume_label = serializers.SerializerMethodField()
+    catalog_kind = serializers.SerializerMethodField()
+    branch_name = serializers.SerializerMethodField()
+    florist_name = serializers.SerializerMethodField()
+    payment_type = serializers.SerializerMethodField()
+    payment_label = serializers.SerializerMethodField()
+    sale_total = serializers.SerializerMethodField()
+    listed_total = serializers.SerializerMethodField()
+    sale_image_url = serializers.SerializerMethodField()
+    sold_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CatalogHistory
+        fields = [
+            "id", "catalog_item", "catalog_name", "image_url", "arrangement_type",
+            "volume", "volume_label", "catalog_kind", "branch_name", "florist_name",
+            "quantity", "listed_unit_price", "sold_unit_price", "listed_total", "sale_total",
+            "discount_amount", "discount_percent", "discount_reason",
+            "payment_type", "payment_label", "sale_image_url", "sold_by", "created_at",
+        ]
+
+    @extend_schema_field(serializers.CharField())
+    def get_catalog_name(self, obj):
+        return obj.catalog_item.name_uz if obj.catalog_item_id else (obj.snapshot or {}).get("catalog", "")
+
+    @extend_schema_field(serializers.CharField())
+    def get_image_url(self, obj):
+        return obj.catalog_item.image_url if obj.catalog_item_id else ""
+
+    @extend_schema_field(serializers.CharField())
+    def get_arrangement_type(self, obj):
+        return obj.catalog_item.arrangement_type if obj.catalog_item_id else ""
+
+    @extend_schema_field(serializers.CharField())
+    def get_volume(self, obj):
+        return obj.catalog_item.volume if obj.catalog_item_id else ""
+
+    @extend_schema_field(serializers.CharField())
+    def get_volume_label(self, obj):
+        from .views import volume_text
+
+        return volume_text(obj.catalog_item.volume) if obj.catalog_item_id else ""
+
+    @extend_schema_field(serializers.CharField())
+    def get_catalog_kind(self, obj):
+        return obj.catalog_item.catalog_kind if obj.catalog_item_id else ""
+
+    @extend_schema_field(serializers.CharField())
+    def get_branch_name(self, obj):
+        item = obj.catalog_item
+        if not item:
+            return ""
+        return item.branch.name if item.branch_id else "Toshkent (asosiy filial)"
+
+    @extend_schema_field(serializers.CharField())
+    def get_florist_name(self, obj):
+        item = obj.catalog_item
+        return str(item.florist) if item and item.florist_id else ""
+
+    @extend_schema_field(serializers.CharField())
+    def get_payment_type(self, obj):
+        from .views import catalog_payment_type
+
+        value = (catalog_payment_type(obj.catalog_item, obj) or "").lower()
+        if value in ["naqd", "cash"]:
+            return "cash"
+        if value in ["karta", "card"]:
+            return "card"
+        return "debt" if value == "debt" else "unknown"
+
+    @extend_schema_field(serializers.CharField())
+    def get_payment_label(self, obj):
+        return {"cash": "Naqd", "card": "Karta", "debt": "Qarz"}.get(self.get_payment_type(obj), "Aniqlanmagan")
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_sale_total(self, obj):
+        return Decimal(obj.sold_unit_price or 0) * Decimal(obj.quantity or 0)
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_listed_total(self, obj):
+        return Decimal(obj.listed_unit_price or 0) * Decimal(obj.quantity or 0)
+
+    @extend_schema_field(serializers.CharField())
+    def get_sale_image_url(self, obj):
+        return (obj.snapshot or {}).get("sale_image_url", "")
+
+    @extend_schema_field(serializers.CharField())
+    def get_sold_by(self, obj):
+        user = obj.created_by
+        return (user.get_full_name() or user.username) if user else ""
+
+
 class CatalogSellRequestSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, required=False, default=1)
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)

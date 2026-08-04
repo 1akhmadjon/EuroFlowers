@@ -3991,6 +3991,78 @@ class ApiTests(TestCase):
         for batch in batches[:2]:
             self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=batch).remaining_stems, 0)
 
+    def test_catalog_sales_history_lists_every_sale(self):
+        # bitta dona sotilgan bo'lsa ham tarixda chiqishi kerak
+        first = self._debt_catalog(name="Tarix A", price="300000", quantity=3)
+        second = self._debt_catalog(name="Tarix B", price="150000", quantity=1)
+        self.client.post(f"/api/catalog/{first.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.client.post(f"/api/catalog/{first.id}/sell/", {"quantity": 2, "payment_type": "card"}, format="json")
+        self.client.post(f"/api/catalog/{second.id}/sell/", {"quantity": 1, "payment_type": "card"}, format="json")
+
+        response = self.client.get("/api/catalog/sales/")
+        self.assertEqual(response.status_code, 200)
+        rows = response.data["results"]
+        self.assertEqual(len(rows), 3)
+        # yangisidan boshlanadi
+        self.assertEqual(rows[0]["catalog_name"], "Tarix B")
+        totals = response.data["totals"]
+        self.assertEqual(totals["sales_count"], 3)
+        self.assertEqual(totals["quantity"], 4)
+        self.assertEqual(totals["revenue"], Decimal("1050000.00"))
+        self.assertEqual(totals["cash_total"], Decimal("300000.00"))
+        self.assertEqual(totals["card_total"], Decimal("750000.00"))
+
+    def test_catalog_sales_row_has_page_fields(self):
+        item = self._debt_catalog(name="Qatordagi maydonlar", price="300000", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "card", "sale_image_url": "https://example.com/s.jpg",
+        }, format="json")
+        row = self.client.get("/api/catalog/sales/").data["results"][0]
+        self.assertEqual(row["catalog_item"], item.id)
+        self.assertEqual(row["catalog_name"], "Qatordagi maydonlar")
+        self.assertEqual(row["quantity"], 1)
+        self.assertEqual(row["sale_total"], Decimal("300000.00"))
+        self.assertEqual(row["payment_label"], "Karta")
+        self.assertEqual(row["sale_image_url"], "https://example.com/s.jpg")
+        self.assertEqual(row["branch_name"], "Toshkent (asosiy filial)")
+        self.assertTrue(row["created_at"].endswith("+05:00"))
+
+    def test_single_catalog_sales_history(self):
+        first = self._debt_catalog(name="Faqat shu", price="300000", quantity=2)
+        other = self._debt_catalog(name="Boshqasi", price="150000", quantity=1)
+        self.client.post(f"/api/catalog/{first.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.client.post(f"/api/catalog/{first.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.client.post(f"/api/catalog/{other.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        response = self.client.get(f"/api/catalog/{first.id}/sales/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 2)
+        self.assertEqual(response.data["totals"]["quantity"], 2)
+        self.assertEqual(response.data["totals"]["revenue"], Decimal("600000.00"))
+
+    def test_catalog_sales_can_be_filtered(self):
+        item = self._debt_catalog(name="Filtrli", price="300000", quantity=2)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "card"}, format="json")
+        cash = self.client.get("/api/catalog/sales/?payment_type=cash")
+        self.assertEqual(cash.data["totals"]["sales_count"], 1)
+        self.assertEqual(cash.data["totals"]["cash_total"], Decimal("300000.00"))
+        named = self.client.get("/api/catalog/sales/?search=Filtrli")
+        self.assertEqual(named.data["totals"]["sales_count"], 2)
+        empty = self.client.get("/api/catalog/sales/?date_from=2020-01-01&date_to=2020-01-02")
+        self.assertEqual(empty.data["totals"]["sales_count"], 0)
+
+    def test_branch_user_sees_only_own_catalog_sales(self):
+        item = self._main_catalog(quantity=4, price="300000")
+        transfer = self.client.post(f"/api/catalog/{item.id}/transfer/", {"branch": self._parkent().id, "quantity": 2, "price": "500000"}, format="json")
+        target = CatalogItem.objects.get(id=transfer.data["target_item"])
+        mark_catalog_sold(item, self.user, quantity=1)
+        mark_catalog_sold(target, self.user, quantity=1)
+        client = self._parkent_client("parkent-sales-eye")
+        rows = client.get("/api/catalog/sales/").data["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["branch_name"], "Parkent filiali")
+        self.assertEqual(len(self.client.get("/api/catalog/sales/").data["results"]), 1)
+
     def test_api_returns_local_time_everywhere(self):
         # sotuv vaqti hamma endpointda bir xil, mahalliy vaqtda (+05:00) chiqishi kerak
         item = self._debt_catalog(name="Vaqt buketi", quantity=1)

@@ -31,7 +31,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import Debt, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
 from .inventory_services import store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
@@ -2336,6 +2336,85 @@ class CatalogItemViewSet(ScopedViewSet):
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(CatalogTransferSerializer(transfer).data, status=status.HTTP_201_CREATED)
+
+    def _catalog_sales_rows(self, request, item=None):
+        """Katalogdan sotilganlar tarixi. Bitta dona sotilgan bo'lsa ham chiqadi."""
+        rows = (
+            CatalogHistory.objects.filter(action="sold", quantity__gt=0)
+            .select_related("catalog_item__branch", "catalog_item__florist__user", "created_by")
+        )
+        if item is not None:
+            rows = rows.filter(catalog_item=item)
+        else:
+            rows = rows.filter(catalog_item__in=self.get_queryset())
+        date_from, date_to = parse_date_range_params(request)
+        if date_from:
+            rows = rows.filter(created_at__date__gte=date_from)
+        if date_to:
+            rows = rows.filter(created_at__date__lte=date_to)
+        payment = (request.query_params.get("payment_type") or "").strip().lower()
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            rows = rows.filter(catalog_item__name_uz__icontains=search)
+        rows = list(rows.order_by("-created_at", "-id"))
+        if payment in ["cash", "card", "debt", "unknown"]:
+            serializer = CatalogSaleRowSerializer()
+            rows = [row for row in rows if serializer.get_payment_type(row) == payment]
+        return rows, date_from, date_to
+
+    @staticmethod
+    def _sales_totals(rows):
+        serializer = CatalogSaleRowSerializer()
+        totals = {
+            "sales_count": len(rows),
+            "quantity": sum(int(row.quantity or 0) for row in rows),
+            "revenue": sum((serializer.get_sale_total(row) for row in rows), Decimal("0")),
+            "discount_total": sum((Decimal(row.discount_amount or 0) for row in rows), Decimal("0")),
+            "cash_total": Decimal("0"),
+            "card_total": Decimal("0"),
+            "debt_total": Decimal("0"),
+        }
+        for row in rows:
+            key = serializer.get_payment_type(row)
+            if key in ["cash", "card", "debt"]:
+                totals[f"{key}_total"] += serializer.get_sale_total(row)
+        return totals
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("date_from", str, description="Sana boshi (YYYY-MM-DD)"),
+            OpenApiParameter("date_to", str, description="Sana oxiri"),
+            OpenApiParameter("payment_type", str, description="cash, card, debt yoki unknown"),
+            OpenApiParameter("search", str, description="Katalog nomi bo‘yicha"),
+        ],
+        responses=CatalogSaleRowSerializer(many=True),
+    )
+    @action(detail=False, methods=["get"], url_path="sales")
+    def sales(self, request):
+        """Katalog sahifasi uchun sotuv tarixi: qachon, qaysi katalogdan, nechta."""
+        rows, date_from, date_to = self._catalog_sales_rows(request)
+        totals = self._sales_totals(rows)
+        page = self.paginate_queryset(rows)
+        data = CatalogSaleRowSerializer(page if page is not None else rows, many=True).data
+        if page is not None:
+            response = self.get_paginated_response(data)
+            response.data["totals"] = totals
+            response.data["period"] = {
+                "date_from": date_from.isoformat() if date_from else None,
+                "date_to": date_to.isoformat() if date_to else None,
+            }
+            return response
+        return Response({"results": data, "totals": totals})
+
+    @extend_schema(responses=CatalogSaleRowSerializer(many=True))
+    @action(detail=True, methods=["get"], url_path="sales")
+    def item_sales(self, request, pk=None):
+        """Bitta katalogning sotuv tarixi."""
+        rows, _, _ = self._catalog_sales_rows(request, item=self.get_object())
+        return Response({
+            "results": CatalogSaleRowSerializer(rows, many=True).data,
+            "totals": self._sales_totals(rows),
+        })
 
     @extend_schema(request=CatalogSellRequestSerializer, responses=CatalogItemSerializer)
     @action(detail=True, methods=["post"])
