@@ -399,6 +399,8 @@ def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_ma
         "unknown_count": 0,
         "mixed_count": 0,
         "mixed_quantity": 0,
+        "delivery_total": Decimal("0"),
+        "delivery_count": 0,
         "discount_total": Decimal("0"),
         "discounted_sales_count": 0,
         "discounted_quantity": 0,
@@ -412,6 +414,12 @@ def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_ma
     }
 
 
+def sale_delivery_amount(history):
+    """Sotuvda olingan dastafka summasi."""
+    snapshot = (history.snapshot or {}) if history is not None else {}
+    return Decimal(str(snapshot.get("delivery_amount") or 0))
+
+
 def sale_payment_split(history, payment, sale_total):
     """Sotuv pulini to'lov usullariga ajratadi.
 
@@ -420,15 +428,16 @@ def sale_payment_split(history, payment, sale_total):
     yoziladi.
     Qaytadi: ({usul: summa}, sonlar yoziladigan usul, aralashmi)
     """
+    money_total = sale_total + sale_delivery_amount(history)
     if payment != "mixed":
-        return {payment: sale_total}, payment, False
+        return {payment: money_total}, payment, False
     snapshot = (history.snapshot or {}) if history is not None else {}
     cash = Decimal(str(snapshot.get("payment_cash") or 0))
     card = Decimal(str(snapshot.get("payment_card") or 0))
     if cash + card <= 0:
-        return {"unknown": sale_total}, "unknown", False
+        return {"unknown": money_total}, "unknown", False
     # yaxlitlash farqi bo'lsa katta ulushga qo'shiladi
-    diff = sale_total - (cash + card)
+    diff = money_total - (cash + card)
     if diff:
         if cash >= card:
             cash += diff
@@ -452,6 +461,10 @@ def add_sale_to_bucket(bucket, payment, quantity, stems, sale_total, discount, c
     if is_mixed:
         bucket["mixed_count"] += 1
         bucket["mixed_quantity"] += quantity
+    delivery = sale_delivery_amount(history)
+    if delivery:
+        bucket["delivery_total"] += delivery
+        bucket["delivery_count"] += 1
     bucket["discount_total"] += discount
     bucket["cost_total"] += cost_total
     bucket["flower_cost_total"] += cost_breakdown["flower_cost"]
@@ -564,6 +577,7 @@ def accounting_report_data(request):
             "material_cost": cost_breakdown["material_cost"],
             "florist_fee_cost": cost_breakdown["florist_fee_cost"],
             "net_profit": sale_total - cost_total,
+            "delivery_amount": sale_delivery_amount(history),
             "payment_type": payment,
             "payment_label": payment_label(payment),
             "discount_amount": discount,
@@ -617,8 +631,10 @@ def accounting_report_data(request):
             main_bucket["waste_stems"] += waste
             main_bucket["waste_cost_total"] += cost
     summary["net_profit"] = summary["total_sales"] - summary["cost_total"]
+    summary["received_total"] = summary["total_sales"] + summary["delivery_total"]
     for bucket in branch_buckets.values():
         bucket["net_profit"] = bucket["total_sales"] - bucket["cost_total"]
+        bucket["received_total"] = bucket["total_sales"] + bucket["delivery_total"]
         bucket["share_percent"] = (
             (bucket["total_sales"] / summary["total_sales"] * 100).quantize(Decimal("0.01"))
             if summary["total_sales"] else Decimal("0")
@@ -2410,16 +2426,21 @@ class CatalogItemViewSet(ScopedViewSet):
             "card_total": Decimal("0"),
             "debt_total": Decimal("0"),
             "mixed_count": 0,
+            "delivery_total": Decimal("0"),
+            "received_total": Decimal("0"),
         }
         for row in rows:
             key = serializer.get_payment_type(row)
+            delivery = serializer.get_delivery_amount(row)
+            totals["delivery_total"] += delivery
             if key == "mixed":
                 parts = serializer.get_payment_breakdown(row) or {}
                 totals["cash_total"] += parts.get("cash", Decimal("0"))
                 totals["card_total"] += parts.get("card", Decimal("0"))
                 totals["mixed_count"] += 1
             elif key in ["cash", "card", "debt"]:
-                totals[f"{key}_total"] += serializer.get_sale_total(row)
+                totals[f"{key}_total"] += serializer.get_sale_total(row) + delivery
+        totals["received_total"] = totals["revenue"] + totals["delivery_total"]
         return totals
 
     @extend_schema(
@@ -2464,17 +2485,20 @@ class CatalogItemViewSet(ScopedViewSet):
         serializer = CatalogSellRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         target = self.get_object()
+        delivery_amount = Decimal(str(serializer.validated_data.get("delivery_amount") or 0))
         if serializer.validated_data.get("payment_type") == "mixed":
-            # aralash to'lovda naqd va karta yig'indisi sotuv summasiga teng bo'lishi kerak
+            # aralash to'lovda naqd va karta yig'indisi tovar summasi bilan
+            # dastafka summasining yig'indisiga teng bo'lishi kerak
             quantity = int(serializer.validated_data.get("quantity", 1) or 1)
             unit = serializer.validated_data.get("sale_price")
             unit = Decimal(str(unit)) if unit not in [None, ""] else Decimal(target.price or 0)
-            expected = (unit * Decimal(quantity)).quantize(Decimal("0.01"))
+            expected = (unit * Decimal(quantity) + delivery_amount).quantize(Decimal("0.01"))
             given = (serializer.validated_data["cash_amount"] + serializer.validated_data["card_amount"]).quantize(Decimal("0.01"))
             if given != expected:
+                extra = f" (tovar {unit * Decimal(quantity)} + dastafka {delivery_amount})" if delivery_amount else ""
                 return Response({
-                    "detail": f"Naqd va karta yig‘indisi sotuv summasiga teng emas. "
-                              f"Sotuv: {expected}, kiritilgan: {given}",
+                    "detail": f"Naqd va karta yig‘indisi olinadigan summaga teng emas. "
+                              f"Olinadi: {expected}{extra}, kiritilgan: {given}",
                 }, status=status.HTTP_400_BAD_REQUEST)
         try:
             item = mark_catalog_sold(
@@ -2491,13 +2515,16 @@ class CatalogItemViewSet(ScopedViewSet):
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        if serializer.validated_data.get("payment_type") == "mixed":
+        if serializer.validated_data.get("payment_type") == "mixed" or delivery_amount:
             row = CatalogHistory.objects.filter(catalog_item=item, action="sold").order_by("-created_at", "-id").first()
             if row:
                 snapshot = row.snapshot or {}
-                snapshot["payment_type"] = "mixed"
-                snapshot["payment_cash"] = str(serializer.validated_data["cash_amount"])
-                snapshot["payment_card"] = str(serializer.validated_data["card_amount"])
+                if serializer.validated_data.get("payment_type") == "mixed":
+                    snapshot["payment_type"] = "mixed"
+                    snapshot["payment_cash"] = str(serializer.validated_data["cash_amount"])
+                    snapshot["payment_card"] = str(serializer.validated_data["card_amount"])
+                if delivery_amount:
+                    snapshot["delivery_amount"] = str(delivery_amount)
                 row.snapshot = snapshot
                 row.save(update_fields=["snapshot", "updated_at"])
         image_url = store_sale_image(

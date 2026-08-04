@@ -2347,6 +2347,8 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
     sale_total = serializers.SerializerMethodField()
     listed_total = serializers.SerializerMethodField()
     sale_image_url = serializers.SerializerMethodField()
+    delivery_amount = serializers.SerializerMethodField()
+    received_total = serializers.SerializerMethodField()
     sold_by = serializers.SerializerMethodField()
 
     class Meta:
@@ -2356,7 +2358,8 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
             "volume", "volume_label", "catalog_kind", "branch_name", "florist_name",
             "quantity", "listed_unit_price", "sold_unit_price", "listed_total", "sale_total",
             "discount_amount", "discount_percent", "discount_reason",
-            "payment_type", "payment_label", "payment_breakdown", "sale_image_url", "sold_by", "created_at",
+            "payment_type", "payment_label", "payment_breakdown",
+            "delivery_amount", "received_total", "sale_image_url", "sold_by", "created_at",
         ]
 
     @extend_schema_field(serializers.CharField())
@@ -2434,6 +2437,15 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
     def get_listed_total(self, obj):
         return Decimal(obj.listed_unit_price or 0) * Decimal(obj.quantity or 0)
 
+    @extend_schema_field(serializers.DecimalField(max_digits=12, decimal_places=2))
+    def get_delivery_amount(self, obj):
+        return Decimal(str((obj.snapshot or {}).get("delivery_amount") or 0))
+
+    @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
+    def get_received_total(self, obj):
+        """Mijozdan olingan umumiy summa: tovar va dastafka birga."""
+        return self.get_sale_total(obj) + self.get_delivery_amount(obj)
+
     @extend_schema_field(serializers.CharField())
     def get_sale_image_url(self, obj):
         return (obj.snapshot or {}).get("sale_image_url", "")
@@ -2452,6 +2464,11 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     # Aralash to'lov: bir qismi naqd, bir qismi karta
     cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
     card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
+    # Dastafka olingan bo'lsa. Tovar savdosiga kirmaydi, alohida hisoblanadi.
+    delivery_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"),
+        help_text="Yetkazib berish uchun olingan summa. Kuryerga beriladi, sof foydaga ta'sir qilmaydi.",
+    )
     sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
     reservation = serializers.PrimaryKeyRelatedField(queryset=Reservation.objects.all(), required=False, allow_null=True)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
