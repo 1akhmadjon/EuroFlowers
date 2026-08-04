@@ -1381,7 +1381,14 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
         quantity = int(quantity or 1)
         if quantity < 1:
             raise ValueError("Sotilgan son 1 dan kam bo‘lmasligi kerak")
-        if item.quantity_sold + quantity > item.quantity_total:
+        # chiqitga chiqqan dona ham band hisoblanadi, uni qayta sotib bo'lmaydi
+        available = int(item.quantity_total or 0) - int(item.quantity_sold or 0) - int(item.quantity_wasted or 0)
+        if quantity > available:
+            if item.quantity_wasted:
+                raise ValueError(
+                    f"Katalogda sotish uchun atigi {max(available, 0)} dona qolgan "
+                    f"({item.quantity_wasted} ta chiqitga chiqarilgan)"
+                )
             raise ValueError("Sotilgan son katalogdagi umumiy sondan oshib ketdi")
         listed_price = Decimal(item.price or 0)
         sold_price = Decimal(str(sale_price)) if sale_price not in [None, ""] else listed_price
