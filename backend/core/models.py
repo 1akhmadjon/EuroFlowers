@@ -717,22 +717,9 @@ class Expense(TimeStampedModel):
     ko'rsatilmasa kiritilgan payt olinadi.
     """
 
-    CATEGORY_CHOICES = [
-        ("rent", "Ijara"),
-        ("utilities", "Kommunal (svet, suv, gaz)"),
-        ("salary", "Oylik / avans"),
-        ("transport", "Transport / dastafka"),
-        ("supplies", "Xo‘jalik mollari"),
-        ("marketing", "Reklama"),
-        ("tax", "Soliq / yig‘im"),
-        ("repair", "Ta’mirlash"),
-        ("food", "Oshxona"),
-        ("other", "Boshqa"),
-    ]
     METHOD_CHOICES = [("cash", "Naqd"), ("card", "Karta"), ("transfer", "O‘tkazma")]
 
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
-    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default="other")
     destination = models.CharField(max_length=200, help_text="Qayerga ketdi")
     note = models.TextField(blank=True)
     payment_method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="cash")
@@ -742,7 +729,7 @@ class Expense(TimeStampedModel):
 
     class Meta:
         ordering = ["-spent_at", "-id"]
-        indexes = [models.Index(fields=["spent_at"]), models.Index(fields=["category", "spent_at"])]
+        indexes = [models.Index(fields=["spent_at"])]
 
     def __str__(self):
         return f"{self.destination} · {self.amount}"

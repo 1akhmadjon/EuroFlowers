@@ -685,20 +685,24 @@ def accounting_report_data(request):
         expenses = expenses.filter(branch=selection["branch"])
     elif selection["mode"] == "main":
         expenses = expenses.filter(branch__isnull=True)
-    expense_rows = {}
-    for expense in expenses.select_related("branch"):
+    expense_rows = []
+    for expense in expenses.select_related("branch").order_by("-spent_at", "-id"):
         amount = Decimal(expense.amount or 0)
         summary["expense_total"] += amount
         summary["expense_count"] += 1
         if expense.branch_id in branch_buckets:
             branch_buckets[expense.branch_id]["expense_total"] += amount
             branch_buckets[expense.branch_id]["expense_count"] += 1
-        row = expense_rows.setdefault(expense.category, {
-            "category": expense.category, "label": expense.get_category_display(),
-            "count": 0, "total": Decimal("0"),
+        expense_rows.append({
+            "id": expense.id,
+            "spent_at": expense.spent_at,
+            "amount": amount,
+            "destination": expense.destination,
+            "note": expense.note,
+            "payment_method": expense.payment_method,
+            "payment_method_label": expense.get_payment_method_display(),
+            "branch_name": expense.branch.name if expense.branch_id else MAIN_BRANCH_LABEL,
         })
-        row["count"] += 1
-        row["total"] += amount
     # chiqitga chiqqan buket haqiqiy yo'qotish, shuning uchun foydadan ayriladi
     summary["net_profit"] = summary["total_sales"] - summary["cost_total"] - summary["catalog_waste_total"]
     summary["net_profit_after_expenses"] = summary["net_profit"] - summary["expense_total"]
@@ -724,7 +728,7 @@ def accounting_report_data(request):
         "by_kind": [{"catalog_kind": key, **value} for key, value in by_kind.items()],
         "by_payment": [{"payment_type": key, **value} for key, value in by_payment.items()],
         "by_volume": sorted(by_volume.values(), key=lambda row: (row["catalog_kind"], row["volume"])),
-        "expenses_by_category": sorted(expense_rows.values(), key=lambda row: -row["total"]),
+        "expenses": expense_rows,
         "discounted_sales": discount_rows,
         "history": history_rows,
         "reservation_payments_summary": reservation_payment_summary,
@@ -2420,7 +2424,7 @@ class ExpenseFilter(django_filters.FilterSet):
 
     class Meta:
         model = Expense
-        fields = ["category", "payment_method", "branch", "created_by"]
+        fields = ["payment_method", "branch", "created_by"]
 
 
 class ExpenseViewSet(ScopedViewSet):
@@ -2455,16 +2459,10 @@ class ExpenseViewSet(ScopedViewSet):
         if not has_page_permission(request.user, "expenses", False):
             return forbidden()
         rows = list(self.filter_queryset(self.get_queryset()))
-        by_category = {}
         by_method = {}
         by_day = {}
         for row in rows:
             amount = Decimal(row.amount or 0)
-            category = by_category.setdefault(row.category, {
-                "category": row.category, "label": row.get_category_display(), "count": 0, "total": Decimal("0"),
-            })
-            category["count"] += 1
-            category["total"] += amount
             method = by_method.setdefault(row.payment_method, {
                 "payment_method": row.payment_method, "label": row.get_payment_method_display(),
                 "count": 0, "total": Decimal("0"),
@@ -2487,17 +2485,15 @@ class ExpenseViewSet(ScopedViewSet):
                 "total": total,
                 "average": (total / len(rows)).quantize(Decimal("0.01")) if rows else Decimal("0"),
             },
-            "by_category": sorted(by_category.values(), key=lambda row: -row["total"]),
             "by_payment_method": sorted(by_method.values(), key=lambda row: -row["total"]),
             "by_day": sorted(by_day.values(), key=lambda row: row["date"], reverse=True),
         }))
 
-    @extend_schema(responses=OpenApiResponse(description="Rasxod turlari ro‘yxati"))
-    @action(detail=False, methods=["get"], url_path="categories")
-    def categories(self, request):
-        """Formadagi tanlov ro'yxatlari."""
+    @extend_schema(responses=OpenApiResponse(description="To‘lov usullari ro‘yxati"))
+    @action(detail=False, methods=["get"], url_path="options")
+    def options_list(self, request):
+        """Formadagi tanlov ro'yxati."""
         return Response({
-            "categories": [{"value": value, "label": label} for value, label in Expense.CATEGORY_CHOICES],
             "payment_methods": [{"value": value, "label": label} for value, label in Expense.METHOD_CHOICES],
         })
 

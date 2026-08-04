@@ -2324,7 +2324,6 @@ class DebtSerializer(serializers.ModelSerializer):
 class ExpenseSerializer(serializers.ModelSerializer):
     """Rasxod qatori. Sana yuborilmasa hozirgi vaqt qo'yiladi."""
 
-    category_label = serializers.SerializerMethodField(read_only=True)
     payment_method_label = serializers.SerializerMethodField(read_only=True)
     branch_name = serializers.SerializerMethodField(read_only=True)
     created_by_detail = UserSerializer(source="created_by", read_only=True)
@@ -2337,10 +2336,6 @@ class ExpenseSerializer(serializers.ModelSerializer):
             "spent_at": {"required": False, "help_text": "Berilmasa kiritilgan payt olinadi."},
             "destination": {"help_text": "Pul qayerga ketdi."},
         }
-
-    @extend_schema_field(serializers.CharField())
-    def get_category_label(self, obj):
-        return obj.get_category_display()
 
     @extend_schema_field(serializers.CharField())
     def get_payment_method_label(self, obj):

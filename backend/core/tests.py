@@ -4998,7 +4998,7 @@ class ExpenseApiTests(TestCase):
         self.client.force_authenticate(self.user)
 
     def _create(self, **overrides):
-        payload = {"amount": "150000", "destination": "Ijara — avgust", "category": "rent"}
+        payload = {"amount": "150000", "destination": "Ijara — avgust"}
         payload.update(overrides)
         return self.client.post("/api/expenses/", payload, format="json")
 
@@ -5009,7 +5009,7 @@ class ExpenseApiTests(TestCase):
         self.assertLess((timezone.now() - expense.spent_at).total_seconds(), 60)
         self.assertEqual(expense.created_by, self.user)
         self.assertEqual(expense.payment_method, "cash")
-        self.assertEqual(response.json()["category_label"], "Ijara")
+        self.assertEqual(response.json()["payment_method_label"], "Naqd")
 
     def test_expense_keeps_chosen_date(self):
         chosen = timezone.now() - timedelta(days=9)
@@ -5023,39 +5023,37 @@ class ExpenseApiTests(TestCase):
         self.assertEqual(self._create(amount="0").status_code, 400)
         self.assertEqual(self._create(amount="-5000").status_code, 400)
 
-    def test_expense_summary_groups_by_category_method_and_day(self):
+    def test_expense_summary_groups_by_method_and_day(self):
         today = timezone.now()
-        self._create(amount="150000", category="rent", destination="Ijara")
-        self._create(amount="50000", category="transport", destination="Kuryer", payment_method="card")
-        self._create(amount="30000", category="transport", destination="Benzin", spent_at=(today - timedelta(days=40)).isoformat())
+        self._create(amount="150000", destination="Ijara")
+        self._create(amount="50000", destination="Kuryer", payment_method="card")
+        self._create(amount="30000", destination="Benzin", spent_at=(today - timedelta(days=40)).isoformat())
         response = self.client.get("/api/expenses/summary/", {"date_from": (today - timedelta(days=3)).date().isoformat()})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["totals"]["expense_count"], 2)
         self.assertEqual(Decimal(data["totals"]["total"]), Decimal("200000"))
-        categories = {row["category"]: Decimal(row["total"]) for row in data["by_category"]}
-        self.assertEqual(categories, {"rent": Decimal("150000"), "transport": Decimal("50000")})
+        self.assertNotIn("by_category", data)
         methods = {row["payment_method"]: Decimal(row["total"]) for row in data["by_payment_method"]}
         self.assertEqual(methods, {"cash": Decimal("150000"), "card": Decimal("50000")})
         self.assertEqual(len(data["by_day"]), 1)
 
     def test_expense_list_filters_by_date_and_search(self):
-        self._create(destination="Svet puli", category="utilities", spent_at=(timezone.now() - timedelta(days=30)).isoformat())
-        self._create(destination="Reklama", category="marketing")
+        self._create(destination="Svet puli", spent_at=(timezone.now() - timedelta(days=30)).isoformat())
+        self._create(destination="Reklama", payment_method="card")
         response = self.client.get("/api/expenses/", {"date_from": timezone.now().date().isoformat()})
         self.assertEqual([row["destination"] for row in response.json()["results"]], ["Reklama"])
         response = self.client.get("/api/expenses/", {"search": "svet"})
         self.assertEqual([row["destination"] for row in response.json()["results"]], ["Svet puli"])
-        response = self.client.get("/api/expenses/", {"category": "marketing"})
+        response = self.client.get("/api/expenses/", {"payment_method": "card"})
         self.assertEqual([row["destination"] for row in response.json()["results"]], ["Reklama"])
 
-    def test_expense_categories_endpoint_lists_choices(self):
-        response = self.client.get("/api/expenses/categories/")
+    def test_expense_options_endpoint_lists_payment_methods(self):
+        response = self.client.get("/api/expenses/options/")
         self.assertEqual(response.status_code, 200)
-        values = [row["value"] for row in response.json()["categories"]]
-        self.assertIn("rent", values)
-        self.assertIn("other", values)
-        self.assertEqual(len(response.json()["payment_methods"]), 3)
+        values = [row["value"] for row in response.json()["payment_methods"]]
+        self.assertEqual(values, ["cash", "card", "transfer"])
+        self.assertNotIn("categories", response.json())
 
     def test_expense_can_be_edited_and_deleted(self):
         created = self._create().json()
@@ -5083,8 +5081,8 @@ class ExpenseApiTests(TestCase):
         item = CatalogItem.objects.create(name_uz="Rasxod buket", arrangement_type="bouquet", catalog_kind="standard", price=Decimal("500000"), quantity_total=1, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=batch, quantity_stems=10)
         mark_catalog_sold(item, self.user, payment_type="cash")
-        self._create(amount="120000", category="rent", destination="Ijara")
-        self._create(amount="80000", category="transport", destination="Kuryer")
+        self._create(amount="120000", destination="Ijara")
+        self._create(amount="80000", destination="Kuryer")
         response = self.client.get("/api/accounting/")
         self.assertEqual(response.status_code, 200)
         summary = response.json()["summary"]
@@ -5094,8 +5092,9 @@ class ExpenseApiTests(TestCase):
             Decimal(summary["net_profit_after_expenses"]),
             Decimal(summary["net_profit"]) - Decimal("200000"),
         )
-        categories = {row["category"]: Decimal(row["total"]) for row in response.json()["expenses_by_category"]}
-        self.assertEqual(categories, {"rent": Decimal("120000"), "transport": Decimal("80000")})
+        rows = response.json()["expenses"]
+        self.assertEqual([row["destination"] for row in rows], ["Kuryer", "Ijara"])
+        self.assertEqual(sum(Decimal(row["amount"]) for row in rows), Decimal("200000"))
 
     def test_accounting_expenses_follow_date_filter(self):
         self._create(amount="70000", destination="Eski rasxod", spent_at=(timezone.now() - timedelta(days=20)).isoformat())
