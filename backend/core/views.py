@@ -31,9 +31,9 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import Debt, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
+from .inventory_services import waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .renderers import to_local
 from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -401,6 +401,8 @@ def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_ma
         "mixed_quantity": 0,
         "delivery_total": Decimal("0"),
         "delivery_count": 0,
+        "catalog_waste_total": Decimal("0"),
+        "catalog_waste_quantity": 0,
         "discount_total": Decimal("0"),
         "discounted_sales_count": 0,
         "discounted_quantity": 0,
@@ -615,6 +617,32 @@ def accounting_report_data(request):
                 "note": payment.note,
                 "created_by": user_full_name(payment.created_by),
             })
+    # Katalogdan chiqitga chiqarilgan buketlar: gul allaqachon yechilgan,
+    # yo'qotish tannarx bo'yicha hisoblanadi.
+    waste_rows = CatalogHistory.objects.filter(action="wasted").select_related("catalog_item__branch")
+    if selection["mode"] == "branch":
+        waste_rows = waste_rows.filter(catalog_item__branch=selection["branch"])
+    elif selection["mode"] == "main":
+        waste_rows = waste_rows.filter(catalog_item__branch__isnull=True)
+    if date_from:
+        waste_rows = waste_rows.filter(created_at__date__gte=date_from)
+    if date_to:
+        waste_rows = waste_rows.filter(created_at__date__lte=date_to)
+    for row in waste_rows:
+        item = row.catalog_item
+        if item is None:
+            continue
+        quantity = int(row.quantity or 0)
+        unit_cost = Decimal(str((row.snapshot or {}).get("waste_unit_cost") or 0))
+        loss = (unit_cost * Decimal(quantity)).quantize(Decimal("0.01"))
+        summary["catalog_waste_total"] += loss
+        summary["catalog_waste_quantity"] += quantity
+        if item.branch_id not in branch_buckets:
+            name = item.branch.name if item.branch_id else MAIN_BRANCH_LABEL
+            branch_buckets[item.branch_id] = blank_accounting_bucket(item.branch_id, name, item.branch_id is None)
+        branch_buckets[item.branch_id]["catalog_waste_total"] += loss
+        branch_buckets[item.branch_id]["catalog_waste_quantity"] += quantity
+
     # Chiqit faqat asosiy skladda bo'ladi, filiallarda gul saqlanmaydi.
     if accounting_includes_main(selection):
         waste_movements = StockMovement.objects.filter(movement_type="waste").select_related("batch")
@@ -630,10 +658,11 @@ def accounting_report_data(request):
             summary["waste_cost_total"] += cost
             main_bucket["waste_stems"] += waste
             main_bucket["waste_cost_total"] += cost
-    summary["net_profit"] = summary["total_sales"] - summary["cost_total"]
+    # chiqitga chiqqan buket haqiqiy yo'qotish, shuning uchun foydadan ayriladi
+    summary["net_profit"] = summary["total_sales"] - summary["cost_total"] - summary["catalog_waste_total"]
     summary["received_total"] = summary["total_sales"] + summary["delivery_total"]
     for bucket in branch_buckets.values():
-        bucket["net_profit"] = bucket["total_sales"] - bucket["cost_total"]
+        bucket["net_profit"] = bucket["total_sales"] - bucket["cost_total"] - bucket["catalog_waste_total"]
         bucket["received_total"] = bucket["total_sales"] + bucket["delivery_total"]
         bucket["share_percent"] = (
             (bucket["total_sales"] / summary["total_sales"] * 100).quantize(Decimal("0.01"))
@@ -2550,6 +2579,22 @@ class CatalogItemViewSet(ScopedViewSet):
                 )
             except (ValueError, TypeError) as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(item).data)
+
+    @extend_schema(request=CatalogWasteRequestSerializer, responses=CatalogItemSerializer)
+    @action(detail=True, methods=["post"], url_path="waste")
+    def waste(self, request, pk=None):
+        """Sotilmay qolgan katalogni chiqitga chiqaradi. O'chirmaydi."""
+        serializer = CatalogWasteRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            item = waste_catalog_item(
+                self.get_object(), request.user,
+                serializer.validated_data.get("quantity", 1),
+                serializer.validated_data.get("reason", ""),
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(self.get_serializer(item).data)
 
     @extend_schema(request=CatalogRestoreFlowersSerializer, responses=CatalogItemSerializer)

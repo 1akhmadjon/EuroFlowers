@@ -1839,3 +1839,55 @@ def notify_sale_to_group(item, history, payment_type, image_url):
         # xabar ketmasa ham sotuv bekor bo'lmaydi
         print(f"SALE_GROUP_SEND_FAILED catalog={item.id} error={error}", flush=True)
         return None
+
+
+def catalog_unit_cost(item):
+    """Katalogning bir donasiga to'g'ri keladigan tannarx."""
+    total = Decimal(item.quantity_total or 1)
+    if total <= 0:
+        return Decimal("0")
+    return (Decimal(item.calculated_cost_price or 0) / total).quantize(Decimal("0.01"))
+
+
+def waste_catalog_item(item, user, quantity=1, reason=""):
+    """Sotilmay qolgan katalogni chiqitga chiqaradi.
+
+    Gul allaqachon katalog yasalganda skladdan yechilgan, shuning uchun sklad
+    qoldig'iga tegilmaydi. Yo'qotish tannarx bo'yicha hisoblanadi va hisob-kitobda
+    alohida ko'rinadi.
+    """
+    quantity = int(quantity or 0)
+    if quantity < 1:
+        raise ValueError("Chiqitga chiqariladigan son 1 dan kam bo‘lmasligi kerak")
+    with transaction.atomic():
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        remaining = int(item.quantity_total or 0) - int(item.quantity_sold or 0) - int(item.quantity_wasted or 0)
+        if quantity > remaining:
+            raise ValueError(f"Katalogda atigi {max(remaining, 0)} dona qolgan")
+        unit_cost = catalog_unit_cost(item)
+        item.quantity_wasted += quantity
+        left = int(item.quantity_total or 0) - int(item.quantity_sold or 0) - int(item.quantity_wasted or 0)
+        fields = ["quantity_wasted", "updated_at"]
+        if left <= 0 and item.status not in ["sold", "archived"]:
+            item.status = "sold" if item.quantity_sold else "archived"
+            fields.append("status")
+        item.save(update_fields=fields)
+        snapshot = catalog_snapshot(item)
+        snapshot["waste_reason"] = reason
+        snapshot["waste_unit_cost"] = str(unit_cost)
+        history = create_catalog_history(
+            item, "wasted", user=user, quantity=quantity,
+            listed_unit_price=item.price, sold_unit_price=Decimal("0"),
+            note=reason or "Chiqitga chiqarildi", snapshot=snapshot,
+        )
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="catalog_wasted", entity_type="CatalogItem", entity_id=str(item.id),
+            summary=f"{item.name_uz} katalogidan {quantity} ta chiqitga chiqarildi",
+            before={"quantity_wasted": item.quantity_wasted - quantity},
+            after={"quantity_wasted": item.quantity_wasted, "quantity": quantity,
+                   "unit_cost": str(unit_cost), "loss": str(unit_cost * Decimal(quantity)),
+                   "reason": reason, "history": history.id},
+        )
+        notify_florist_catalog(item, "Katalog chiqitga chiqdi", f"{item.name_uz} katalogidan {quantity} ta chiqitga chiqarildi.")
+    return item

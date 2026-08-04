@@ -529,6 +529,8 @@ class CatalogItem(TimeStampedModel):
     reservation = models.ForeignKey("Reservation", null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_items")
     quantity_total = models.PositiveIntegerField(default=1)
     quantity_sold = models.PositiveIntegerField(default=0)
+    # Sotilmay qolib, chiqitga chiqarilgan dona soni
+    quantity_wasted = models.PositiveIntegerField(default=0)
     quantity_stock_deducted = models.PositiveIntegerField(default=0)
     sold_at = models.DateTimeField(null=True, blank=True)
     stock_deducted_at = models.DateTimeField(null=True, blank=True)
@@ -571,7 +573,7 @@ class CatalogMaterialUsage(TimeStampedModel):
 
 
 class CatalogHistory(TimeStampedModel):
-    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi")]
+    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("wasted", "Chiqitga chiqarildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi")]
     catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="history")
     reservation = models.ForeignKey("Reservation", null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_history")
     action = models.CharField(max_length=30, choices=ACTION_CHOICES)

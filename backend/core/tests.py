@@ -3991,6 +3991,65 @@ class ApiTests(TestCase):
         for batch in batches[:2]:
             self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=batch).remaining_stems, 0)
 
+    def test_catalog_can_be_wasted_without_deleting(self):
+        # sotilmay qolgan buket chiqitga chiqadi, katalog o'chmaydi
+        item = self._debt_catalog(name="Chiqit savat", price="800000", quantity=5, stems=39)
+        for _ in range(4):
+            self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 4)
+
+        response = self.client.post(f"/api/catalog/{item.id}/waste/", {"quantity": 1, "reason": "Gul so‘lidi"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_wasted, 1)
+        self.assertEqual(item.quantity_total, 5)
+        self.assertEqual(response.data["quantity_remaining"], 0)
+        # katalog o'chmadi
+        self.assertTrue(CatalogItem.objects.filter(pk=item.pk).exists())
+        # tarixda chiqit yozuvi bor
+        row = CatalogHistory.objects.filter(catalog_item=item, action="wasted").first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.quantity, 1)
+        self.assertEqual(row.snapshot.get("waste_reason"), "Gul so‘lidi")
+
+    def test_waste_cannot_exceed_remaining(self):
+        item = self._debt_catalog(name="Ko‘p chiqit", price="300000", quantity=2)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/waste/", {"quantity": 5}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("atigi 1 dona", response.data["detail"])
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_wasted, 0)
+
+    def test_waste_reduces_profit_by_unit_cost(self):
+        item = self._debt_catalog(name="Yo‘qotish", price="300000", quantity=2)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        before = self.client.get("/api/accounting/").data["summary"]
+        unit_cost = (CatalogItem.objects.get(pk=item.pk).calculated_cost_price / 2).quantize(Decimal("0.01"))
+        self.client.post(f"/api/catalog/{item.id}/waste/", {"quantity": 1, "reason": "Sinib qoldi"}, format="json")
+        after = self.client.get("/api/accounting/").data["summary"]
+        self.assertEqual(Decimal(after["catalog_waste_total"]) - Decimal(before["catalog_waste_total"]), unit_cost)
+        self.assertEqual(after["catalog_waste_quantity"] - before["catalog_waste_quantity"], 1)
+        # savdo o'zgarmaydi, foyda esa tannarx qadar kamayadi
+        self.assertEqual(Decimal(after["total_sales"]), Decimal(before["total_sales"]))
+        self.assertEqual(Decimal(before["net_profit"]) - Decimal(after["net_profit"]), unit_cost)
+
+    def test_waste_does_not_touch_stock(self):
+        # gul katalog yasalganda yechilgan, chiqitda yana yechilmaydi
+        item = self._debt_catalog(name="Skladga tegmaydi", price="300000", quantity=2)
+        self.batch.refresh_from_db()
+        before = self.batch.remaining_stems
+        self.client.post(f"/api/catalog/{item.id}/waste/", {"quantity": 1}, format="json")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before)
+
+    def test_wasted_catalog_is_not_sellable_anymore(self):
+        item = self._debt_catalog(name="Sotib bo‘lmaydi", price="300000", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/waste/", {"quantity": 1}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
     def test_delivery_fee_stays_out_of_sales(self):
         # dastafka tovar savdosiga kirmaydi, alohida qatorda turadi
         item = self._debt_catalog(name="Dastafkali", price="300000", quantity=1)

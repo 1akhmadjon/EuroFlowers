@@ -1515,6 +1515,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
     decoration_florist_detail = FloristProfileSerializer(source="decoration_florist", read_only=True)
     customer_detail = serializers.SerializerMethodField(read_only=True)
     branch_name = serializers.SerializerMethodField(read_only=True)
+    quantity_remaining = serializers.SerializerMethodField(read_only=True)
     profit = serializers.SerializerMethodField(read_only=True)
     customer_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=160)
     customer_phone = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=30)
@@ -1538,6 +1539,11 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         if request_user_branch(self):
             data = strip_branch_sensitive_catalog(data)
         return data
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_quantity_remaining(self, obj):
+        """Sotilmagan va chiqitga chiqmagan dona soni."""
+        return max(int(obj.quantity_total or 0) - int(obj.quantity_sold or 0) - int(obj.quantity_wasted or 0), 0)
 
     @extend_schema_field(serializers.DictField())
     def get_profit(self, obj):
@@ -2454,6 +2460,13 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
     def get_sold_by(self, obj):
         user = obj.created_by
         return (user.get_full_name() or user.username) if user else ""
+
+
+class CatalogWasteRequestSerializer(serializers.Serializer):
+    """Sotilmay qolgan katalogni chiqitga chiqarish."""
+
+    quantity = serializers.IntegerField(min_value=1, required=False, default=1)
+    reason = serializers.CharField(required=False, allow_blank=True, help_text="Nega chiqitga chiqdi.")
 
 
 class CatalogSellRequestSerializer(serializers.Serializer):
