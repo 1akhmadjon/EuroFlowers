@@ -271,8 +271,19 @@ def payment_label(value):
     return "Aniqlanmagan"
 
 
-def catalog_history_sale_total(history):
+def catalog_history_received_total(history):
+    """Mijozdan olingan umumiy pul — dastafka ham shu summaning ichida."""
     return Decimal(history.sold_unit_price or 0) * Decimal(history.quantity or 0)
+
+
+def catalog_history_sale_total(history):
+    """Savdo summasi — dastafka ayirilgan.
+
+    Sotuvda kiritilgan narx mijoz to'lagan to'liq pul: 500 000 dan 50 000
+    dastafka bo'lsa, tovar savdosi 450 000 bo'ladi, 50 000 kuryerga ketadi.
+    """
+    total = catalog_history_received_total(history) - sale_delivery_amount(history)
+    return total if total > 0 else Decimal("0")
 
 
 def catalog_history_listed_total(history):
@@ -579,6 +590,7 @@ def accounting_report_data(request):
             "sold_unit_price": history.sold_unit_price,
             "listed_total": catalog_history_listed_total(history),
             "sale_total": sale_total,
+            "received_total": catalog_history_received_total(history),
             "cost_total": cost_total,
             "flower_cost": cost_breakdown["flower_cost"],
             "material_cost": cost_breakdown["material_cost"],
@@ -2639,19 +2651,26 @@ class CatalogItemViewSet(ScopedViewSet):
         serializer.is_valid(raise_exception=True)
         target = self.get_object()
         delivery_amount = Decimal(str(serializer.validated_data.get("delivery_amount") or 0))
+        # Sotuv narxi mijozdan olinadigan to'liq pul: dastafka uning ichida
+        # bo'ladi va savdodan ayriladi, ustiga qo'shilmaydi.
+        quantity = int(serializer.validated_data.get("quantity", 1) or 1)
+        unit = serializer.validated_data.get("sale_price")
+        unit = Decimal(str(unit)) if unit not in [None, ""] else Decimal(target.price or 0)
+        received = (unit * Decimal(quantity)).quantize(Decimal("0.01"))
+        if delivery_amount and delivery_amount >= received:
+            return Response({
+                "delivery_amount": f"Dastafka summasi sotuv summasidan kam bo‘lishi kerak. "
+                                   f"Sotuv: {received}, dastafka: {delivery_amount}",
+            }, status=status.HTTP_400_BAD_REQUEST)
         if serializer.validated_data.get("payment_type") == "mixed":
-            # aralash to'lovda naqd va karta yig'indisi tovar summasi bilan
-            # dastafka summasining yig'indisiga teng bo'lishi kerak
-            quantity = int(serializer.validated_data.get("quantity", 1) or 1)
-            unit = serializer.validated_data.get("sale_price")
-            unit = Decimal(str(unit)) if unit not in [None, ""] else Decimal(target.price or 0)
-            expected = (unit * Decimal(quantity) + delivery_amount).quantize(Decimal("0.01"))
+            # aralash to'lovda naqd va karta yig'indisi mijozdan olinadigan
+            # summaga teng bo'lishi kerak — dastafka ham shu summaning ichida
             given = (serializer.validated_data["cash_amount"] + serializer.validated_data["card_amount"]).quantize(Decimal("0.01"))
-            if given != expected:
-                extra = f" (tovar {unit * Decimal(quantity)} + dastafka {delivery_amount})" if delivery_amount else ""
+            if given != received:
+                extra = f" (shundan {delivery_amount} dastafka)" if delivery_amount else ""
                 return Response({
                     "detail": f"Naqd va karta yig‘indisi olinadigan summaga teng emas. "
-                              f"Olinadi: {expected}{extra}, kiritilgan: {given}",
+                              f"Olinadi: {received}{extra}, kiritilgan: {given}",
                 }, status=status.HTTP_400_BAD_REQUEST)
         try:
             item = mark_catalog_sold(
@@ -3989,7 +4008,7 @@ def catalog_sale_financials(queryset):
         ratio = sold / total if total else Decimal("0")
         sale_rows = list(item.history.filter(action="sold"))
         if sale_rows:
-            revenue += sum(Decimal(row.sold_unit_price or 0) * Decimal(row.quantity or 0) for row in sale_rows)
+            revenue += sum(catalog_history_sale_total(row) for row in sale_rows)
             discount += sum(Decimal(row.discount_amount or 0) for row in sale_rows)
         else:
             revenue += Decimal(item.price or 0) * sold

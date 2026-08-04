@@ -2478,7 +2478,13 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_sale_total(self, obj):
-        return Decimal(obj.sold_unit_price or 0) * Decimal(obj.quantity or 0)
+        """Tovar savdosi — dastafka ayirilgan holda.
+
+        Sotuvda kiritilgan narx mijoz to'lagan to'liq pul, dastafka esa
+        uning ichida bo'ladi va kuryerga ketadi.
+        """
+        total = self.get_received_total(obj) - self.get_delivery_amount(obj)
+        return total if total > 0 else Decimal("0")
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_listed_total(self, obj):
@@ -2490,8 +2496,8 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_received_total(self, obj):
-        """Mijozdan olingan umumiy summa: tovar va dastafka birga."""
-        return self.get_sale_total(obj) + self.get_delivery_amount(obj)
+        """Mijozdan olingan umumiy summa — sotuvda kiritilgan narxning o'zi."""
+        return Decimal(obj.sold_unit_price or 0) * Decimal(obj.quantity or 0)
 
     @extend_schema_field(serializers.CharField())
     def get_sale_image_url(self, obj):
@@ -2518,10 +2524,11 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     # Aralash to'lov: bir qismi naqd, bir qismi karta
     cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
     card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
-    # Dastafka olingan bo'lsa. Tovar savdosiga kirmaydi, alohida hisoblanadi.
+    # Dastafka sotuv summasining ichida bo'ladi: kuryerga ketadi, savdodan ayriladi.
     delivery_amount = serializers.DecimalField(
         max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"),
-        help_text="Yetkazib berish uchun olingan summa. Kuryerga beriladi, sof foydaga ta'sir qilmaydi.",
+        help_text="Sotuv summasining ichidagi yetkazib berish puli. Kuryerga beriladi, "
+                  "savdodan ayriladi — sotuv narxining ustiga qo‘shilmaydi.",
     )
     sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
     reservation = serializers.PrimaryKeyRelatedField(queryset=Reservation.objects.all(), required=False, allow_null=True)

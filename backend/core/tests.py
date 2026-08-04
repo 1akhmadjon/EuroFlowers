@@ -4060,8 +4060,8 @@ class ApiTests(TestCase):
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
         self.assertEqual(response.status_code, 400)
 
-    def test_delivery_fee_stays_out_of_sales(self):
-        # dastafka tovar savdosiga kirmaydi, alohida qatorda turadi
+    def test_delivery_fee_is_subtracted_from_sale(self):
+        # mijoz 300 000 to'laydi, shundan 20 000 kuryerga ketadi
         item = self._debt_catalog(name="Dastafkali", price="300000", quantity=1)
         before = self.client.get("/api/accounting/").data["summary"]
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {
@@ -4069,17 +4069,22 @@ class ApiTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 200, response.data)
         after = self.client.get("/api/accounting/").data["summary"]
-        # tovar savdosi faqat 300 000 ga oshadi
-        self.assertEqual(Decimal(after["total_sales"]) - Decimal(before["total_sales"]), Decimal("300000.00"))
+        # savdoga dastafkasiz 280 000 kiradi
+        self.assertEqual(Decimal(after["total_sales"]) - Decimal(before["total_sales"]), Decimal("280000.00"))
         self.assertEqual(Decimal(after["delivery_total"]) - Decimal(before["delivery_total"]), Decimal("20000.00"))
-        # kassaga esa 320 000 tushadi
-        self.assertEqual(Decimal(after["cash_total"]) - Decimal(before["cash_total"]), Decimal("320000.00"))
+        # kassaga mijoz bergan 300 000 tushadi
+        self.assertEqual(Decimal(after["cash_total"]) - Decimal(before["cash_total"]), Decimal("300000.00"))
         self.assertEqual(Decimal(after["received_total"]),
                          Decimal(after["total_sales"]) + Decimal(after["delivery_total"]))
         self.assertEqual(after["delivery_count"] - before["delivery_count"], 1)
+        row = self.client.get("/api/catalog/sales/").data["results"][0]
+        self.assertEqual(row["sale_total"], Decimal("280000.00"))
+        self.assertEqual(row["received_total"], Decimal("300000.00"))
+        self.assertEqual(row["delivery_amount"], Decimal("20000.00"))
 
-    def test_delivery_fee_does_not_change_profit(self):
-        item = self._debt_catalog(name="Foydaga tegmaydi", price="300000", quantity=1)
+    def test_delivery_fee_lowers_profit_by_its_amount(self):
+        # dastafka kuryerga ketgani uchun foyda o'sha summaga kam bo'ladi
+        item = self._debt_catalog(name="Foydaga tegadi", price="300000", quantity=1)
         before = self.client.get("/api/accounting/").data["summary"]
         self.client.post(f"/api/catalog/{item.id}/sell/", {
             "quantity": 1, "payment_type": "card", "delivery_amount": "25000",
@@ -4088,30 +4093,41 @@ class ApiTests(TestCase):
         gain = Decimal(after["net_profit"]) - Decimal(before["net_profit"])
         sale_gain = Decimal(after["total_sales"]) - Decimal(before["total_sales"])
         cost_gain = Decimal(after["cost_total"]) - Decimal(before["cost_total"])
-        # dastafka kuryerga ketadi — foyda faqat tovardan
+        self.assertEqual(sale_gain, Decimal("275000.00"))
         self.assertEqual(gain, sale_gain - cost_gain)
 
     def test_delivery_fee_with_mixed_payment(self):
         item = self._debt_catalog(name="Aralash dastafka", price="300000", quantity=1)
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {
             "quantity": 1, "payment_type": "mixed",
-            "cash_amount": "100000", "card_amount": "220000", "delivery_amount": "20000",
+            "cash_amount": "100000", "card_amount": "200000", "delivery_amount": "20000",
         }, format="json")
         self.assertEqual(response.status_code, 200, response.data)
         row = self.client.get("/api/catalog/sales/").data["results"][0]
         self.assertEqual(row["delivery_amount"], Decimal("20000.00"))
-        self.assertEqual(row["received_total"], Decimal("320000.00"))
+        self.assertEqual(row["received_total"], Decimal("300000.00"))
+        self.assertEqual(row["sale_total"], Decimal("280000.00"))
         self.assertEqual(row["payment_breakdown"]["cash"], Decimal("100000.00"))
-        self.assertEqual(row["payment_breakdown"]["card"], Decimal("220000.00"))
+        self.assertEqual(row["payment_breakdown"]["card"], Decimal("200000.00"))
 
-    def test_mixed_payment_must_cover_delivery_too(self):
-        item = self._debt_catalog(name="Dastafkasiz yig‘indi", price="300000", quantity=1)
+    def test_mixed_payment_must_equal_received_total(self):
+        item = self._debt_catalog(name="Yig‘indi to‘g‘ri kelmadi", price="300000", quantity=1)
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {
             "quantity": 1, "payment_type": "mixed",
-            "cash_amount": "150000", "card_amount": "150000", "delivery_amount": "20000",
+            "cash_amount": "150000", "card_amount": "130000", "delivery_amount": "20000",
         }, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("dastafka", response.data["detail"])
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 0)
+
+    def test_delivery_cannot_swallow_whole_sale(self):
+        item = self._debt_catalog(name="Dastafka katta", price="300000", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "cash", "delivery_amount": "300000",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("dastafka", response.data["delivery_amount"].lower())
         item.refresh_from_db()
         self.assertEqual(item.quantity_sold, 0)
 
