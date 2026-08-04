@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, Debt, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -2319,6 +2319,47 @@ class DebtSerializer(serializers.ModelSerializer):
             "stems_per_item": stems,
             "stems_total": stems * int(obj.quantity or 1),
         }
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    """Rasxod qatori. Sana yuborilmasa hozirgi vaqt qo'yiladi."""
+
+    category_label = serializers.SerializerMethodField(read_only=True)
+    payment_method_label = serializers.SerializerMethodField(read_only=True)
+    branch_name = serializers.SerializerMethodField(read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = Expense
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+        extra_kwargs = {
+            "spent_at": {"required": False, "help_text": "Berilmasa kiritilgan payt olinadi."},
+            "destination": {"help_text": "Pul qayerga ketdi."},
+        }
+
+    @extend_schema_field(serializers.CharField())
+    def get_category_label(self, obj):
+        return obj.get_category_display()
+
+    @extend_schema_field(serializers.CharField())
+    def get_payment_method_label(self, obj):
+        return obj.get_payment_method_display()
+
+    @extend_schema_field(serializers.CharField())
+    def get_branch_name(self, obj):
+        return obj.branch.name if obj.branch_id else "Asosiy"
+
+    def validate_destination(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Pul qayerga ketganini yozing")
+        return value
+
+    def validate_amount(self, value):
+        if value is None or Decimal(value) <= 0:
+            raise serializers.ValidationError("Summa noldan katta bo‘lishi kerak")
+        return value
 
 
 class StockBatchVariantChangeSerializer(serializers.Serializer):

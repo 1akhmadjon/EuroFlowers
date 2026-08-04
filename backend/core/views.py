@@ -29,9 +29,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import Debt, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .models import Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .permissions import RolePermission, has_page_permission
-from .serializers import backdate_record, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
 from .inventory_services import waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
@@ -413,6 +413,11 @@ def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_ma
         "waste_cost_total": Decimal("0"),
         "waste_stems": 0,
         "net_profit": Decimal("0"),
+        # Qo'lda kiritilgan rasxodlar. net_profit ga tegmaydi — u sotuv foydasi
+        # bo'lib qoladi, rasxod ayrilgani alohida qatorda chiqadi.
+        "expense_total": Decimal("0"),
+        "expense_count": 0,
+        "net_profit_after_expenses": Decimal("0"),
     }
 
 
@@ -658,11 +663,37 @@ def accounting_report_data(request):
             summary["waste_cost_total"] += cost
             main_bucket["waste_stems"] += waste
             main_bucket["waste_cost_total"] += cost
+    # Qo'lda kiritilgan rasxodlar shu davr ichida sarflangan sana bo'yicha olinadi.
+    expenses = Expense.objects.all()
+    if date_from:
+        expenses = expenses.filter(spent_at__date__gte=date_from)
+    if date_to:
+        expenses = expenses.filter(spent_at__date__lte=date_to)
+    if selection["mode"] == "branch":
+        expenses = expenses.filter(branch=selection["branch"])
+    elif selection["mode"] == "main":
+        expenses = expenses.filter(branch__isnull=True)
+    expense_rows = {}
+    for expense in expenses.select_related("branch"):
+        amount = Decimal(expense.amount or 0)
+        summary["expense_total"] += amount
+        summary["expense_count"] += 1
+        if expense.branch_id in branch_buckets:
+            branch_buckets[expense.branch_id]["expense_total"] += amount
+            branch_buckets[expense.branch_id]["expense_count"] += 1
+        row = expense_rows.setdefault(expense.category, {
+            "category": expense.category, "label": expense.get_category_display(),
+            "count": 0, "total": Decimal("0"),
+        })
+        row["count"] += 1
+        row["total"] += amount
     # chiqitga chiqqan buket haqiqiy yo'qotish, shuning uchun foydadan ayriladi
     summary["net_profit"] = summary["total_sales"] - summary["cost_total"] - summary["catalog_waste_total"]
+    summary["net_profit_after_expenses"] = summary["net_profit"] - summary["expense_total"]
     summary["received_total"] = summary["total_sales"] + summary["delivery_total"]
     for bucket in branch_buckets.values():
         bucket["net_profit"] = bucket["total_sales"] - bucket["cost_total"] - bucket["catalog_waste_total"]
+        bucket["net_profit_after_expenses"] = bucket["net_profit"] - bucket["expense_total"]
         bucket["received_total"] = bucket["total_sales"] + bucket["delivery_total"]
         bucket["share_percent"] = (
             (bucket["total_sales"] / summary["total_sales"] * 100).quantize(Decimal("0.01"))
@@ -681,6 +712,7 @@ def accounting_report_data(request):
         "by_kind": [{"catalog_kind": key, **value} for key, value in by_kind.items()],
         "by_payment": [{"payment_type": key, **value} for key, value in by_payment.items()],
         "by_volume": sorted(by_volume.values(), key=lambda row: (row["catalog_kind"], row["volume"])),
+        "expenses_by_category": sorted(expense_rows.values(), key=lambda row: -row["total"]),
         "discounted_sales": discount_rows,
         "history": history_rows,
         "reservation_payments_summary": reservation_payment_summary,
@@ -2363,6 +2395,98 @@ class DebtViewSet(ScopedViewSet):
                 "unpaid_total": sum((row["unpaid_total"] for row in customers), Decimal("0")),
                 "paid_total": sum((row["paid_total"] for row in customers), Decimal("0")),
             },
+        })
+
+
+class ExpenseFilter(django_filters.FilterSet):
+    """Rasxodlar sahifasi filtri: sana oralig'i sarflangan vaqt bo'yicha."""
+
+    date_from = django_filters.DateFilter(field_name="spent_at", lookup_expr="date__gte")
+    date_to = django_filters.DateFilter(field_name="spent_at", lookup_expr="date__lte")
+    min_amount = django_filters.NumberFilter(field_name="amount", lookup_expr="gte")
+    max_amount = django_filters.NumberFilter(field_name="amount", lookup_expr="lte")
+
+    class Meta:
+        model = Expense
+        fields = ["category", "payment_method", "branch", "created_by"]
+
+
+class ExpenseViewSet(ScopedViewSet):
+    """Rasxodlar. Faqat qo'lda kiritiladi: summa, qayerga ketdi, izoh, sana."""
+
+    permission_page = "expenses"
+    write_roles = ["admin"]
+    queryset = Expense.objects.select_related("branch", "created_by").all()
+    serializer_class = ExpenseSerializer
+    filterset_class = ExpenseFilter
+    search_fields = ["destination", "note"]
+    ordering_fields = ["spent_at", "amount", "created_at"]
+    ordering = ["-spent_at", "-id"]
+
+    def perform_create(self, serializer):
+        expense = serializer.save(created_by=self.request.user)
+        write_audit(
+            self.request.user, "expense_created", expense, before={}, after=instance_snapshot(expense),
+            request=self.request, summary=f"Rasxod: {expense.destination} — {expense.amount}",
+        )
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("date_from", str, description="YYYY-MM-DD"),
+            OpenApiParameter("date_to", str, description="YYYY-MM-DD"),
+        ],
+        responses=OpenApiResponse(description="Rasxodlar yig‘indisi"),
+    )
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        """Sahifa tepasidagi kartochkalar: jami, turlar bo'yicha, kunlar bo'yicha."""
+        if not has_page_permission(request.user, "expenses", False):
+            return forbidden()
+        rows = list(self.filter_queryset(self.get_queryset()))
+        by_category = {}
+        by_method = {}
+        by_day = {}
+        for row in rows:
+            amount = Decimal(row.amount or 0)
+            category = by_category.setdefault(row.category, {
+                "category": row.category, "label": row.get_category_display(), "count": 0, "total": Decimal("0"),
+            })
+            category["count"] += 1
+            category["total"] += amount
+            method = by_method.setdefault(row.payment_method, {
+                "payment_method": row.payment_method, "label": row.get_payment_method_display(),
+                "count": 0, "total": Decimal("0"),
+            })
+            method["count"] += 1
+            method["total"] += amount
+            day_key = timezone.localtime(row.spent_at).date().isoformat()
+            day = by_day.setdefault(day_key, {"date": day_key, "count": 0, "total": Decimal("0")})
+            day["count"] += 1
+            day["total"] += amount
+        total = sum((Decimal(row.amount or 0) for row in rows), Decimal("0"))
+        date_from, date_to = parse_date_range_params(request)
+        return Response(json_safe({
+            "period": {
+                "date_from": date_from.isoformat() if date_from else None,
+                "date_to": date_to.isoformat() if date_to else None,
+            },
+            "totals": {
+                "expense_count": len(rows),
+                "total": total,
+                "average": (total / len(rows)).quantize(Decimal("0.01")) if rows else Decimal("0"),
+            },
+            "by_category": sorted(by_category.values(), key=lambda row: -row["total"]),
+            "by_payment_method": sorted(by_method.values(), key=lambda row: -row["total"]),
+            "by_day": sorted(by_day.values(), key=lambda row: row["date"], reverse=True),
+        }))
+
+    @extend_schema(responses=OpenApiResponse(description="Rasxod turlari ro‘yxati"))
+    @action(detail=False, methods=["get"], url_path="categories")
+    def categories(self, request):
+        """Formadagi tanlov ro'yxatlari."""
+        return Response({
+            "categories": [{"value": value, "label": label} for value, label in Expense.CATEGORY_CHOICES],
+            "payment_methods": [{"value": value, "label": label} for value, label in Expense.METHOD_CHOICES],
         })
 
 

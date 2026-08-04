@@ -13,7 +13,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, Debt, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
@@ -4970,3 +4970,120 @@ class ApiTests(TestCase):
         response = self.client.post("/api/leads/reorder-column/", {"status": "new", "lead_ids": [third.id, first.id]}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertIn(second.id, response.json()["missing_ids"])
+
+
+class ExpenseApiTests(TestCase):
+    """Rasxodlar sahifasi: qo'lda kiritish, sana, yig'indi va hisob-kitob."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("expense-admin", password="password", is_superuser=True, is_staff=True)
+        UserProfile.objects.create(user=self.user, role="admin")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _create(self, **overrides):
+        payload = {"amount": "150000", "destination": "Ijara — avgust", "category": "rent"}
+        payload.update(overrides)
+        return self.client.post("/api/expenses/", payload, format="json")
+
+    def test_expense_without_date_takes_current_time(self):
+        response = self._create()
+        self.assertEqual(response.status_code, 201, response.json())
+        expense = Expense.objects.get(pk=response.json()["id"])
+        self.assertLess((timezone.now() - expense.spent_at).total_seconds(), 60)
+        self.assertEqual(expense.created_by, self.user)
+        self.assertEqual(expense.payment_method, "cash")
+        self.assertEqual(response.json()["category_label"], "Ijara")
+
+    def test_expense_keeps_chosen_date(self):
+        chosen = timezone.now() - timedelta(days=9)
+        response = self._create(spent_at=chosen.isoformat())
+        self.assertEqual(response.status_code, 201, response.json())
+        expense = Expense.objects.get(pk=response.json()["id"])
+        self.assertEqual(expense.spent_at.date(), chosen.date())
+
+    def test_expense_requires_destination_and_positive_amount(self):
+        self.assertEqual(self._create(destination="   ").status_code, 400)
+        self.assertEqual(self._create(amount="0").status_code, 400)
+        self.assertEqual(self._create(amount="-5000").status_code, 400)
+
+    def test_expense_summary_groups_by_category_method_and_day(self):
+        today = timezone.now()
+        self._create(amount="150000", category="rent", destination="Ijara")
+        self._create(amount="50000", category="transport", destination="Kuryer", payment_method="card")
+        self._create(amount="30000", category="transport", destination="Benzin", spent_at=(today - timedelta(days=40)).isoformat())
+        response = self.client.get("/api/expenses/summary/", {"date_from": (today - timedelta(days=3)).date().isoformat()})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["totals"]["expense_count"], 2)
+        self.assertEqual(Decimal(data["totals"]["total"]), Decimal("200000"))
+        categories = {row["category"]: Decimal(row["total"]) for row in data["by_category"]}
+        self.assertEqual(categories, {"rent": Decimal("150000"), "transport": Decimal("50000")})
+        methods = {row["payment_method"]: Decimal(row["total"]) for row in data["by_payment_method"]}
+        self.assertEqual(methods, {"cash": Decimal("150000"), "card": Decimal("50000")})
+        self.assertEqual(len(data["by_day"]), 1)
+
+    def test_expense_list_filters_by_date_and_search(self):
+        self._create(destination="Svet puli", category="utilities", spent_at=(timezone.now() - timedelta(days=30)).isoformat())
+        self._create(destination="Reklama", category="marketing")
+        response = self.client.get("/api/expenses/", {"date_from": timezone.now().date().isoformat()})
+        self.assertEqual([row["destination"] for row in response.json()["results"]], ["Reklama"])
+        response = self.client.get("/api/expenses/", {"search": "svet"})
+        self.assertEqual([row["destination"] for row in response.json()["results"]], ["Svet puli"])
+        response = self.client.get("/api/expenses/", {"category": "marketing"})
+        self.assertEqual([row["destination"] for row in response.json()["results"]], ["Reklama"])
+
+    def test_expense_categories_endpoint_lists_choices(self):
+        response = self.client.get("/api/expenses/categories/")
+        self.assertEqual(response.status_code, 200)
+        values = [row["value"] for row in response.json()["categories"]]
+        self.assertIn("rent", values)
+        self.assertIn("other", values)
+        self.assertEqual(len(response.json()["payment_methods"]), 3)
+
+    def test_expense_can_be_edited_and_deleted(self):
+        created = self._create().json()
+        response = self.client.patch(f"/api/expenses/{created['id']}/", {"amount": "200000", "note": "Tuzatildi"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Decimal(response.json()["amount"]), Decimal("200000"))
+        self.assertEqual(self.client.delete(f"/api/expenses/{created['id']}/").status_code, 204)
+        self.assertFalse(Expense.objects.filter(pk=created["id"]).exists())
+
+    def test_expense_page_is_closed_without_permission(self):
+        other = User.objects.create_user("expense-operator", password="password")
+        UserProfile.objects.create(user=other, role="operator")
+        client = APIClient()
+        client.force_authenticate(other)
+        self.assertEqual(client.get("/api/expenses/").status_code, 403)
+        self.assertEqual(client.post("/api/expenses/", {"amount": "1000", "destination": "X"}, format="json").status_code, 403)
+        PagePermission.objects.create(user=other, page="expenses", can_view=True, can_control=False)
+        self.assertEqual(client.get("/api/expenses/").status_code, 200)
+        self.assertEqual(client.post("/api/expenses/", {"amount": "1000", "destination": "X"}, format="json").status_code, 403)
+
+    def test_accounting_reports_expenses_separately(self):
+        flower = Flower.objects.create(name_uz="Atirgul rasxod", slug="rose-expense")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
+        batch = StockBatch.objects.create(variant=variant, batch_number="EXP-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=1000, sale_price_per_stem=5000, sale_price_per_bunch=100000)
+        item = CatalogItem.objects.create(name_uz="Rasxod buket", arrangement_type="bouquet", catalog_kind="standard", price=Decimal("500000"), quantity_total=1, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=batch, quantity_stems=10)
+        mark_catalog_sold(item, self.user, payment_type="cash")
+        self._create(amount="120000", category="rent", destination="Ijara")
+        self._create(amount="80000", category="transport", destination="Kuryer")
+        response = self.client.get("/api/accounting/")
+        self.assertEqual(response.status_code, 200)
+        summary = response.json()["summary"]
+        self.assertEqual(summary["expense_count"], 2)
+        self.assertEqual(Decimal(summary["expense_total"]), Decimal("200000"))
+        self.assertEqual(
+            Decimal(summary["net_profit_after_expenses"]),
+            Decimal(summary["net_profit"]) - Decimal("200000"),
+        )
+        categories = {row["category"]: Decimal(row["total"]) for row in response.json()["expenses_by_category"]}
+        self.assertEqual(categories, {"rent": Decimal("120000"), "transport": Decimal("80000")})
+
+    def test_accounting_expenses_follow_date_filter(self):
+        self._create(amount="70000", destination="Eski rasxod", spent_at=(timezone.now() - timedelta(days=20)).isoformat())
+        self._create(amount="40000", destination="Bugungi rasxod")
+        today = timezone.now().date().isoformat()
+        response = self.client.get("/api/accounting/", {"date_from": today, "date_to": today})
+        self.assertEqual(Decimal(response.json()["summary"]["expense_total"]), Decimal("40000"))
