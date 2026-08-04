@@ -3991,6 +3991,78 @@ class ApiTests(TestCase):
         for batch in batches[:2]:
             self.assertEqual(FloristStockBalance.objects.get(florist=profile, batch=batch).remaining_stems, 0)
 
+    def test_mixed_payment_sale_splits_money(self):
+        # yarmi naqd, yarmi karta
+        item = self._debt_catalog(name="Aralash to‘lov", price="300000", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "mixed",
+            "cash_amount": "100000", "card_amount": "200000",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        report = self.client.get("/api/accounting/")
+        summary = report.data["summary"]
+        self.assertEqual(Decimal(summary["total_sales"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(summary["cash_total"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(summary["card_total"]), Decimal("200000.00"))
+        # sotuv soni ikki marta sanalmaydi
+        self.assertEqual(summary["sales_count"], 1)
+        self.assertEqual(summary["cash_count"] + summary["card_count"], 1)
+        self.assertEqual(summary["mixed_count"], 1)
+
+    def test_mixed_payment_must_match_sale_total(self):
+        item = self._debt_catalog(name="Notog‘ri aralash", price="300000", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "mixed",
+            "cash_amount": "100000", "card_amount": "100000",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("teng emas", response.data["detail"])
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 0)
+
+    def test_mixed_payment_needs_both_amounts(self):
+        item = self._debt_catalog(name="Yarim aralash", price="300000", quantity=1)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "mixed", "cash_amount": "300000",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cash_amount", response.data)
+
+    def test_mixed_payment_works_with_discount_and_quantity(self):
+        item = self._debt_catalog(name="Aralash chegirma", price="300000", quantity=2)
+        response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 2, "sale_price": "250000", "discount_reason": "Aksiya",
+            "payment_type": "mixed", "cash_amount": "200000", "card_amount": "300000",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        summary = self.client.get("/api/accounting/").data["summary"]
+        self.assertEqual(Decimal(summary["total_sales"]), Decimal("500000.00"))
+        self.assertEqual(Decimal(summary["cash_total"]), Decimal("200000.00"))
+        self.assertEqual(Decimal(summary["card_total"]), Decimal("300000.00"))
+        self.assertEqual(summary["total_quantity"], 2)
+
+    def test_mixed_payment_shows_in_sales_history(self):
+        item = self._debt_catalog(name="Aralash tarix", price="300000", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "mixed", "cash_amount": "120000", "card_amount": "180000",
+        }, format="json")
+        row = self.client.get("/api/catalog/sales/").data["results"][0]
+        self.assertEqual(row["payment_type"], "mixed")
+        self.assertEqual(row["payment_label"], "Aralash")
+        self.assertEqual(row["payment_breakdown"]["cash"], Decimal("120000.00"))
+        self.assertEqual(row["payment_breakdown"]["card"], Decimal("180000.00"))
+        totals = self.client.get("/api/catalog/sales/").data["totals"]
+        self.assertEqual(totals["cash_total"], Decimal("120000.00"))
+        self.assertEqual(totals["card_total"], Decimal("180000.00"))
+        self.assertEqual(totals["mixed_count"], 1)
+
+    def test_plain_payments_still_have_no_breakdown(self):
+        item = self._debt_catalog(name="Oddiy naqd", price="300000", quantity=1)
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        row = self.client.get("/api/catalog/sales/").data["results"][0]
+        self.assertEqual(row["payment_type"], "cash")
+        self.assertIsNone(row["payment_breakdown"])
+
     def test_catalog_sales_history_lists_every_sale(self):
         # bitta dona sotilgan bo'lsa ham tarixda chiqishi kerak
         first = self._debt_catalog(name="Tarix A", price="300000", quantity=3)

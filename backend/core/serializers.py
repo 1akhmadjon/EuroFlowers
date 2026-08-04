@@ -2343,6 +2343,7 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
     florist_name = serializers.SerializerMethodField()
     payment_type = serializers.SerializerMethodField()
     payment_label = serializers.SerializerMethodField()
+    payment_breakdown = serializers.SerializerMethodField()
     sale_total = serializers.SerializerMethodField()
     listed_total = serializers.SerializerMethodField()
     sale_image_url = serializers.SerializerMethodField()
@@ -2355,7 +2356,7 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
             "volume", "volume_label", "catalog_kind", "branch_name", "florist_name",
             "quantity", "listed_unit_price", "sold_unit_price", "listed_total", "sale_total",
             "discount_amount", "discount_percent", "discount_reason",
-            "payment_type", "payment_label", "sale_image_url", "sold_by", "created_at",
+            "payment_type", "payment_label", "payment_breakdown", "sale_image_url", "sold_by", "created_at",
         ]
 
     @extend_schema_field(serializers.CharField())
@@ -2405,11 +2406,25 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
             return "cash"
         if value in ["karta", "card"]:
             return "card"
-        return "debt" if value == "debt" else "unknown"
+        if value in ["debt", "mixed"]:
+            return value
+        return "unknown"
 
     @extend_schema_field(serializers.CharField())
     def get_payment_label(self, obj):
-        return {"cash": "Naqd", "card": "Karta", "debt": "Qarz"}.get(self.get_payment_type(obj), "Aniqlanmagan")
+        return {"cash": "Naqd", "card": "Karta", "debt": "Qarz", "mixed": "Aralash"}.get(
+            self.get_payment_type(obj), "Aniqlanmagan")
+
+    @extend_schema_field(serializers.DictField())
+    def get_payment_breakdown(self, obj):
+        """Aralash to'lovda qanchasi naqd, qanchasi karta."""
+        if self.get_payment_type(obj) != "mixed":
+            return None
+        snapshot = obj.snapshot or {}
+        return {
+            "cash": Decimal(str(snapshot.get("payment_cash") or 0)),
+            "card": Decimal(str(snapshot.get("payment_card") or 0)),
+        }
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_sale_total(self, obj):
@@ -2433,7 +2448,10 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, required=False, default=1)
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     discount_reason = serializers.CharField(required=False, allow_blank=True)
-    payment_type = serializers.ChoiceField(choices=["cash", "card", "debt"], required=False)
+    payment_type = serializers.ChoiceField(choices=["cash", "card", "debt", "mixed"], required=False)
+    # Aralash to'lov: bir qismi naqd, bir qismi karta
+    cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
+    card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
     sold_at = serializers.DateTimeField(required=False, help_text="Tarixiy sotuv uchun. Berilmasa hozirgi vaqt.")
     reservation = serializers.PrimaryKeyRelatedField(queryset=Reservation.objects.all(), required=False, allow_null=True)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
@@ -2450,6 +2468,17 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     def validate(self, attrs):
         if "materials" in attrs:
             attrs["materials"] = normalize_catalog_material_rows(attrs["materials"])
+        if attrs.get("payment_type") == "mixed":
+            cash = attrs.get("cash_amount")
+            card = attrs.get("card_amount")
+            if cash is None or card is None:
+                raise serializers.ValidationError({
+                    "cash_amount": "Aralash to‘lovda naqd va karta summasini kiriting",
+                })
+            if cash <= 0 or card <= 0:
+                raise serializers.ValidationError({
+                    "cash_amount": "Aralash to‘lovda ikkala summa ham noldan katta bo‘lishi kerak",
+                })
         if attrs.get("payment_type") == "debt":
             has_customer = attrs.get("customer") is not None
             has_contact = bool((attrs.get("customer_name") or "").strip()) and bool((attrs.get("customer_phone") or "").strip())
