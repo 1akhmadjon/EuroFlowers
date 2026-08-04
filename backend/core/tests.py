@@ -2763,6 +2763,16 @@ class ApiTests(TestCase):
         self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [23, 23, 23])
         self.assertEqual(self._balance(profile), 6)
 
+    def test_reverse_can_empty_the_row_completely(self):
+        # chiqim yopishni butunlay orqaga qaytarish: tarkib 0 ga tushadi
+        profile, made = self._florist_with_leftover(issued=75, per_item=25, items=3)
+        response = self.client.post("/api/florist-stock-balances/adjust/", {
+            "florist": profile.id, "batch": self.batch.id, "direction": "to_florist", "quantity_stems": 75,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(sorted(CatalogComposition.objects.filter(catalog_item__in=made).values_list("quantity_stems", flat=True)), [0, 0, 0])
+        self.assertEqual(self._balance(profile), 75)
+
     def test_reverse_lowers_catalog_cost(self):
         profile, made = self._florist_with_leftover(issued=75, per_item=25, items=3)
         before = CatalogItem.objects.get(pk=made[0].pk).calculated_cost_price

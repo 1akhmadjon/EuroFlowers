@@ -1050,7 +1050,9 @@ def florist_stem_plan(florist, batch=None, direction=TO_CATALOG, quantity_stems=
         else:
             amount = int(quantity_stems or 0)
             # tarkibni nolga tushirmaymiz, kamida bitta gul qolsin
-            caps = {row.id: max(row.quantity_stems - 1, 0) for row, _ in items}
+            # nolgacha qaytarish mumkin: 0 — "chiqim yopilishini kutayapti" degani,
+            # ya'ni yopishni butunlay orqaga qaytarish yo'li
+            caps = {row.id: row.quantity_stems for row, _ in items}
             sign = -1
         plan, leftover = split_stems_over_items(amount, items, caps)
         rows.append({
@@ -1112,7 +1114,7 @@ def adjust_florist_stems(florist, batch=None, direction=TO_CATALOG, quantity_ste
             if direction == TO_CATALOG:
                 plan, leftover = split_stems_over_items(balance.remaining_stems, items)
             else:
-                caps = {row.id: max(row.quantity_stems - 1, 0) for row, _ in items}
+                caps = {row.id: row.quantity_stems for row, _ in items}
                 plan, leftover = split_stems_over_items(quantity_stems, items, caps)
                 if leftover:
                     raise ValueError(
