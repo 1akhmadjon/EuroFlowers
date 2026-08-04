@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
@@ -1805,35 +1806,75 @@ def store_sale_image(uploaded=None, image_url=""):
     return (image_url or "").strip()
 
 
+def md_escape(text):
+    """Telegram Markdown buzilmasligi uchun maxsus belgilarni himoyalaydi."""
+    return re.sub(r"([_*`\[])", r"\\\1", str(text or ""))
+
+
+def money_uz(amount):
+    return f"{Decimal(amount or 0):,.0f}".replace(",", " ")
+
+
 def sale_group_caption(item, history, payment_type, image_url=""):
-    """Guruhga boradigan markdown xabar: naqd yoki karta va sotuv summasi."""
-    labels = {"cash": "Naqd", "card": "Karta", "debt": "Qarz"}
+    """Guruhga boradigan xabar: nima sotildi, qanchaga, qanday to'landi."""
+    from django.utils import timezone
+
+    snapshot = history.snapshot or {}
     quantity = int(history.quantity or 1)
-    total = Decimal(history.sold_unit_price or 0) * Decimal(quantity)
+    received = Decimal(history.sold_unit_price or 0) * Decimal(quantity)
+    delivery = Decimal(str(snapshot.get("delivery_amount") or 0))
+    sale_total = received - delivery
     listed = Decimal(history.listed_unit_price or 0) * Decimal(quantity)
-    lines = [
-        f"*{item.name_uz}*",
-        f"To‘lov: *{labels.get(payment_type, 'Aniqlanmagan')}*",
-        f"Summa: *{total:,.0f} so‘m*".replace(",", " "),
-    ]
-    if quantity > 1:
-        lines.append(f"Soni: {quantity} ta")
-    if listed > total:
-        chegirma = listed - total
-        lines.append(f"Chegirma: {chegirma:,.0f} so‘m".replace(",", " "))
-        if history.discount_reason:
-            lines.append(f"Sabab: {history.discount_reason}")
+
+    lines = [f"\U0001f338 *{md_escape(item.name_uz)}*"]
     if item.branch_id:
-        lines.append(f"Filial: {item.branch.name}")
+        lines.append(f"\U0001f3ec {md_escape(item.branch.name)} filiali")
+    if quantity > 1:
+        lines.append(f"\U0001f9fe Soni: *{quantity} ta*")
+    lines.append(f"\U0001f4b0 Savdo: *{money_uz(sale_total)} so\u2018m*")
+    if delivery:
+        lines.append(f"\U0001f69a Dastafka: {money_uz(delivery)} so\u2018m")
+        lines.append(f"\U0001f9ee Jami olingan: *{money_uz(received)} so\u2018m*")
+
+    if payment_type == "mixed":
+        cash = Decimal(str(snapshot.get("payment_cash") or 0))
+        card = Decimal(str(snapshot.get("payment_card") or 0))
+        lines.append(
+            f"\U0001f500 To\u2018lov: *Aralash* \u2014 \U0001f4b5 {money_uz(cash)} \u00b7 \U0001f4b3 {money_uz(card)}"
+        )
+    else:
+        labels = {
+            "cash": ("\U0001f4b5", "Naqd"),
+            "card": ("\U0001f4b3", "Karta"),
+            "debt": ("\U0001f4dd", "Qarz"),
+        }
+        icon, label = labels.get(payment_type, ("\u2753", "Aniqlanmagan"))
+        lines.append(f"{icon} To\u2018lov: *{label}*")
+
+    if listed > sale_total:
+        lines.append(f"\U0001f3f7 Chegirma: {money_uz(listed - sale_total)} so\u2018m")
+        if history.discount_reason:
+            lines.append(f"\u21b3 {md_escape(history.discount_reason)}")
+
+    seller = history.created_by
+    if seller:
+        name = (f"{seller.first_name} {seller.last_name}".strip() or seller.username)
+        lines.append(f"\U0001f464 Sotdi: {md_escape(name)}")
+    lines.append(f"\U0001f552 {timezone.localtime(history.created_at):%d.%m.%Y %H:%M}")
     return "\n".join(lines)
 
 
-def notify_sale_to_group(item, history, payment_type, image_url):
-    """Sotilgan mahsulot rasmini alohida telegram guruhga yuboradi."""
+def notify_sale_to_group(item, history, payment_type, image_url=""):
+    """Sotilgan mahsulot rasmini alohida telegram guruhga yuboradi.
+
+    Sotuvda rasm yuklanmagan bo'lsa katalogdagi gul rasmi ketadi.
+    """
     from .models import IntegrationSettings
     from .platform_services import telegram_send_photo_with
 
-    if not image_url:
+    photo = image_url or item.image_url
+    if not photo:
+        print(f"SALE_GROUP_NO_IMAGE catalog={item.id}", flush=True)
         return None
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     token = (integration.sale_bot_token or "").strip()
@@ -1841,9 +1882,9 @@ def notify_sale_to_group(item, history, payment_type, image_url):
     if not token or not chat_id:
         print(f"SALE_GROUP_NOT_CONFIGURED catalog={item.id}", flush=True)
         return None
-    caption = sale_group_caption(item, history, payment_type, image_url)
+    caption = sale_group_caption(item, history, payment_type, photo)
     try:
-        return telegram_send_photo_with(token, chat_id, image_url, caption)
+        return telegram_send_photo_with(token, chat_id, photo, caption)
     except Exception as error:
         # xabar ketmasa ham sotuv bekor bo'lmaydi
         print(f"SALE_GROUP_SEND_FAILED catalog={item.id} error={error}", flush=True)

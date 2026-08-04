@@ -5102,3 +5102,131 @@ class ExpenseApiTests(TestCase):
         today = timezone.now().date().isoformat()
         response = self.client.get("/api/accounting/", {"date_from": today, "date_to": today})
         self.assertEqual(Decimal(response.json()["summary"]["expense_total"]), Decimal("40000"))
+
+
+class SaleGroupMessageTests(TestCase):
+    """Sotilganda guruhga ketadigan xabar."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("sale-admin", password="password", first_name="Diyor", last_name="A", is_superuser=True, is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        flower = Flower.objects.create(name_uz="Atirgul guruh", slug="rose-group")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
+        self.batch = StockBatch.objects.create(variant=variant, batch_number="GRP-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=1000, sale_price_per_stem=5000, sale_price_per_bunch=100000)
+
+    def _configure_group(self):
+        IntegrationSettings.objects.update_or_create(pk=1, defaults={"sale_bot_token": "test-token", "sale_group_chat_id": "-100500"})
+
+    def _item(self, **overrides):
+        data = {"name_uz": "Qizil buket", "arrangement_type": "bouquet", "catalog_kind": "standard",
+                "price": Decimal("300000"), "quantity_total": 2, "status": "available",
+                "image_url": "https://example.com/katalog.jpg"}
+        data.update(overrides)
+        item = CatalogItem.objects.create(**data)
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
+        return item
+
+    def test_caption_shows_amount_payment_and_delivery(self):
+        from .inventory_services import sale_group_caption
+        item = self._item()
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "cash", "delivery_amount": "50000",
+        }, format="json")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        caption = sale_group_caption(item, history, "cash")
+        self.assertIn("Qizil buket", caption)
+        self.assertIn("Savdo", caption)
+        self.assertIn("250", caption)          # 300 000 - 50 000 dastafka
+        self.assertIn("Dastafka", caption)
+        self.assertIn("Jami olingan", caption)
+        self.assertIn("Naqd", caption)
+        self.assertIn("Sotdi: Diyor A", caption)
+        self.assertIn("\U0001f338", caption)   # emoji bor
+
+    def test_caption_splits_mixed_payment(self):
+        from .inventory_services import sale_group_caption
+        item = self._item()
+        self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 1, "payment_type": "mixed", "cash_amount": "100000", "card_amount": "200000",
+        }, format="json")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        caption = sale_group_caption(item, history, "mixed")
+        self.assertIn("Aralash", caption)
+        self.assertIn("100", caption)
+        self.assertIn("200", caption)
+
+    def test_caption_shows_branch_name(self):
+        from .inventory_services import sale_group_caption
+        branch = Branch.objects.create(name="Parkent")
+        item = self._item(branch=branch)
+        mark_catalog_sold(item, self.user, 1, payment_type="card")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        item.refresh_from_db()
+        self.assertIn("Parkent", sale_group_caption(item, history, "card"))
+
+    def test_catalog_image_is_used_when_no_sale_photo(self):
+        from unittest.mock import patch
+        self._configure_group()
+        item = self._item()
+        with patch("core.platform_services.telegram_send_photo_with") as sender:
+            sender.return_value = {"ok": True}
+            response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(sender.call_count, 1)
+        self.assertEqual(sender.call_args[0][2], "https://example.com/katalog.jpg")
+
+    def test_nothing_is_sent_without_token(self):
+        from unittest.mock import patch
+        item = self._item()
+        with patch("core.platform_services.telegram_send_photo_with") as sender:
+            self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.assertEqual(sender.call_count, 0)
+
+    def test_sale_still_works_when_telegram_fails(self):
+        from unittest.mock import patch
+        self._configure_group()
+        item = self._item()
+        with patch("core.platform_services.telegram_send_photo_with", side_effect=RuntimeError("tarmoq")):
+            response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 1)
+
+
+class BranchExpenseTests(TestCase):
+    """Filial rasxodi asosiy filialnikidan ajratiladi."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Parkent")
+        self.admin = User.objects.create_user("exp-bosh", password="password", is_superuser=True, is_staff=True)
+        UserProfile.objects.create(user=self.admin, role="admin")
+        self.branch_user = User.objects.create_user("exp-parkent", password="password")
+        UserProfile.objects.create(user=self.branch_user, role="admin", branch=self.branch)
+        PagePermission.objects.create(user=self.branch_user, page="expenses", can_view=True, can_control=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+        self.branch_client = APIClient()
+        self.branch_client.force_authenticate(self.branch_user)
+
+    def test_branch_user_expense_is_tagged_and_isolated(self):
+        self.client.post("/api/expenses/", {"amount": "100000", "destination": "Bosh ofis ijarasi"}, format="json")
+        created = self.branch_client.post("/api/expenses/", {"amount": "70000", "destination": "Parkent svet"}, format="json")
+        self.assertEqual(created.status_code, 201, created.json())
+        self.assertEqual(created.json()["branch"], self.branch.id)
+        self.assertEqual(created.json()["branch_name"], "Parkent")
+        rows = self.branch_client.get("/api/expenses/").json()["results"]
+        self.assertEqual([row["destination"] for row in rows], ["Parkent svet"])
+        self.assertEqual(self.branch_client.get("/api/expenses/summary/").json()["totals"]["expense_count"], 1)
+        all_rows = self.client.get("/api/expenses/").json()["results"]
+        self.assertEqual(len(all_rows), 2)
+
+    def test_accounting_splits_branch_expense(self):
+        self.client.post("/api/expenses/", {"amount": "100000", "destination": "Bosh ofis"}, format="json")
+        self.branch_client.post("/api/expenses/", {"amount": "70000", "destination": "Parkent svet"}, format="json")
+        data = self.client.get("/api/accounting/", {"branch": "all"}).json()
+        self.assertEqual(Decimal(data["summary"]["expense_total"]), Decimal("170000"))
+        buckets = {row["branch_name"]: row for row in data["by_branch"]}
+        self.assertEqual(Decimal(buckets["Parkent"]["expense_total"]), Decimal("70000"))
+        only_branch = self.client.get("/api/accounting/", {"branch": self.branch.id}).json()
+        self.assertEqual(Decimal(only_branch["summary"]["expense_total"]), Decimal("70000"))

@@ -2439,8 +2439,16 @@ class ExpenseViewSet(ScopedViewSet):
     ordering_fields = ["spent_at", "amount", "created_at"]
     ordering = ["-spent_at", "-id"]
 
+    def get_queryset(self):
+        # Filial foydalanuvchisi faqat o'z filialining rasxodini ko'radi,
+        # asosiy filial esa hammasini (kerak bo'lsa ?branch= bilan ajratadi).
+        queryset = super().get_queryset()
+        branch = user_branch(self.request.user)
+        return queryset.filter(branch=branch) if branch else queryset
+
     def perform_create(self, serializer):
-        expense = serializer.save(created_by=self.request.user)
+        branch = user_branch(self.request.user)
+        expense = serializer.save(created_by=self.request.user, **({"branch": branch} if branch else {}))
         write_audit(
             self.request.user, "expense_created", expense, before={}, after=instance_snapshot(expense),
             request=self.request, summary=f"Rasxod: {expense.destination} — {expense.amount}",
@@ -2700,11 +2708,13 @@ class CatalogItemViewSet(ScopedViewSet):
             serializer.validated_data.get("sale_image_url", ""),
         )
         history = CatalogHistory.objects.filter(catalog_item=item, action="sold").order_by("-created_at", "-id").first()
-        if history and image_url:
-            snapshot = history.snapshot or {}
-            snapshot["sale_image_url"] = image_url
-            history.snapshot = snapshot
-            history.save(update_fields=["snapshot", "updated_at"])
+        if history:
+            if image_url:
+                snapshot = history.snapshot or {}
+                snapshot["sale_image_url"] = image_url
+                history.snapshot = snapshot
+                history.save(update_fields=["snapshot", "updated_at"])
+            # rasm yuklanmagan bo'lsa katalogdagi gul rasmi bilan ketadi
             notify_sale_to_group(item, history, serializer.validated_data.get("payment_type", ""), image_url)
         if serializer.validated_data.get("payment_type") == "debt":
             try:
