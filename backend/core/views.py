@@ -9,7 +9,7 @@ from django.db.models.deletion import ProtectedError
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import hashlib
 import hmac
@@ -20,12 +20,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Side, Border
 from openpyxl.utils import get_column_letter
 from urllib.parse import parse_qsl
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, parser_classes, permission_classes
 from rest_framework import serializers
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -1026,17 +1028,46 @@ class FlowerVariantViewSet(ScopedViewSet):
             write_audit(self.request.user, "flowervariant_archived", instance, before=before_changed, after=after_changed, request=self.request)
 
 
-def supplier_rollup_queryset():
+def parse_report_date(value, field):
+    """Query paramdagi sanani o'qiydi. Noto'g'ri format 400 qaytaradi."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        raise DRFValidationError({field: "Sana YYYY-MM-DD ko‘rinishida bo‘lishi kerak"})
+
+
+def supplier_rollup_queryset(date_from=None, date_to=None):
+    """Postavshik bo'yicha yig'ma hisob.
+
+    date_from / date_to berilsa, sotib olingan summa, partiya soni va to'langan
+    summa faqat shu oraliq bo'yicha hisoblanadi. Oxirgi to'lov sanasi esa
+    har doim umumiy tarixdan olinadi.
+    """
     money = DecimalField(max_digits=16, decimal_places=2)
+    batch_range = Q()
+    payment_range = Q()
+    joined_range = Q()
+    if date_from:
+        batch_range &= Q(received_at__gte=date_from)
+        payment_range &= Q(paid_at__gte=date_from)
+        joined_range &= Q(stock_batches__received_at__gte=date_from)
+    if date_to:
+        batch_range &= Q(received_at__lte=date_to)
+        payment_range &= Q(paid_at__lte=date_to)
+        joined_range &= Q(stock_batches__received_at__lte=date_to)
+    joined_filter = joined_range if (date_from or date_to) else None
     purchase = Subquery(
-        StockBatch.objects.filter(supplier=OuterRef("pk"))
+        StockBatch.objects.filter(batch_range, supplier=OuterRef("pk"))
         .values("supplier")
         .annotate(total=Coalesce(Sum(F("received_stems") * F("cost_per_stem"), output_field=money), Value(Decimal("0"), output_field=money)))
         .values("total")[:1],
         output_field=money,
     )
     paid = Subquery(
-        SupplierPayment.objects.filter(supplier=OuterRef("pk"))
+        SupplierPayment.objects.filter(payment_range, supplier=OuterRef("pk"))
         .values("supplier")
         .annotate(total=Coalesce(Sum("amount", output_field=money), Value(Decimal("0"), output_field=money)))
         .values("total")[:1],
@@ -1047,8 +1078,8 @@ def supplier_rollup_queryset():
     # Postavshikdan har safar to'liq to'lab olinadi, qarz tushunchasi yo'q.
     # Shuning uchun faqat umumiy sotib olingan summa hisoblanadi.
     return Supplier.objects.annotate(
-        batches_count=Count("stock_batches", distinct=True),
-        total_received_stems=Coalesce(Sum("stock_batches__received_stems"), 0),
+        batches_count=Count("stock_batches", distinct=True, filter=joined_filter),
+        total_received_stems=Coalesce(Sum("stock_batches__received_stems", filter=joined_filter), 0),
         purchase_total=Coalesce(purchase, zero),
         paid_total=Coalesce(paid, zero),
         last_payment_at=last_paid,
@@ -1056,6 +1087,12 @@ def supplier_rollup_queryset():
 
 
 class SupplierViewSet(ScopedViewSet):
+    """Postavshiklar.
+
+    ?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD berilsa, sotib olingan summa,
+    partiya soni, dona soni va to'langan summa faqat shu oraliq bo'yicha keladi.
+    """
+
     permission_page = "suppliers"
     write_roles = ["admin", "warehouse"]
     queryset = supplier_rollup_queryset()
@@ -1063,6 +1100,24 @@ class SupplierViewSet(ScopedViewSet):
     filterset_fields = ["is_active", "supplier_type"]
     search_fields = ["name", "phone", "notes"]
     ordering_fields = ["name", "purchase_total", "paid_total", "last_payment_at", "created_at"]
+
+    @extend_schema(parameters=[
+        OpenApiParameter("date_from", OpenApiTypes.DATE, description="Shu sanadan boshlab hisoblanadi"),
+        OpenApiParameter("date_to", OpenApiTypes.DATE, description="Shu sanagacha hisoblanadi"),
+    ])
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        date_from = parse_report_date(self.request.query_params.get("date_from"), "date_from")
+        date_to = parse_report_date(self.request.query_params.get("date_to"), "date_to")
+        if date_from and date_to and date_from > date_to:
+            raise DRFValidationError({"date_from": "date_from date_to dan katta bo‘lmasligi kerak"})
+        queryset = supplier_rollup_queryset(date_from, date_to)
+        if not queryset.query.order_by:
+            # annotate GROUP BY dan keyin tartib yo'qoladi, sahifalash barqaror bo'lishi uchun qaytaramiz
+            queryset = queryset.order_by(*(queryset.model._meta.ordering or ["id"]))
+        return queryset
 
 
 class SupplierPaymentViewSet(ScopedViewSet):

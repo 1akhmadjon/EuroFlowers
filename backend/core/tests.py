@@ -1337,6 +1337,88 @@ class CatalogReworkTests(TestCase):
         self.assertIn("yetmayapti", response.data["detail"])
 
 
+class SupplierDateFilterTests(TestCase):
+    """Postavshik hisobini sana oralig'i bo'yicha filtrlash."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("supplier-admin", password="password")
+        UserProfile.objects.update_or_create(user=self.user, defaults={"role": "admin"})
+        for page, _ in PagePermission.PAGE_CHOICES:
+            PagePermission.objects.update_or_create(user=self.user, page=page, defaults={"can_view": True, "can_control": True})
+        self.supplier = Supplier.objects.create(name="Davron Aka")
+        flower = Flower.objects.create(name_uz="Atirgul", slug="rose-supplier")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Prut", color_uz="Oq")
+        # 04.08 — 100 dona × 1000 = 100 000
+        StockBatch.objects.create(
+            variant=variant, supplier=self.supplier, batch_number="S-1", received_at="2026-08-04",
+            height_cm=50, stems_per_bunch=25, received_stems=100, remaining_stems=100,
+            cost_per_stem=1000, sale_price_per_stem=3000, sale_price_per_bunch=75000,
+        )
+        # 05.08 — 50 dona × 2000 = 100 000
+        StockBatch.objects.create(
+            variant=variant, supplier=self.supplier, batch_number="S-2", received_at="2026-08-05",
+            height_cm=50, stems_per_bunch=25, received_stems=50, remaining_stems=50,
+            cost_per_stem=2000, sale_price_per_stem=4000, sale_price_per_bunch=100000,
+        )
+        SupplierPayment.objects.create(supplier=self.supplier, amount=Decimal("60000"), paid_at="2026-08-04")
+        SupplierPayment.objects.create(supplier=self.supplier, amount=Decimal("40000"), paid_at="2026-08-05")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def row(self, params=""):
+        response = self.client.get(f"/api/suppliers/{params}")
+        self.assertEqual(response.status_code, 200, response.data)
+        return next(r for r in response.data["results"] if r["id"] == self.supplier.id)
+
+    def test_without_filter_counts_everything(self):
+        row = self.row()
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("200000.00"))
+        self.assertEqual(row["batches_count"], 2)
+        self.assertEqual(row["total_received_stems"], 150)
+        self.assertEqual(Decimal(row["paid_total"]), Decimal("100000.00"))
+
+    def test_single_day_filter(self):
+        row = self.row("?date_from=2026-08-04&date_to=2026-08-04")
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("100000.00"))
+        self.assertEqual(row["batches_count"], 1)
+        self.assertEqual(row["total_received_stems"], 100)
+        self.assertEqual(Decimal(row["paid_total"]), Decimal("60000.00"))
+
+    def test_date_from_only(self):
+        row = self.row("?date_from=2026-08-05")
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("100000.00"))
+        self.assertEqual(row["total_received_stems"], 50)
+
+    def test_date_to_only(self):
+        row = self.row("?date_to=2026-08-04")
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("100000.00"))
+        self.assertEqual(row["total_received_stems"], 100)
+
+    def test_range_with_no_data_returns_zero(self):
+        row = self.row("?date_from=2026-09-01&date_to=2026-09-30")
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("0.00"))
+        self.assertEqual(row["batches_count"], 0)
+        self.assertEqual(row["total_received_stems"], 0)
+
+    def test_last_payment_stays_global(self):
+        row = self.row("?date_from=2026-08-04&date_to=2026-08-04")
+        self.assertEqual(str(row["last_payment_at"]), "2026-08-05")
+
+    def test_bad_date_returns_400(self):
+        response = self.client.get("/api/suppliers/?date_from=04.08.2026")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("date_from", response.data)
+
+    def test_reversed_range_returns_400(self):
+        response = self.client.get("/api/suppliers/?date_from=2026-08-05&date_to=2026-08-04")
+        self.assertEqual(response.status_code, 400)
+
+    def test_detail_endpoint_respects_filter(self):
+        response = self.client.get(f"/api/suppliers/{self.supplier.id}/?date_from=2026-08-04&date_to=2026-08-04")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Decimal(response.data["purchase_total"]), Decimal("100000.00"))
+
+
 class ApiTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("admin", password="password", is_superuser=True, is_staff=True)
