@@ -2,7 +2,7 @@ import re
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, Branch, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
+from .models import AuditLog, Branch, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
 
 
 def money(value):
@@ -1385,7 +1385,7 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
         if quantity < 1:
             raise ValueError("Sotilgan son 1 dan kam bo‘lmasligi kerak")
         # chiqitga chiqqan dona ham band hisoblanadi, uni qayta sotib bo'lmaydi
-        available = int(item.quantity_total or 0) - int(item.quantity_sold or 0) - int(item.quantity_wasted or 0)
+        available = catalog_remaining(item)
         if quantity > available:
             if item.quantity_wasted:
                 raise ValueError(
@@ -1925,12 +1925,12 @@ def waste_catalog_item(item, user, quantity=1, reason=""):
         raise ValueError("Chiqitga chiqariladigan son 1 dan kam bo‘lmasligi kerak")
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
-        remaining = int(item.quantity_total or 0) - int(item.quantity_sold or 0) - int(item.quantity_wasted or 0)
+        remaining = catalog_remaining(item)
         if quantity > remaining:
             raise ValueError(f"Katalogda atigi {max(remaining, 0)} dona qolgan")
         unit_cost = catalog_unit_cost(item)
         item.quantity_wasted += quantity
-        left = int(item.quantity_total or 0) - int(item.quantity_sold or 0) - int(item.quantity_wasted or 0)
+        left = catalog_remaining(item)
         fields = ["quantity_wasted", "updated_at"]
         if left <= 0 and item.status not in ["sold", "archived"]:
             item.status = "sold" if item.quantity_sold else "archived"
@@ -1955,3 +1955,255 @@ def waste_catalog_item(item, user, quantity=1, reason=""):
         )
         notify_florist_catalog(item, "Katalog chiqitga chiqdi", f"{item.name_uz} katalogidan {quantity} ta chiqitga chiqarildi.")
     return item
+
+
+def catalog_remaining(item):
+    """Katalogda hali qo'lda turgan dona soni."""
+    return (
+        int(item.quantity_total or 0)
+        - int(item.quantity_sold or 0)
+        - int(item.quantity_wasted or 0)
+        - int(item.quantity_reworked or 0)
+    )
+
+
+def _rework_pool_key(batch_id):
+    return int(batch_id)
+
+
+def create_catalog_rework(florist, florist_amount, sources, stock_inputs, outputs, note="", user=None):
+    """Restavratsiya hujjatini yaratadi.
+
+    Bir yoki bir nechta tayyor katalog buziladi, ustiga skladdan qo'shimcha gul
+    olinishi mumkin, natijada bir yoki bir nechta yangi katalog yasaladi.
+
+    sources      - [{"catalog_item": CatalogItem, "quantity": int}]
+    stock_inputs - [{"stock_batch": StockBatch, "quantity_stems": int}]
+    outputs      - [{"name_uz", "arrangement_type", "quantity", "price",
+                     "composition": [{"stock_batch": StockBatch, "quantity_stems": int}],  # bir dona uchun
+                     "materials":  [{"packaging": Packaging, "quantity": int}]}]           # bir dona uchun
+
+    Gul hisobi: buzilgan katalogning guli skladdan allaqachon yechilgan, shuning
+    uchun u qayta yechilmaydi — to'g'ridan-to'g'ri yangi katalog tarkibiga o'tadi.
+    Faqat qo'shimcha olingan gul skladdan kamayadi.
+    """
+    florist_amount = money(florist_amount)
+    if florist_amount < 0:
+        raise ValueError("Florist haqi manfiy bo‘lmaydi")
+    if not sources and not stock_inputs:
+        raise ValueError("Kamida bitta buziladigan katalog yoki skladdan gul tanlang")
+    if not outputs:
+        raise ValueError("Kamida bitta yangi mahsulot kiritilishi kerak")
+
+    with transaction.atomic():
+        pool = {}
+        input_stems = 0
+        input_cost = Decimal("0")
+        source_rows = []
+
+        for row in sources:
+            item = CatalogItem.objects.select_for_update().get(pk=row["catalog_item"].pk)
+            quantity = int(row.get("quantity") or 0)
+            if quantity < 1:
+                raise ValueError(f"{item.name_uz} uchun buziladigan son 1 dan kam bo‘lmasligi kerak")
+            remaining = catalog_remaining(item)
+            if quantity > remaining:
+                raise ValueError(f"{item.name_uz} katalogida atigi {max(remaining, 0)} dona qolgan")
+            unit_cost = catalog_unit_cost(item)
+            stems = 0
+            for comp in item.composition.select_related("stock_batch"):
+                released = int(comp.quantity_stems or 0) * quantity
+                if released <= 0:
+                    continue
+                pool[_rework_pool_key(comp.stock_batch_id)] = pool.get(_rework_pool_key(comp.stock_batch_id), 0) + released
+                stems += released
+            cost = (unit_cost * Decimal(quantity)).quantize(Decimal("0.01"))
+            input_stems += stems
+            input_cost += cost
+            source_rows.append({"item": item, "quantity": quantity, "stems": stems, "unit_cost": unit_cost, "cost": cost})
+
+        stock_rows = []
+        for row in stock_inputs:
+            batch = StockBatch.objects.select_for_update().get(pk=row["stock_batch"].pk)
+            stems = int(row.get("quantity_stems") or 0)
+            if stems < 1:
+                raise ValueError(f"{batch.batch_number} uchun son 1 dan kam bo‘lmasligi kerak")
+            if batch.remaining_stems < stems:
+                raise ValueError(f"{batch.batch_number} partiyasida atigi {batch.remaining_stems} dona qolgan")
+            cost = (Decimal(stems) * money(batch.cost_per_stem)).quantize(Decimal("0.01"))
+            pool[_rework_pool_key(batch.id)] = pool.get(_rework_pool_key(batch.id), 0) + stems
+            input_stems += stems
+            input_cost += cost
+            stock_rows.append({"batch": batch, "stems": stems, "cost": cost})
+
+        output_rows = []
+        used = {}
+        output_stems = 0
+        for row in outputs:
+            quantity = int(row.get("quantity") or 0)
+            if quantity < 1:
+                raise ValueError("Yangi mahsulot soni 1 dan kam bo‘lmasligi kerak")
+            composition = row.get("composition") or []
+            if not composition:
+                raise ValueError(f"{row.get('name_uz') or 'Yangi mahsulot'} uchun gul tarkibi kiritilmagan")
+            stems = 0
+            for comp in composition:
+                batch = comp["stock_batch"]
+                per_unit = int(comp.get("quantity_stems") or 0)
+                if per_unit < 1:
+                    raise ValueError("Tarkibdagi gul soni 1 dan kam bo‘lmasligi kerak")
+                total = per_unit * quantity
+                key = _rework_pool_key(batch.id)
+                used[key] = used.get(key, 0) + total
+                if used[key] > pool.get(key, 0):
+                    raise ValueError(
+                        f"{batch.batch_number} guli yetmayapti: mavjud {pool.get(key, 0)} dona, "
+                        f"kerak {used[key]} dona"
+                    )
+                stems += total
+            output_stems += stems
+            output_rows.append({"data": row, "quantity": quantity, "stems": stems})
+
+        if output_stems > input_stems:
+            raise ValueError("Yangi mahsulotlardagi gul soni kirimdan ko‘p bo‘lmasligi kerak")
+        waste_stems = input_stems - output_stems
+
+        rework = CatalogRework.objects.create(
+            florist=florist,
+            florist_amount=florist_amount,
+            input_stems=input_stems,
+            output_stems=output_stems,
+            waste_stems=waste_stems,
+            input_cost=input_cost,
+            note=note,
+            created_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+
+        for row in source_rows:
+            CatalogReworkSource.objects.create(
+                rework=rework, catalog_item=row["item"], quantity=row["quantity"],
+                stems=row["stems"], unit_cost=row["unit_cost"], cost=row["cost"],
+            )
+            item = row["item"]
+            item.quantity_reworked = int(item.quantity_reworked or 0) + row["quantity"]
+            fields = ["quantity_reworked", "updated_at"]
+            if catalog_remaining(item) <= 0 and item.status not in ["sold", "archived"]:
+                item.status = "sold" if item.quantity_sold else "archived"
+                fields.append("status")
+            item.save(update_fields=fields)
+            create_catalog_history(
+                item, "reworked", user=user, quantity=row["quantity"],
+                listed_unit_price=item.price, sold_unit_price=Decimal("0"),
+                note=note or f"Restavratsiya #{rework.id} uchun buzildi",
+                snapshot=catalog_snapshot(item),
+            )
+
+        for row in stock_rows:
+            batch = row["batch"]
+            batch.remaining_stems -= row["stems"]
+            batch.save(update_fields=["remaining_stems", "updated_at"])
+            StockMovement.objects.create(
+                batch=batch, movement_type="out",
+                quantity_stems=-row["stems"],
+                quantity_bunches=-(Decimal(row["stems"]) / Decimal(batch.stems_per_bunch or 1)),
+                reference_type="catalog_rework", reference_id=rework.id,
+                reason=note or f"Restavratsiya #{rework.id} uchun olindi",
+                performed_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+            CatalogReworkStockInput.objects.create(
+                rework=rework, stock_batch=batch, quantity_stems=row["stems"], cost=row["cost"],
+            )
+
+        total_output_stems = Decimal(output_stems or 1)
+        allocated_florist = Decimal("0")
+        created_items = []
+        for index, row in enumerate(output_rows):
+            data = row["data"]
+            quantity = row["quantity"]
+            share = Decimal(row["stems"]) / total_output_stems if output_stems else Decimal("0")
+            if index == len(output_rows) - 1:
+                florist_share = (florist_amount - allocated_florist).quantize(Decimal("0.01"))
+            else:
+                florist_share = (florist_amount * share).quantize(Decimal("0.01"))
+            allocated_florist += florist_share
+            per_unit_fee = (florist_share / Decimal(quantity)).quantize(Decimal("0.01")) if quantity else Decimal("0")
+            item = CatalogItem.objects.create(
+                name_uz=data.get("name_uz") or "Restavratsiya mahsuloti",
+                description_uz=data.get("description_uz", ""),
+                note=data.get("note", ""),
+                arrangement_type=data.get("arrangement_type") or "bouquet",
+                catalog_kind=data.get("catalog_kind") or "standard",
+                volume=data.get("volume", ""),
+                branch=data.get("branch"),
+                height_cm=data.get("height_cm"),
+                diameter_cm=data.get("diameter_cm"),
+                price=money(data.get("price")),
+                florist_fee=per_unit_fee,
+                florist_salary_amount=Decimal("0"),
+                status=data.get("status") or "available",
+                image_url=data.get("image_url", ""),
+                quantity_total=quantity,
+                # Gul allaqachon hisobdan chiqqan, qayta yechilmasin
+                quantity_stock_deducted=quantity,
+                stock_deducted_at=timezone.now(),
+                created_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+            for comp in data.get("composition") or []:
+                batch = comp["stock_batch"]
+                per_unit = int(comp.get("quantity_stems") or 0)
+                CatalogComposition.objects.create(
+                    catalog_item=item, stock_batch=batch, quantity_stems=per_unit,
+                    quantity_bunches=(Decimal(per_unit) / Decimal(batch.stems_per_bunch or 1)).quantize(Decimal("0.01")),
+                )
+            for material in data.get("materials") or []:
+                CatalogMaterialUsage.objects.create(
+                    catalog_item=item, packaging=material["packaging"],
+                    quantity=int(material.get("quantity") or 1),
+                )
+            item = sync_catalog_financials(item)
+            CatalogReworkOutput.objects.create(
+                rework=rework, catalog_item=item, quantity=quantity,
+                stems=row["stems"], allocated_cost=money(item.calculated_cost_price),
+                allocated_florist_amount=florist_share,
+            )
+            create_catalog_history(
+                item, "created", user=user, quantity=quantity,
+                listed_unit_price=item.price,
+                note=f"Restavratsiya #{rework.id} dan yasaldi",
+                snapshot=catalog_snapshot(item),
+            )
+            created_items.append(item)
+
+        output_cost = sum((money(row.calculated_cost_price) for row in created_items), Decimal("0"))
+        rework.waste_cost = max(input_cost + florist_amount - output_cost, Decimal("0")).quantize(Decimal("0.01"))
+        rework.save(update_fields=["waste_cost", "updated_at"])
+
+        if florist_amount > 0:
+            FloristSalaryEntry.objects.create(
+                florist=florist, amount=florist_amount, source="rework",
+                rework=rework,
+                note=note or f"Restavratsiya #{rework.id}",
+                created_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="catalog_rework_created", entity_type="CatalogRework", entity_id=str(rework.id),
+            summary=(
+                f"Restavratsiya #{rework.id}: {len(source_rows)} ta katalog buzildi, "
+                f"{len(created_items)} ta yangi mahsulot yasaldi"
+            ),
+            after={
+                "florist": florist.id,
+                "florist_amount": str(florist_amount),
+                "input_stems": input_stems,
+                "output_stems": output_stems,
+                "waste_stems": waste_stems,
+                "input_cost": str(input_cost),
+                "waste_cost": str(rework.waste_cost),
+                "sources": [{"catalog_item": row["item"].id, "quantity": row["quantity"]} for row in source_rows],
+                "stock_inputs": [{"batch": row["batch"].id, "stems": row["stems"]} for row in stock_rows],
+                "outputs": [{"catalog_item": row.id, "quantity": row.quantity_total} for row in created_items],
+            },
+        )
+    return rework

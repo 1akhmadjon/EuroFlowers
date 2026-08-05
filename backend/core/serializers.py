@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
 class DetailValidationError(APIException):
@@ -2580,6 +2580,134 @@ class CatalogRestoreFlowersSerializer(serializers.Serializer):
     new_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
     quantity_stems = serializers.IntegerField(min_value=1)
     reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class CatalogReworkSourceInputSerializer(serializers.Serializer):
+    """Buziladigan katalog mahsuloti."""
+
+    catalog_item = serializers.PrimaryKeyRelatedField(queryset=CatalogItem.objects.all())
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+
+class CatalogReworkStockInputSerializer(serializers.Serializer):
+    """Restavratsiya uchun skladdan qo'shimcha olinadigan gul."""
+
+    stock_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    quantity_stems = serializers.IntegerField(min_value=1)
+
+
+class CatalogReworkCompositionSerializer(serializers.Serializer):
+    """Yangi mahsulotning bir donasidagi gul."""
+
+    stock_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    quantity_stems = serializers.IntegerField(min_value=1)
+
+
+class CatalogReworkMaterialSerializer(serializers.Serializer):
+    """Yangi mahsulotning bir donasidagi qadoq."""
+
+    packaging = serializers.PrimaryKeyRelatedField(queryset=Packaging.objects.all())
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+
+class CatalogReworkOutputInputSerializer(serializers.Serializer):
+    """Restavratsiyadan chiqadigan yangi katalog mahsuloti."""
+
+    name_uz = serializers.CharField(max_length=180)
+    description_uz = serializers.CharField(required=False, allow_blank=True, default="")
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+    arrangement_type = serializers.ChoiceField(choices=["bouquet", "basket", "box"], default="bouquet")
+    catalog_kind = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="standard")
+    volume = serializers.CharField(required=False, allow_blank=True, default="")
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
+    height_cm = serializers.IntegerField(required=False, allow_null=True)
+    diameter_cm = serializers.IntegerField(required=False, allow_null=True)
+    price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
+    quantity = serializers.IntegerField(min_value=1, default=1)
+    status = serializers.ChoiceField(choices=["draft", "available"], required=False, default="available")
+    image_url = serializers.CharField(required=False, allow_blank=True, default="")
+    composition = CatalogReworkCompositionSerializer(many=True)
+    materials = CatalogReworkMaterialSerializer(many=True, required=False, default=list)
+
+
+class CatalogReworkCreateSerializer(serializers.Serializer):
+    """Restavratsiya hujjatini yaratish so'rovi."""
+
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    florist_amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0, default=0)
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+    sources = CatalogReworkSourceInputSerializer(many=True, required=False, default=list)
+    stock_inputs = CatalogReworkStockInputSerializer(many=True, required=False, default=list)
+    outputs = CatalogReworkOutputInputSerializer(many=True)
+
+    def validate(self, attrs):
+        if not attrs.get("sources") and not attrs.get("stock_inputs"):
+            raise serializers.ValidationError("Kamida bitta buziladigan katalog yoki skladdan gul tanlang")
+        if not attrs.get("outputs"):
+            raise serializers.ValidationError("Kamida bitta yangi mahsulot kiritilishi kerak")
+        return attrs
+
+
+class CatalogReworkSourceSerializer(serializers.ModelSerializer):
+    catalog_item_name = serializers.CharField(source="catalog_item.name_uz", read_only=True)
+
+    class Meta:
+        model = CatalogReworkSource
+        fields = ["id", "catalog_item", "catalog_item_name", "quantity", "stems", "unit_cost", "cost"]
+
+
+class CatalogReworkStockInputReadSerializer(serializers.ModelSerializer):
+    batch_number = serializers.CharField(source="stock_batch.batch_number", read_only=True)
+    variant_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CatalogReworkStockInput
+        fields = ["id", "stock_batch", "batch_number", "variant_name", "quantity_stems", "cost"]
+
+    def get_variant_name(self, obj):
+        variant = obj.stock_batch.variant
+        parts = [variant.flower.name_uz, variant.name_uz, variant.color_uz]
+        return " ".join(part for part in parts if part).strip()
+
+
+class CatalogReworkOutputSerializer(serializers.ModelSerializer):
+    catalog_item_name = serializers.CharField(source="catalog_item.name_uz", read_only=True)
+    catalog_item_price = serializers.DecimalField(source="catalog_item.price", max_digits=12, decimal_places=2, read_only=True)
+    image_url = serializers.CharField(source="catalog_item.image_url", read_only=True)
+
+    class Meta:
+        model = CatalogReworkOutput
+        fields = [
+            "id", "catalog_item", "catalog_item_name", "catalog_item_price", "image_url",
+            "quantity", "stems", "allocated_cost", "allocated_florist_amount",
+        ]
+
+
+class CatalogReworkSerializer(serializers.ModelSerializer):
+    florist_name = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    sources = CatalogReworkSourceSerializer(many=True, read_only=True)
+    stock_inputs = CatalogReworkStockInputReadSerializer(many=True, read_only=True)
+    outputs = CatalogReworkOutputSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = CatalogRework
+        fields = [
+            "id", "florist", "florist_name", "florist_amount",
+            "input_stems", "output_stems", "waste_stems",
+            "input_cost", "waste_cost", "note",
+            "created_by", "created_by_name", "created_at", "updated_at",
+            "sources", "stock_inputs", "outputs",
+        ]
+        read_only_fields = fields
+
+    def get_florist_name(self, obj):
+        return str(obj.florist) if obj.florist_id else ""
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by_id:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
 
 
 class SimulateResponseSerializer(serializers.Serializer):

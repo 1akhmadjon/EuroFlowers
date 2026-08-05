@@ -430,13 +430,14 @@ class FloristFaceSample(TimeStampedModel):
 
 
 class FloristSalaryEntry(TimeStampedModel):
-    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("decoration", "Oformleniya"), ("sale_decoration", "Sotuv oformleniya"), ("daily", "Kunlik"), ("manual", "Qo‘lda")]
+    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("decoration", "Oformleniya"), ("sale_decoration", "Sotuv oformleniya"), ("daily", "Kunlik"), ("rework", "Restavratsiya"), ("manual", "Qo‘lda")]
     florist = models.ForeignKey(FloristProfile, on_delete=models.CASCADE, related_name="salary_entries")
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     source = models.CharField(max_length=30, choices=SOURCE_CHOICES)
     work_date = models.DateField(default=timezone.localdate)
     catalog_item = models.ForeignKey("CatalogItem", null=True, blank=True, on_delete=models.SET_NULL, related_name="salary_entries")
     attendance = models.ForeignKey(FloristAttendance, null=True, blank=True, on_delete=models.SET_NULL, related_name="salary_entries")
+    rework = models.ForeignKey("CatalogRework", null=True, blank=True, on_delete=models.SET_NULL, related_name="salary_entries")
     note = models.TextField(blank=True)
     created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_salary_entries")
 
@@ -535,6 +536,8 @@ class CatalogItem(TimeStampedModel):
     quantity_sold = models.PositiveIntegerField(default=0)
     # Sotilmay qolib, chiqitga chiqarilgan dona soni
     quantity_wasted = models.PositiveIntegerField(default=0)
+    # Restavratsiyada buzib yuborilgan dona soni
+    quantity_reworked = models.PositiveIntegerField(default=0)
     quantity_stock_deducted = models.PositiveIntegerField(default=0)
     sold_at = models.DateTimeField(null=True, blank=True)
     stock_deducted_at = models.DateTimeField(null=True, blank=True)
@@ -577,7 +580,7 @@ class CatalogMaterialUsage(TimeStampedModel):
 
 
 class CatalogHistory(TimeStampedModel):
-    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("wasted", "Chiqitga chiqarildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi")]
+    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("wasted", "Chiqitga chiqarildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi"), ("reworked", "Restavratsiya qilindi")]
     catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="history")
     reservation = models.ForeignKey("Reservation", null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_history")
     action = models.CharField(max_length=30, choices=ACTION_CHOICES)
@@ -593,6 +596,62 @@ class CatalogHistory(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at", "-id"]
+
+
+class CatalogRework(TimeStampedModel):
+    """Restavratsiya hujjati.
+
+    Bitta yoki bir nechta tayyor katalog mahsuloti buziladi, ustiga skladdan
+    qo'shimcha gul olinishi mumkin, natijada bir yoki bir nechta yangi katalog
+    mahsuloti yasaladi. Florist haqi shu hujjatda qo'lda yoziladi.
+    """
+
+    florist = models.ForeignKey(FloristProfile, on_delete=models.PROTECT, related_name="reworks")
+    florist_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    input_stems = models.PositiveIntegerField(default=0)
+    output_stems = models.PositiveIntegerField(default=0)
+    waste_stems = models.PositiveIntegerField(default=0)
+    input_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    waste_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_reworks")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"Restavratsiya #{self.id}"
+
+
+class CatalogReworkSource(TimeStampedModel):
+    """Buzilgan katalog mahsuloti."""
+
+    rework = models.ForeignKey(CatalogRework, on_delete=models.CASCADE, related_name="sources")
+    catalog_item = models.ForeignKey(CatalogItem, on_delete=models.PROTECT, related_name="rework_sources")
+    quantity = models.PositiveIntegerField(default=1)
+    stems = models.PositiveIntegerField(default=0)
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+
+class CatalogReworkStockInput(TimeStampedModel):
+    """Restavratsiya uchun skladdan qo'shimcha olingan gul."""
+
+    rework = models.ForeignKey(CatalogRework, on_delete=models.CASCADE, related_name="stock_inputs")
+    stock_batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="rework_inputs")
+    quantity_stems = models.PositiveIntegerField()
+    cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+
+class CatalogReworkOutput(TimeStampedModel):
+    """Restavratsiyadan chiqqan yangi katalog mahsuloti."""
+
+    rework = models.ForeignKey(CatalogRework, on_delete=models.CASCADE, related_name="outputs")
+    catalog_item = models.ForeignKey(CatalogItem, on_delete=models.PROTECT, related_name="rework_outputs")
+    quantity = models.PositiveIntegerField(default=1)
+    stems = models.PositiveIntegerField(default=0)
+    allocated_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    allocated_florist_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
 
 class Conversation(TimeStampedModel):

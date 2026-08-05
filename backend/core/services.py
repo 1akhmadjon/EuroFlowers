@@ -51,7 +51,11 @@ def catalog_composition_summary(item):
 
 
 def available_catalog_queryset():
-    return CatalogItem.objects.filter(status="available", quantity_sold__lt=F("quantity_total"))
+    """Sotuvda turgan katalog. Sotilgan, chiqitga chiqarilgan va restavratsiyada
+    buzilgan donalar hisobdan chiqariladi."""
+    return CatalogItem.objects.filter(status="available").annotate(
+        used_quantity=F("quantity_sold") + F("quantity_wasted") + F("quantity_reworked")
+    ).filter(used_quantity__lt=F("quantity_total"))
 
 
 def stock_availability(batch):

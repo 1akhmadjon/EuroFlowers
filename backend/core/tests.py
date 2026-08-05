@@ -15,8 +15,8 @@ import requests
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
-from .inventory_services import deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
+from .inventory_services import catalog_remaining, create_catalog_rework, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
+from .services import available_catalog_queryset, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -1108,6 +1108,233 @@ class BusinessRulesTests(TestCase):
         message = Message.objects.get(instagram_message_id="telegram:555:78")
         self.assertIn("Voice message: https://api.telegram.org/file/bottest-token/voice/file.ogg", message.text)
         self.assertEqual(message.metadata["attachments"][0]["kind"], "voice")
+
+
+class CatalogReworkTests(TestCase):
+    """Restavratsiya: katalogni buzib, undan yangi mahsulot yasash."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("rework-admin", password="password")
+        florist_user = User.objects.create_user("florist-dilnoza", password="password", first_name="Dilnoza")
+        self.florist = FloristProfile.objects.create(user=florist_user)
+        flower = Flower.objects.create(name_uz="Atirgul", slug="rose-rework")
+        self.variant = FlowerVariant.objects.create(flower=flower, name_uz="Mondial", color_uz="Oq")
+        self.batch = StockBatch.objects.create(
+            variant=self.variant, batch_number="RW-1", height_cm=60, stems_per_bunch=25,
+            received_stems=500, remaining_stems=500, cost_per_stem=10000,
+            sale_price_per_stem=15000, sale_price_per_bunch=375000,
+        )
+
+    def make_item(self, name, stems, quantity=1, price=500000):
+        item = CatalogItem.objects.create(
+            name_uz=name, arrangement_type="bouquet", price=price, status="available",
+            quantity_total=quantity, quantity_stock_deducted=quantity, florist_fee=0,
+        )
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=stems)
+        return sync_catalog_financials(item)
+
+    def test_small_plus_stock_becomes_one_big_bouquet(self):
+        """1-holat: kichkina buket + skladdan gul = 1 ta katta buket."""
+        small = self.make_item("Kichkina buket", 25)
+        before = self.batch.remaining_stems
+        rework = create_catalog_rework(
+            florist=self.florist, florist_amount=Decimal("60000"),
+            sources=[{"catalog_item": small, "quantity": 1}],
+            stock_inputs=[{"stock_batch": self.batch, "quantity_stems": 25}],
+            outputs=[{
+                "name_uz": "Katta buket", "arrangement_type": "bouquet", "quantity": 1,
+                "price": Decimal("900000"),
+                "composition": [{"stock_batch": self.batch, "quantity_stems": 50}],
+            }],
+            user=self.user,
+        )
+        self.batch.refresh_from_db()
+        small.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before - 25)
+        self.assertEqual(small.quantity_reworked, 1)
+        self.assertEqual(small.status, "archived")
+        self.assertEqual(rework.input_stems, 50)
+        self.assertEqual(rework.output_stems, 50)
+        self.assertEqual(rework.waste_stems, 0)
+        output = rework.outputs.get()
+        self.assertEqual(output.catalog_item.quantity_total, 1)
+        self.assertEqual(output.catalog_item.composition.get().quantity_stems, 50)
+
+    def test_one_big_becomes_two_medium_and_three_small(self):
+        """2-holat: 1 ta katta + skladdan gul = 2 ta o'rtancha + 3 ta kichkina."""
+        big = self.make_item("Katta buket", 60, price=1000000)
+        before = self.batch.remaining_stems
+        rework = create_catalog_rework(
+            florist=self.florist, florist_amount=Decimal("150000"),
+            sources=[{"catalog_item": big, "quantity": 1}],
+            stock_inputs=[{"stock_batch": self.batch, "quantity_stems": 40}],
+            outputs=[
+                {"name_uz": "O'rtancha", "arrangement_type": "bouquet", "quantity": 2,
+                 "price": Decimal("450000"),
+                 "composition": [{"stock_batch": self.batch, "quantity_stems": 25}]},
+                {"name_uz": "Kichkina", "arrangement_type": "bouquet", "quantity": 3,
+                 "price": Decimal("280000"),
+                 "composition": [{"stock_batch": self.batch, "quantity_stems": 15}]},
+            ],
+            user=self.user,
+        )
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before - 40)
+        self.assertEqual(rework.input_stems, 100)
+        self.assertEqual(rework.output_stems, 95)
+        self.assertEqual(rework.waste_stems, 5)
+        self.assertEqual(rework.outputs.count(), 2)
+        self.assertEqual(sum(row.catalog_item.quantity_total for row in rework.outputs.all()), 5)
+        # florist haqi gul soniga proporsional taqsimlanadi va yig'indisi to'liq mos keladi
+        self.assertEqual(sum(row.allocated_florist_amount for row in rework.outputs.all()), Decimal("150000"))
+
+    def test_florist_salary_entry_is_created_manually(self):
+        item = self.make_item("Buket", 20)
+        rework = create_catalog_rework(
+            florist=self.florist, florist_amount=Decimal("75000"),
+            sources=[{"catalog_item": item, "quantity": 1}], stock_inputs=[],
+            outputs=[{"name_uz": "Yangi", "arrangement_type": "bouquet", "quantity": 1,
+                      "price": Decimal("400000"),
+                      "composition": [{"stock_batch": self.batch, "quantity_stems": 20}]}],
+            user=self.user,
+        )
+        entry = FloristSalaryEntry.objects.get(rework=rework)
+        self.assertEqual(entry.amount, Decimal("75000"))
+        self.assertEqual(entry.source, "rework")
+        self.assertEqual(entry.florist, self.florist)
+
+    def test_output_flowers_cannot_exceed_available_pool(self):
+        item = self.make_item("Buket", 20)
+        with self.assertRaises(ValueError):
+            create_catalog_rework(
+                florist=self.florist, florist_amount=0,
+                sources=[{"catalog_item": item, "quantity": 1}], stock_inputs=[],
+                outputs=[{"name_uz": "Katta", "arrangement_type": "bouquet", "quantity": 1,
+                          "price": Decimal("400000"),
+                          "composition": [{"stock_batch": self.batch, "quantity_stems": 50}]}],
+                user=self.user,
+            )
+
+    def test_cannot_break_more_units_than_remaining(self):
+        item = self.make_item("Buket", 10, quantity=2)
+        with self.assertRaises(ValueError):
+            create_catalog_rework(
+                florist=self.florist, florist_amount=0,
+                sources=[{"catalog_item": item, "quantity": 3}], stock_inputs=[],
+                outputs=[{"name_uz": "Yangi", "arrangement_type": "bouquet", "quantity": 1,
+                          "price": Decimal("100000"),
+                          "composition": [{"stock_batch": self.batch, "quantity_stems": 10}]}],
+                user=self.user,
+            )
+
+    def test_partial_break_keeps_item_available(self):
+        item = self.make_item("Buket", 10, quantity=3)
+        create_catalog_rework(
+            florist=self.florist, florist_amount=Decimal("20000"),
+            sources=[{"catalog_item": item, "quantity": 1}], stock_inputs=[],
+            outputs=[{"name_uz": "Yangi", "arrangement_type": "bouquet", "quantity": 1,
+                      "price": Decimal("150000"),
+                      "composition": [{"stock_batch": self.batch, "quantity_stems": 10}]}],
+            user=self.user,
+        )
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_reworked, 1)
+        self.assertEqual(item.status, "available")
+        self.assertEqual(catalog_remaining(item), 2)
+
+    def test_multiple_sources_merge_into_one_output(self):
+        a = self.make_item("Kichkina A", 20)
+        b = self.make_item("Kichkina B", 20)
+        rework = create_catalog_rework(
+            florist=self.florist, florist_amount=Decimal("50000"),
+            sources=[{"catalog_item": a, "quantity": 1}, {"catalog_item": b, "quantity": 1}],
+            stock_inputs=[],
+            outputs=[{"name_uz": "Katta", "arrangement_type": "bouquet", "quantity": 1,
+                      "price": Decimal("800000"),
+                      "composition": [{"stock_batch": self.batch, "quantity_stems": 40}]}],
+            user=self.user,
+        )
+        self.assertEqual(rework.sources.count(), 2)
+        self.assertEqual(rework.input_stems, 40)
+        self.assertEqual(rework.waste_stems, 0)
+
+    def test_reworked_item_is_hidden_from_sale_but_kept_in_history(self):
+        item = self.make_item("Buket", 20)
+        rework = create_catalog_rework(
+            florist=self.florist, florist_amount=0,
+            sources=[{"catalog_item": item, "quantity": 1}], stock_inputs=[],
+            outputs=[{"name_uz": "Yangi", "arrangement_type": "bouquet", "quantity": 1,
+                      "price": Decimal("300000"),
+                      "composition": [{"stock_batch": self.batch, "quantity_stems": 20}]}],
+            user=self.user,
+        )
+        item.refresh_from_db()
+        self.assertNotIn(item.id, list(available_catalog_queryset().values_list("id", flat=True)))
+        self.assertIn(item.id, list(rework.sources.values_list("catalog_item_id", flat=True)))
+        self.assertTrue(item.history.filter(action="reworked").exists())
+
+    def test_output_stock_is_not_deducted_twice(self):
+        item = self.make_item("Buket", 20)
+        before = self.batch.remaining_stems
+        rework = create_catalog_rework(
+            florist=self.florist, florist_amount=0,
+            sources=[{"catalog_item": item, "quantity": 1}], stock_inputs=[],
+            outputs=[{"name_uz": "Yangi", "arrangement_type": "bouquet", "quantity": 1,
+                      "price": Decimal("300000"),
+                      "composition": [{"stock_batch": self.batch, "quantity_stems": 20}]}],
+            user=self.user,
+        )
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, before)
+        new_item = rework.outputs.get().catalog_item
+        self.assertEqual(new_item.quantity_stock_deducted, new_item.quantity_total)
+        with self.assertRaises(ValueError):
+            deduct_catalog_stock(new_item, self.user)
+
+
+    def test_api_creates_rework_and_lists_history(self):
+        UserProfile.objects.update_or_create(user=self.user, defaults={"role": "admin"})
+        for page, _ in PagePermission.PAGE_CHOICES:
+            PagePermission.objects.update_or_create(user=self.user, page=page, defaults={"can_view": True, "can_control": True})
+        item = self.make_item("Katta buket", 60, price=1000000)
+        client = APIClient()
+        client.force_authenticate(self.user)
+        payload = {
+            "florist": self.florist.id,
+            "florist_amount": "150000",
+            "note": "Vitrinadagi buket buzildi",
+            "sources": [{"catalog_item": item.id, "quantity": 1}],
+            "stock_inputs": [{"stock_batch": self.batch.id, "quantity_stems": 40}],
+            "outputs": [
+                {"name_uz": "O'rtancha", "arrangement_type": "bouquet", "quantity": 2, "price": "450000",
+                 "composition": [{"stock_batch": self.batch.id, "quantity_stems": 25}]},
+                {"name_uz": "Kichkina", "arrangement_type": "bouquet", "quantity": 3, "price": "280000",
+                 "composition": [{"stock_batch": self.batch.id, "quantity_stems": 15}]},
+            ],
+        }
+        response = client.post("/api/catalog-reworks/", payload, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["waste_stems"], 5)
+        self.assertEqual(len(response.data["outputs"]), 2)
+        listing = client.get("/api/catalog-reworks/")
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(listing.data["count"], 1)
+
+    def test_api_rejects_missing_flowers(self):
+        UserProfile.objects.update_or_create(user=self.user, defaults={"role": "admin"})
+        for page, _ in PagePermission.PAGE_CHOICES:
+            PagePermission.objects.update_or_create(user=self.user, page=page, defaults={"can_view": True, "can_control": True})
+        item = self.make_item("Buket", 20)
+        client = APIClient()
+        client.force_authenticate(self.user)
+        response = client.post("/api/catalog-reworks/", {
+            "florist": self.florist.id, "florist_amount": "0",
+            "sources": [{"catalog_item": item.id, "quantity": 1}],
+            "outputs": [{"name_uz": "Katta", "arrangement_type": "bouquet", "quantity": 1, "price": "400000",
+                         "composition": [{"stock_batch": self.batch.id, "quantity_stems": 50}]}],
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("yetmayapti", response.data["detail"])
 
 
 class ApiTests(TestCase):
