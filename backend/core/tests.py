@@ -15,7 +15,7 @@ import requests
 from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
-from .inventory_services import catalog_remaining, create_catalog_rework, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
+from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import available_catalog_queryset, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
@@ -1417,6 +1417,142 @@ class SupplierDateFilterTests(TestCase):
         response = self.client.get(f"/api/suppliers/{self.supplier.id}/?date_from=2026-08-04&date_to=2026-08-04")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Decimal(response.data["purchase_total"]), Decimal("100000.00"))
+
+
+class FloristBulkCloseTests(TestCase):
+    """Tanlangan chiqimlarni birga yopish."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("bulk-admin", password="password")
+        UserProfile.objects.update_or_create(user=self.user, defaults={"role": "admin"})
+        for page, _ in PagePermission.PAGE_CHOICES:
+            PagePermission.objects.update_or_create(user=self.user, page=page, defaults={"can_view": True, "can_control": True})
+        flower = Flower.objects.create(name_uz="Atirgul", slug="rose-bulk")
+        self.variant = FlowerVariant.objects.create(flower=flower, name_uz="Prut", color_uz="Oq")
+        self.b1 = self.make_batch("B-1")
+        self.b2 = self.make_batch("B-2")
+        self.b3 = self.make_batch("B-3")
+        self.f1 = self.make_florist("bulk-f1", "Abror")
+        self.f2 = self.make_florist("bulk-f2", "Bekzod")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def make_batch(self, number):
+        return StockBatch.objects.create(
+            variant=self.variant, batch_number=number, height_cm=50, stems_per_bunch=25,
+            received_stems=300, remaining_stems=300, cost_per_stem=1000,
+            sale_price_per_stem=3000, sale_price_per_bunch=75000,
+        )
+
+    def make_florist(self, username, name):
+        user = User.objects.create_user(username, password="password", first_name=name)
+        return FloristProfile.objects.create(user=user, staff_type="florist")
+
+    def issue(self, florist, batch, stems):
+        issue_stock_to_florist(florist, batch, stems, "test", self.user)
+
+    def balance(self, florist, batch):
+        row = FloristStockBalance.objects.filter(florist=florist, batch=batch).first()
+        return row.remaining_stems if row else 0
+
+    def test_closes_only_selected_issues(self):
+        self.issue(self.f1, self.b1, 40)
+        self.issue(self.f1, self.b2, 30)
+        self.issue(self.f1, self.b3, 20)
+        result = close_selected_florist_issues(
+            [{"florist": self.f1, "batch": self.b1, "return_stems": 40},
+             {"florist": self.f1, "batch": self.b2, "return_stems": 30}],
+            self.user,
+        )
+        self.assertEqual(result["closed_batches"], 2)
+        self.assertEqual(self.balance(self.f1, self.b1), 0)
+        self.assertEqual(self.balance(self.f1, self.b2), 0)
+        # tanlanmagani tegilmaydi
+        self.assertEqual(self.balance(self.f1, self.b3), 20)
+
+    def test_closes_across_multiple_florists(self):
+        self.issue(self.f1, self.b1, 25)
+        self.issue(self.f2, self.b2, 35)
+        result = close_selected_florist_issues(
+            [{"florist": self.f1, "batch": self.b1, "return_stems": 25},
+             {"florist": self.f2, "batch": self.b2, "return_stems": 35}],
+            self.user,
+        )
+        self.assertEqual(result["closed_batches"], 2)
+        self.assertEqual(len(result["florists"]), 2)
+        self.assertEqual(result["returned_stems"], 60)
+        self.assertEqual(self.balance(self.f1, self.b1), 0)
+        self.assertEqual(self.balance(self.f2, self.b2), 0)
+
+    def test_returned_stems_go_back_to_stock(self):
+        self.issue(self.f1, self.b1, 40)
+        before = StockBatch.objects.get(pk=self.b1.pk).remaining_stems
+        close_selected_florist_issues(
+            [{"florist": self.f1, "batch": self.b1, "return_stems": 40}], self.user,
+        )
+        self.assertEqual(StockBatch.objects.get(pk=self.b1.pk).remaining_stems, before + 40)
+
+    def test_one_bad_row_rolls_back_everything(self):
+        self.issue(self.f1, self.b1, 30)
+        # b2 chiqarilmagan — yopib bo'lmaydi
+        with self.assertRaises(ValueError):
+            close_selected_florist_issues(
+                [{"florist": self.f1, "batch": self.b1, "return_stems": 30},
+                 {"florist": self.f1, "batch": self.b2, "return_stems": 10}],
+                self.user,
+            )
+        # birinchisi ham yopilmagan bo'lishi kerak
+        self.assertEqual(self.balance(self.f1, self.b1), 30)
+
+    def test_duplicate_selection_is_rejected(self):
+        self.issue(self.f1, self.b1, 20)
+        with self.assertRaises(ValueError):
+            close_selected_florist_issues(
+                [{"florist": self.f1, "batch": self.b1, "return_stems": 10},
+                 {"florist": self.f1, "batch": self.b1, "return_stems": 10}],
+                self.user,
+            )
+
+    def test_empty_selection_is_rejected(self):
+        with self.assertRaises(ValueError):
+            close_selected_florist_issues([], self.user)
+
+    def test_api_closes_selected(self):
+        self.issue(self.f1, self.b1, 40)
+        self.issue(self.f2, self.b2, 20)
+        self.issue(self.f1, self.b3, 15)
+        response = self.client.post("/api/florist-stock-balances/close-issues/", {
+            "items": [
+                {"florist": self.f1.id, "batch": self.b1.id, "return_stems": 40},
+                {"florist": self.f2.id, "batch": self.b2.id, "return_stems": 20},
+            ],
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["closed_batches"], 2)
+        self.assertEqual(self.balance(self.f1, self.b3), 15)
+
+    def test_api_preview_changes_nothing(self):
+        self.issue(self.f1, self.b1, 40)
+        response = self.client.post("/api/florist-stock-balances/close-issues-preview/", {
+            "items": [{"florist": self.f1.id, "batch": self.b1.id, "return_stems": 40}],
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["selected"], 1)
+        self.assertEqual(self.balance(self.f1, self.b1), 40)
+
+    def test_api_rejects_duplicate_rows(self):
+        self.issue(self.f1, self.b1, 20)
+        response = self.client.post("/api/florist-stock-balances/close-issues/", {
+            "items": [
+                {"florist": self.f1.id, "batch": self.b1.id, "return_stems": 10},
+                {"florist": self.f1.id, "batch": self.b1.id, "return_stems": 10},
+            ],
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_api_rejects_empty_items(self):
+        response = self.client.post("/api/florist-stock-balances/close-issues/", {"items": []}, format="json")
+        self.assertEqual(response.status_code, 400)
 
 
 class ApiTests(TestCase):

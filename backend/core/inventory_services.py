@@ -1016,6 +1016,73 @@ def close_all_florist_issues(florist, user=None, absorb_remainder=True):
         return result
 
 
+def close_selected_florist_issues(items, user=None, absorb_remainder=True):
+    """Tanlangan chiqimlarni birga yopadi.
+
+    items - [{"florist": FloristProfile, "batch": StockBatch, "return_stems": int}]
+
+    Hammasi bitta tranzaksiyada bajariladi: bittasida xato chiqsa hech biri
+    yopilmaydi. Bir nechta floristning chiqimini birga tanlash mumkin.
+    """
+    rows = list(items or [])
+    if not rows:
+        raise ValueError("Yopish uchun kamida bitta chiqim tanlang")
+    with transaction.atomic():
+        seen = set()
+        for row in rows:
+            florist = row["florist"]
+            batch = row["batch"]
+            key = (florist.id, batch.id)
+            if key in seen:
+                raise ValueError(f"{florist} · {batch.batch_number} ikki marta tanlangan")
+            seen.add(key)
+        result = {
+            "closed_batches": 0,
+            "shared_stems": 0,
+            "absorbed_remainder": 0,
+            "rounded_extra_stems": 0,
+            "unplaced_stems": 0,
+            "returned_stems": 0,
+            "florists": [],
+            "batches": [],
+        }
+        by_florist = {}
+        for row in rows:
+            florist = row["florist"]
+            batch = row["batch"]
+            return_stems = int(row.get("return_stems") or 0)
+            single = close_florist_issue(florist, batch, return_stems, user, absorb_remainder)
+            single["florist_id"] = florist.id
+            single["florist_name"] = str(florist)
+            single["batch_id"] = batch.id
+            single["batch_number"] = batch.batch_number
+            result["closed_batches"] += 1
+            result["shared_stems"] += int(single.get("shared_stems") or 0)
+            result["absorbed_remainder"] += int(single.get("absorbed_remainder") or 0)
+            result["rounded_extra_stems"] += int(single.get("rounded_extra_stems") or 0)
+            result["unplaced_stems"] += int(single.get("unplaced_stems") or 0)
+            result["returned_stems"] += return_stems
+            result["batches"].append(single)
+            bucket = by_florist.setdefault(florist.id, {
+                "florist": florist.id, "florist_name": str(florist),
+                "closed_batches": 0, "shared_stems": 0, "unplaced_stems": 0,
+            })
+            bucket["closed_batches"] += 1
+            bucket["shared_stems"] += int(single.get("shared_stems") or 0)
+            bucket["unplaced_stems"] += int(single.get("unplaced_stems") or 0)
+        result["florists"] = list(by_florist.values())
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="florist_issues_closed_bulk", entity_type="FloristStockBalance", entity_id="",
+            summary=(
+                f"{result['closed_batches']} ta chiqim birga yopildi, "
+                f"{len(by_florist)} ta florist, {result['shared_stems']} dona taqsimlandi"
+            ),
+            after=result,
+        )
+        return result
+
+
 TO_CATALOG = "to_catalog"
 TO_FLORIST = "to_florist"
 

@@ -426,6 +426,41 @@ class FloristStockIssueEditSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
 
 
+class FloristCloseSelectedItemSerializer(serializers.Serializer):
+    """Yopiladigan bitta chiqim."""
+
+    florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
+    batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())
+    return_stems = serializers.IntegerField(
+        required=False, min_value=0, default=0,
+        help_text="Shu chiqimdan skladga qaytariladigan gul soni.",
+    )
+
+
+class FloristCloseSelectedSerializer(serializers.Serializer):
+    """Tanlangan chiqimlarni birga yopish.
+
+    Bir nechta floristning chiqimini birga tanlash mumkin. Hammasi bitta
+    tranzaksiyada yopiladi — bittasida xato chiqsa hech biri yopilmaydi.
+    """
+
+    items = FloristCloseSelectedItemSerializer(many=True)
+    absorb_remainder = serializers.BooleanField(required=False, default=True)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Kamida bitta chiqim tanlang")
+        seen = set()
+        for row in value:
+            key = (row["florist"].id, row["batch"].id)
+            if key in seen:
+                raise serializers.ValidationError(
+                    f"{row['florist']} · {row['batch'].batch_number} ikki marta tanlangan"
+                )
+            seen.add(key)
+        return value
+
+
 class FloristCloseIssueSerializer(serializers.Serializer):
     """Chiqarilgan gul tugadi: ortig'i skladga, qolgani kataloglarga."""
 
