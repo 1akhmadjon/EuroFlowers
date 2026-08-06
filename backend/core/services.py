@@ -8,7 +8,7 @@ from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
 from .models import AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
-from .platform_services import instagram_send_image, openai_api_key, telegram_send_image
+from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group
 
 
 AI_REPLY_WAIT_SECONDS = 7
@@ -361,6 +361,7 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
     for row in queryset[:limit]:
         image_url = row.image_url or (row.social_post.image_url if row.social_post_id else "")
         rows.append({
+            "catalog_id": row.id,
             "name_uz": row.name_uz,
             "type": row.arrangement_type,
             "description_uz": row.description_uz,
@@ -737,25 +738,28 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "send_catalog_image",
-            "description": "Katalogdagi aniq buket/savat rasmini mijozga yuborish.",
+            "description": "Katalogdagi bitta aniq buket/savat rasmini mijozga yuborish. Butun katalog kerak bo'lsa send_catalog_album ishlat. catalog_id ma'lum bo'lsa uni yubor, aks holda query ga nomini yoz.",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "catalog_id": {"type": ["integer", "null"]},
+                },
+                "required": ["query", "catalog_id"],
                 "additionalProperties": False,
             },
             "strict": True,
         },
         {
             "type": "function",
-            "name": "send_catalog_images",
-            "description": "Katalogdagi bir nechta aniq buket/savat rasmlarini mijozga yuborish.",
+            "name": "send_catalog_album",
+            "description": "Katalogni mijozga rasm albomi qilib yuborish. Mijoz katalogni, vitrinani, tayyor buketlarni yoki nima borligini so'rasa shu tool chaqiriladi va katalog matn ro'yxati qilib yozilmaydi. catalog_ids bo'sh bo'lsa sotuvdagi barcha mahsulot yuboriladi. Rasmlar bitta xabarda albom bo'lib boradi, har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz ko'rgan raqam bilan bir xil, mijoz keyin birinchisi, 2-chisi desa o'sha position dagi catalog_id olinadi.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "queries": {"type": "array", "items": {"type": "string"}},
+                    "catalog_ids": {"type": "array", "items": {"type": "integer"}, "description": "Bo'sh massiv = butun katalog. Aks holda get_catalog qaytargan catalog_id lar."},
                 },
-                "required": ["queries"],
+                "required": ["catalog_ids"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -821,6 +825,126 @@ def send_catalog_item_image(conversation, item):
     return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url}
 
 
+CATALOG_ALBUM_MAX_PER_MESSAGE = 10
+
+
+def catalog_item_image_url(item):
+    return item.image_url or (item.social_post.image_url if item.social_post_id else "")
+
+
+def catalog_album_queryset():
+    """Albom tartibi. get_catalog bilan bir xil, shuning uchun mijoz ko'rgan raqam va tool natijasidagi position bir xil bo'ladi."""
+    return available_catalog_queryset().select_related("social_post").order_by("-created_at", "-id")
+
+
+def catalog_album_items(catalog_ids=None, limit=60):
+    queryset = catalog_album_queryset()
+    if catalog_ids:
+        items = {item.id: item for item in queryset.filter(id__in=catalog_ids)}
+        return [items[value] for value in catalog_ids if value in items][:limit]
+    return [item for item in queryset[:limit]]
+
+
+def send_catalog_album(conversation, items):
+    """Katalog rasmlarini albom qilib yuboradi. Bitta xabarga 10 tadan rasm sig'adi, bu platformaning chegarasi.
+
+    Har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz
+    ko'rgan raqam bilan bir xil, keyin mijoz shu raqamni aytsa AI qaysi mahsulot ekanini biladi.
+    """
+    customer = conversation.customer
+    rows = []
+    not_sent = []
+    for item in items:
+        image_url = catalog_item_image_url(item)
+        if not image_url:
+            not_sent.append({"catalog_id": item.id, "name": item.name_uz, "detail": "image_not_found"})
+            continue
+        rows.append({"item": item, "image_url": image_url})
+    platform = "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram"
+    chat_id = customer.instagram_user_id.split(":", 1)[1] if platform == "telegram" else customer.instagram_user_id
+    if not rows:
+        return {"ok": False, "detail": "image_not_found", "items": [], "not_sent": not_sent}
+    if not chat_id:
+        return {"ok": False, "detail": "no_platform_id", "items": [], "not_sent": not_sent}
+    position = 0
+    for row in rows:
+        position += 1
+        row["position"] = position
+        row["caption"] = f"{row['position']}. {row['item'].name_uz} — {money_uz(row['item'].price)} so'm"
+    sent_items = []
+    messages_sent = 0
+    album_chunks = 0
+    fallback_chunks = 0
+    for start in range(0, len(rows), CATALOG_ALBUM_MAX_PER_MESSAGE):
+        chunk = rows[start:start + CATALOG_ALBUM_MAX_PER_MESSAGE]
+        delivered, detail = send_catalog_album_chunk(customer, platform, chat_id, chunk)
+        if delivered:
+            messages_sent += 1
+            album_chunks += 1
+            for row in chunk:
+                sent_items.append(catalog_album_row(row, True, detail))
+            continue
+        fallback_chunks += 1
+        for row in chunk:
+            single = send_catalog_item_image(conversation, row["item"])
+            if single.get("ok"):
+                messages_sent += 1
+                sent_items.append(catalog_album_row(row, True, "one_by_one"))
+            else:
+                not_sent.append({"catalog_id": row["item"].id, "name": row["item"].name_uz, "detail": single.get("detail") or "send_failed"})
+    if album_chunks and fallback_chunks:
+        sent_as = "mixed"
+    elif album_chunks:
+        sent_as = "album"
+    else:
+        sent_as = "one_by_one"
+    result = {
+        "ok": bool(sent_items),
+        "sent_as": sent_as,
+        "messages_sent": messages_sent,
+        "album_max_per_message": CATALOG_ALBUM_MAX_PER_MESSAGE,
+        "numbering_visible": bool(sent_items) and fallback_chunks == 0,
+        "items": sent_items,
+        "not_sent": not_sent,
+    }
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"catalog_album_result": result})
+    return result
+
+
+def catalog_album_row(row, delivered, detail):
+    item = row["item"]
+    return {
+        "position": row["position"],
+        "catalog_id": item.id,
+        "name": item.name_uz,
+        "price": str(item.price),
+        "type": item.arrangement_type,
+        "delivered": delivered,
+        "detail": detail,
+    }
+
+
+def send_catalog_album_chunk(customer, platform, chat_id, chunk):
+    """Bitta albom xabarini yuboradi. (delivered, detail) qaytaradi, exception ko'tarmaydi."""
+    try:
+        if platform == "telegram":
+            if len(chunk) == 1:
+                result = telegram_send_image(chat_id, chunk[0]["image_url"], caption=chunk[0]["caption"])
+            else:
+                result = telegram_send_media_group(chat_id, [{"image_url": row["image_url"], "caption": row["caption"]} for row in chunk])
+        else:
+            result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name_uz}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk])
+    except Exception as error:
+        print(f"CATALOG_ALBUM_FAILED customer={customer.id} platform={platform} count={len(chunk)} error={error}", flush=True)
+        return False, "album_failed"
+    if isinstance(result, dict) and result.get("mocked"):
+        return True, "mocked"
+    if isinstance(result, dict) and result.get("ok") is False:
+        print(f"CATALOG_ALBUM_REJECTED customer={customer.id} platform={platform} result={result}", flush=True)
+        return False, "album_rejected"
+    return True, "album"
+
+
 def _stock_batch_for_ai(query="", batch_id=None):
     queryset = StockBatch.objects.filter(is_active=True, remaining_stems__gt=0).select_related("variant__flower").order_by("received_at", "id")
     if batch_id:
@@ -872,19 +996,18 @@ def execute_ai_tool(name, arguments, conversation):
         return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
     if name == "calculate_custom_arrangement_price":
         return calculate_custom_arrangement_price(arguments.get("stock_items") or [])
-    if name == "send_catalog_images":
-        results = []
-        seen = set()
-        for query in arguments.get("queries") or []:
-            item = _catalog_item_for_ai(query)
-            if not item or item.id in seen:
-                continue
-            seen.add(item.id)
-            results.append(send_catalog_item_image(conversation, item))
-        return {"ok": bool(results), "images": results}
+    if name == "send_catalog_album":
+        catalog_ids = [int(value) for value in (arguments.get("catalog_ids") or []) if str(value).isdigit() or isinstance(value, int)]
+        items = catalog_album_items(catalog_ids)
+        if not items:
+            return {"ok": False, "detail": "catalog_empty", "items": [], "not_sent": []}
+        return send_catalog_album(conversation, items)
     if name == "send_catalog_image":
         query = arguments.get("query") or ""
-        item = _catalog_item_for_ai(query)
+        catalog_id = arguments.get("catalog_id")
+        item = catalog_album_queryset().filter(id=catalog_id).first() if catalog_id else None
+        if not item:
+            item = _catalog_item_for_ai(query)
         if not item:
             item = available_catalog_queryset().filter(Q(name_uz__icontains=query)).select_related("social_post").first()
         if not item:
@@ -1137,6 +1260,9 @@ def ai_reply(conversation):
             "shop_orientir_ru": business_settings.shop_orientir_ru,
             "shop_location_link": business_settings.shop_location_link,
             "shop_phone": business_settings.shop_phone,
+            "operator_phone": business_settings.operator_phone or business_settings.shop_phone,
+            "operator_hours_uz": business_settings.operator_hours,
+            "operator_hours_ru": business_settings.operator_hours_ru,
         },
     }
     api_key = openai_api_key()

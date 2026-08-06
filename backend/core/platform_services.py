@@ -156,6 +156,42 @@ def instagram_send_image(recipient_id, image_url):
     return response.json()
 
 
+def instagram_send_carousel(recipient_id, elements):
+    """Bir nechta rasmni bitta xabarda karusel qilib yuboradi.
+
+    elements: [{"title": ..., "subtitle": ..., "image_url": ...}]
+    Instagram generic template bitta xabarda ko'pi bilan 10 ta element ko'taradi.
+    """
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+    if not access_token or not account_id:
+        return {"mocked": True}
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "generic",
+                    "elements": [
+                        {
+                            "title": (row.get("title") or "")[:80],
+                            "subtitle": (row.get("subtitle") or "")[:80],
+                            "image_url": row.get("image_url") or "",
+                        }
+                        for row in elements
+                    ],
+                },
+            }
+        },
+    }
+    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
+    response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=40)
+    response.raise_for_status()
+    return response.json()
+
+
 def instagram_sender_action(recipient_id, action):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
@@ -198,8 +234,27 @@ def telegram_send(chat_id, text):
     return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
 
 
-def telegram_send_image(chat_id, image_url):
-    return telegram_api("sendPhoto", {"chat_id": chat_id, "photo": image_url})
+def telegram_send_image(chat_id, image_url, caption=""):
+    payload = {"chat_id": chat_id, "photo": image_url}
+    if caption:
+        payload["caption"] = caption[:1024]
+    return telegram_api("sendPhoto", payload)
+
+
+def telegram_send_media_group(chat_id, media):
+    """Bir nechta rasmni bitta xabarda albom qilib yuboradi.
+
+    media: [{"image_url": ..., "caption": ...}]
+    Telegram media group bitta xabarda ko'pi bilan 10 ta rasm ko'taradi.
+    """
+    payload = {
+        "chat_id": chat_id,
+        "media": [
+            {"type": "photo", "media": row.get("image_url") or "", "caption": (row.get("caption") or "")[:1024]}
+            for row in media
+        ],
+    }
+    return telegram_api("sendMediaGroup", payload)
 
 
 def telegram_send_photo_with(token, chat_id, photo, caption="", parse_mode="Markdown"):

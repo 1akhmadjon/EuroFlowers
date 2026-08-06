@@ -205,6 +205,132 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["image_sent"])
 
+    def make_album_catalog(self, count):
+        items = []
+        for index in range(count):
+            items.append(CatalogItem.objects.create(name_uz=f"Albom buket {index + 1}", arrangement_type="bouquet", price=100000 * (index + 1), status="available", image_url=f"https://example.com/album-{index + 1}.jpg"))
+        return items
+
+    def test_catalog_album_sends_every_item_in_one_message(self):
+        from unittest.mock import patch
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        self.make_album_catalog(3)
+        customer = Customer.objects.create(instagram_user_id="telegram:5001")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_media_group", return_value={"ok": True}) as album_mock:
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent_as"], "album")
+        self.assertEqual(result["messages_sent"], 1)
+        self.assertTrue(result["numbering_visible"])
+        self.assertEqual([row["position"] for row in result["items"]], [1, 2, 3])
+        media = album_mock.call_args.args[1]
+        self.assertEqual(len(media), 3)
+        self.assertTrue(media[0]["caption"].startswith("1. "))
+        self.assertIn("so'm", media[0]["caption"])
+        self.assertEqual({row["catalog_id"] for row in result["items"]}, {row["catalog_id"] for row in ai_catalog_rows("", limit=80)})
+
+    def test_catalog_album_keeps_numbering_across_chunks(self):
+        from unittest.mock import patch
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        self.make_album_catalog(12)
+        customer = Customer.objects.create(instagram_user_id="telegram:5002")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_media_group", return_value={"ok": True}) as album_mock:
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertEqual(album_mock.call_count, 2)
+        self.assertEqual(result["messages_sent"], 2)
+        self.assertEqual([row["position"] for row in result["items"]], list(range(1, 13)))
+        self.assertEqual(len(album_mock.call_args_list[0].args[1]), 10)
+        self.assertEqual(len(album_mock.call_args_list[1].args[1]), 2)
+        self.assertTrue(album_mock.call_args_list[1].args[1][0]["caption"].startswith("11. "))
+
+    def test_catalog_album_falls_back_to_single_images_when_album_fails(self):
+        from unittest.mock import patch
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        self.make_album_catalog(2)
+        customer = Customer.objects.create(instagram_user_id="telegram:5003")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_media_group", side_effect=requests.HTTPError("400 Bad Request")):
+            with patch("core.services.telegram_send_image", return_value={"ok": True}) as single_mock:
+                result = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent_as"], "one_by_one")
+        self.assertFalse(result["numbering_visible"])
+        self.assertEqual(single_mock.call_count, 2)
+
+    def test_catalog_album_reports_failure_instead_of_claiming_sent(self):
+        from unittest.mock import patch
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        self.make_album_catalog(1)
+        customer = Customer.objects.create(instagram_user_id="telegram:5004")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_image", side_effect=requests.HTTPError("400 Bad Request")):
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["items"], [])
+        self.assertEqual(len(result["not_sent"]), 1)
+
+    def test_catalog_album_uses_instagram_carousel(self):
+        from unittest.mock import patch
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        items = self.make_album_catalog(2)
+        customer = Customer.objects.create(instagram_user_id="ig-album")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.instagram_send_carousel", return_value={"message_id": "mid-1"}) as carousel_mock:
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": [items[1].id, items[0].id]}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent_as"], "album")
+        elements = carousel_mock.call_args.args[1]
+        self.assertEqual(len(elements), 2)
+        self.assertTrue(elements[0]["title"].startswith("1. "))
+        self.assertEqual([row["catalog_id"] for row in result["items"]], [items[1].id, items[0].id])
+
+    def test_catalog_album_returns_empty_detail_when_nothing_on_sale(self):
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        customer = Customer.objects.create(instagram_user_id="telegram:5005")
+        conversation = Conversation.objects.create(customer=customer)
+        result = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "catalog_empty")
+
+    def test_send_catalog_image_accepts_catalog_id(self):
+        from unittest.mock import patch
+        item = self.make_album_catalog(1)[0]
+        customer = Customer.objects.create(instagram_user_id="telegram:5006")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_image", return_value={"ok": True}):
+            result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["catalog_id"], item.id)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_ai_context_exposes_operator_contact(self):
+        from unittest.mock import patch
+        settings_row, _ = BusinessSettings.objects.get_or_create(pk=1)
+        settings_row.operator_phone = "+998 88 111 22 33"
+        settings_row.operator_hours = "08:00 dan 00:00 gacha"
+        settings_row.operator_hours_ru = "с 08:00 до 00:00"
+        settings_row.save()
+        customer = Customer.objects.create(instagram_user_id="ig-operator")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="operator bilan gaplashsam boladimi")
+        payload = {"reply": "Aloqa raqamimiz", "detected_language": "uz", "customer_name": None, "phone": None, "lead_ready": False, "lead_request": None, "arrangement_type": None, "estimated_price": None, "handoff": False, "catalog_items": [], "stock_items": []}
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="r-op")
+            ai_reply(conversation)
+        context = json.loads(client.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
+        self.assertEqual(context["business"]["operator_phone"], "+998 88 111 22 33")
+        self.assertEqual(context["business"]["operator_hours_uz"], "08:00 dan 00:00 gacha")
+        self.assertEqual(context["business"]["operator_hours_ru"], "с 08:00 до 00:00")
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_context_uses_business_settings_not_hardcoded_values(self):
         from unittest.mock import patch
@@ -501,7 +627,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_album", "send_stock_image", "send_stock_images"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
@@ -512,7 +638,7 @@ class BusinessRulesTests(TestCase):
         self.assertIn("105000.00", kwargs["input"][-1]["content"])
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_images", "send_stock_image", "send_stock_images"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_album", "send_stock_image", "send_stock_images"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = CatalogItem.objects.create(name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
