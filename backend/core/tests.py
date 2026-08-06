@@ -230,6 +230,10 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(media[0]["caption"].startswith("1. "))
         self.assertIn("so'm", media[0]["caption"])
         self.assertEqual({row["catalog_id"] for row in result["items"]}, {row["catalog_id"] for row in ai_catalog_rows("", limit=80)})
+        self.assertNotIn("image_url", result["items"][0])
+        stored = conversation.messages.filter(sender="system").order_by("-id").first().metadata["catalog_album_result"]
+        self.assertEqual([row["image_url"] for row in stored["items"]], ["https://example.com/album-3.jpg", "https://example.com/album-2.jpg", "https://example.com/album-1.jpg"])
+        self.assertEqual([row["position"] for row in stored["items"]], [1, 2, 3])
 
     def test_catalog_album_keeps_numbering_across_chunks(self):
         from unittest.mock import patch

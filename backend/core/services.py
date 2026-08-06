@@ -908,7 +908,7 @@ def send_catalog_album(conversation, items):
         "not_sent": not_sent,
     }
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"catalog_album_result": result})
-    return result
+    return ai_catalog_album_result(result)
 
 
 def catalog_album_row(row, delivered, detail):
@@ -919,9 +919,20 @@ def catalog_album_row(row, delivered, detail):
         "name": item.name_uz,
         "price": str(item.price),
         "type": item.arrangement_type,
+        "image_url": row["image_url"],
         "delivered": delivered,
         "detail": detail,
     }
+
+
+def ai_catalog_album_result(result):
+    """AI ga rasm havolasi berilmaydi, u URL ni matn qilib yuborib qo'ymasligi uchun.
+
+    Havolalar suhbat xabarining metadata sida qoladi va API orqali CRM chatiga chiqadi.
+    """
+    trimmed = dict(result)
+    trimmed["items"] = [{key: value for key, value in row.items() if key != "image_url"} for row in result.get("items", [])]
+    return trimmed
 
 
 def send_catalog_album_chunk(customer, platform, chat_id, chunk):
