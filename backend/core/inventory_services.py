@@ -203,6 +203,49 @@ def sync_catalog_decoration_salary(item, user):
     return entry
 
 
+def add_extra_decoration_salary(florist, count, unit_amount=None, work_date=None, note="", user=None):
+    """Floristga qo'lda oformleniya haqi yozadi.
+
+    Admin nechta oformleniya qilinganini yozadi, summa o'zi ko'payadi.
+    Bittasining narxi berilmasa florist profilidagi oformleniya narxi olinadi.
+
+    Bir kunda bir necha marta qo'shilsa yangi qator ochilmaydi — soni o'sha
+    kunning qatoriga qo'shiladi. Bittasining narxi boshqa bo'lsa esa alohida
+    qator ochiladi, aks holda "soni × narxi = summa" hisobi buzilardi.
+    """
+    if florist is None:
+        raise ValueError("Floristni tanlang")
+    count = int(count or 0)
+    if count < 1:
+        raise ValueError("Nechta oformleniya qilinganini yozing")
+    unit = Decimal(str(unit_amount)) if unit_amount not in (None, "") else Decimal(florist.decoration_fee or 0)
+    if unit <= 0:
+        raise ValueError("Oformleniya narxini kiriting — florist profilida ham yozilmagan")
+    work_date = work_date or timezone.localdate()
+    entry = FloristSalaryEntry.objects.filter(
+        florist=florist, source="extra_decoration", work_date=work_date, unit_amount=unit,
+    ).order_by("id").first()
+    if entry:
+        entry.quantity += count
+        entry.amount = unit * entry.quantity
+        if note:
+            entry.note = note
+        entry.created_by = user if getattr(user, "is_authenticated", False) else entry.created_by
+        entry.save(update_fields=["quantity", "amount", "note", "created_by", "updated_at"])
+        return entry, False
+    entry = FloristSalaryEntry.objects.create(
+        florist=florist,
+        source="extra_decoration",
+        quantity=count,
+        unit_amount=unit,
+        amount=unit * count,
+        work_date=work_date,
+        note=note or "Qo‘shimcha oformleniya haqi",
+        created_by=user if getattr(user, "is_authenticated", False) else None,
+    )
+    return entry, True
+
+
 def deduct_catalog_sale_materials(item, materials, quantity, history, user):
     rows = []
     for row in materials or []:

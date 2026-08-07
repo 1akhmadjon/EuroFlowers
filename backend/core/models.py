@@ -430,9 +430,15 @@ class FloristFaceSample(TimeStampedModel):
 
 
 class FloristSalaryEntry(TimeStampedModel):
-    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("decoration", "Oformleniya"), ("sale_decoration", "Sotuv oformleniya"), ("daily", "Kunlik"), ("rework", "Restavratsiya"), ("manual", "Qo‘lda")]
+    SOURCE_CHOICES = [("catalog", "Katalog"), ("custom_catalog", "Custom katalog"), ("decoration", "Oformleniya"), ("sale_decoration", "Sotuv oformleniya"), ("extra_decoration", "Qo‘shimcha oformleniya"), ("daily", "Kunlik"), ("rework", "Restavratsiya"), ("manual", "Qo‘lda")]
+    # Oformleniya jamiga tushadigan manbalar. Hisobotda uchalasi bitta ustunga yig'iladi.
+    DECORATION_SOURCES = ["decoration", "sale_decoration", "extra_decoration"]
     florist = models.ForeignKey(FloristProfile, on_delete=models.CASCADE, related_name="salary_entries")
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    # Qo'shimcha oformleniyada nechta qilingani va bittasining narxi. Summa
+    # shu ikkisidan hisoblanadi, shuning uchun keyin ikkalasini ham tuzatsa bo'ladi.
+    quantity = models.PositiveIntegerField(default=0)
+    unit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     source = models.CharField(max_length=30, choices=SOURCE_CHOICES)
     work_date = models.DateField(default=timezone.localdate)
     catalog_item = models.ForeignKey("CatalogItem", null=True, blank=True, on_delete=models.SET_NULL, related_name="salary_entries")

@@ -564,6 +564,14 @@ class FloristSalaryEntrySerializer(serializers.ModelSerializer):
         if reason:
             note = validated_data.get("note", instance.note or "")
             validated_data["note"] = (note + "\n" if note else "") + f"O‘zgartirish sababi: {reason}"
+        # Qo'shimcha oformleniyada summa soni va bittasining narxidan chiqadi.
+        # Soni yoki narxi tuzatilsa summa o'zi qayta hisoblanadi — admin uni
+        # qo'lda ham yozishi mumkin, o'shanda yozgani qoladi.
+        if instance.source == "extra_decoration" and "amount" not in validated_data:
+            quantity = validated_data.get("quantity", instance.quantity)
+            unit_amount = validated_data.get("unit_amount", instance.unit_amount)
+            if quantity and unit_amount:
+                validated_data["amount"] = Decimal(str(unit_amount)) * quantity
         return super().update(instance, validated_data)
 
     @extend_schema_field(serializers.DictField())
@@ -571,6 +579,15 @@ class FloristSalaryEntrySerializer(serializers.ModelSerializer):
         if not obj.catalog_item_id:
             return None
         return {"id": obj.catalog_item_id, "name_uz": obj.catalog_item.name_uz, "catalog_kind": obj.catalog_item.catalog_kind, "arrangement_type": obj.catalog_item.arrangement_type}
+
+
+class FloristDecorationSalarySerializer(serializers.Serializer):
+    """Floristga qo'lda oformleniya haqi yozish."""
+
+    count = serializers.IntegerField(min_value=1, help_text="Nechta oformleniya qilingani.")
+    unit_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.01"), help_text="Bittasining narxi. Berilmasa florist profilidagi oformleniya narxi olinadi.")
+    work_date = serializers.DateField(required=False, help_text="Berilmasa bugungi sana.")
+    note = serializers.CharField(required=False, allow_blank=True)
 
 
 class FloristVolumeRateSerializer(serializers.ModelSerializer):

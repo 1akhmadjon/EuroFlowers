@@ -5853,3 +5853,122 @@ class BranchExpenseTests(TestCase):
         self.assertEqual(Decimal(buckets["Parkent"]["expense_total"]), Decimal("70000"))
         only_branch = self.client.get("/api/accounting/", {"branch": self.branch.id}).json()
         self.assertEqual(Decimal(only_branch["summary"]["expense_total"]), Decimal("70000"))
+
+
+class FloristExtraDecorationTests(TestCase):
+    """Florist detalidan qo'lda oformleniya haqi yozish."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("boss", password="password", is_superuser=True, is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        florist_user = User.objects.create_user("isroil", password="password", first_name="Isroil")
+        self.florist = FloristProfile.objects.create(user=florist_user, staff_type="florist", decoration_fee=Decimal("5000"))
+
+    def _add(self, **payload):
+        return self.client.post(f"/api/florists/{self.florist.id}/decoration/", payload, format="json")
+
+    def test_count_is_multiplied_by_the_profile_fee(self):
+        response = self._add(count=3)
+        self.assertEqual(response.status_code, 201, response.data)
+        entry = FloristSalaryEntry.objects.get(id=response.json()["id"])
+        self.assertEqual(entry.source, "extra_decoration")
+        self.assertEqual(entry.quantity, 3)
+        self.assertEqual(entry.unit_amount, Decimal("5000.00"))
+        self.assertEqual(entry.amount, Decimal("15000.00"))
+        self.assertEqual(entry.work_date, timezone.localdate())
+        self.assertIsNone(entry.catalog_item_id)
+
+    def test_unit_amount_can_be_given_instead_of_the_profile_fee(self):
+        response = self._add(count=2, unit_amount="7000")
+        entry = FloristSalaryEntry.objects.get(id=response.json()["id"])
+        self.assertEqual(entry.unit_amount, Decimal("7000.00"))
+        self.assertEqual(entry.amount, Decimal("14000.00"))
+        # profildagi narx o'zgarmaydi
+        self.florist.refresh_from_db()
+        self.assertEqual(self.florist.decoration_fee, Decimal("5000"))
+
+    def test_same_day_and_same_price_add_up_in_one_row(self):
+        first = self._add(count=3)
+        second = self._add(count=2)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["id"], first.json()["id"])
+        entry = FloristSalaryEntry.objects.get(id=first.json()["id"])
+        self.assertEqual(entry.quantity, 5)
+        self.assertEqual(entry.amount, Decimal("25000.00"))
+        self.assertEqual(FloristSalaryEntry.objects.filter(source="extra_decoration").count(), 1)
+
+    def test_different_unit_price_opens_a_separate_row(self):
+        first = self._add(count=3)
+        second = self._add(count=2, unit_amount="7000")
+        self.assertNotEqual(first.json()["id"], second.json()["id"])
+        self.assertEqual(FloristSalaryEntry.objects.filter(source="extra_decoration").count(), 2)
+
+    def test_another_day_opens_a_separate_row(self):
+        self._add(count=3)
+        response = self._add(count=2, work_date="2026-08-01")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(FloristSalaryEntry.objects.filter(source="extra_decoration").count(), 2)
+
+    def test_zero_count_is_rejected(self):
+        response = self._add(count=0)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("count", response.data)
+
+    def test_florist_without_a_fee_must_be_given_a_price(self):
+        self.florist.decoration_fee = Decimal("0")
+        self.florist.save(update_fields=["decoration_fee"])
+        response = self._add(count=3)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("narx", str(response.data["detail"]).lower())
+        self.assertEqual(self._add(count=3, unit_amount="6000").status_code, 201)
+
+    def test_profile_decoration_fee_can_be_changed(self):
+        response = self.client.patch(f"/api/florists/{self.florist.id}/", {"decoration_fee": "8000"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.florist.refresh_from_db()
+        self.assertEqual(self.florist.decoration_fee, Decimal("8000.00"))
+        entry = FloristSalaryEntry.objects.get(id=self._add(count=2).json()["id"])
+        self.assertEqual(entry.amount, Decimal("16000.00"))
+
+    def test_count_can_be_edited_and_the_amount_follows(self):
+        created = self._add(count=3).json()
+        response = self.client.patch(f"/api/florist-salary/{created['id']}/", {"quantity": 5}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        entry = FloristSalaryEntry.objects.get(id=created["id"])
+        self.assertEqual(entry.quantity, 5)
+        self.assertEqual(entry.amount, Decimal("25000.00"))
+
+    def test_unit_price_can_be_edited_and_the_amount_follows(self):
+        created = self._add(count=3).json()
+        self.client.patch(f"/api/florist-salary/{created['id']}/", {"unit_amount": "6000"}, format="json")
+        entry = FloristSalaryEntry.objects.get(id=created["id"])
+        self.assertEqual(entry.amount, Decimal("18000.00"))
+
+    def test_amount_written_by_hand_wins_over_the_multiplication(self):
+        created = self._add(count=3).json()
+        self.client.patch(f"/api/florist-salary/{created['id']}/", {"amount": "20000"}, format="json")
+        entry = FloristSalaryEntry.objects.get(id=created["id"])
+        self.assertEqual(entry.amount, Decimal("20000.00"))
+        self.assertEqual(entry.quantity, 3)
+
+    def test_extra_decoration_lands_in_the_decoration_column(self):
+        self._add(count=3)
+        stats = self.client.get(f"/api/florists/{self.florist.id}/stats/").json()
+        self.assertEqual(Decimal(stats["summary"]["decoration_salary_total"]), Decimal("15000"))
+        self.assertEqual(Decimal(stats["summary"]["manual_salary_total"]), Decimal("0"))
+        self.assertEqual(Decimal(stats["summary"]["salary_total"]), Decimal("15000"))
+        sources = {row["source"]: row for row in stats["by_source"]}
+        self.assertEqual(sources["extra_decoration"]["source_label"], "Qo‘shimcha oformleniya")
+
+    def test_florist_sees_it_and_gets_a_notification(self):
+        created = self._add(count=3).json()
+        self.assertTrue(Notification.objects.filter(target_user=self.florist.user, reference_type="florist_salary", reference_id=created["id"]).exists())
+        self.assertTrue(AuditLog.objects.filter(action="florist_decoration_added").exists())
+
+    def test_florist_cannot_write_it_for_themselves(self):
+        UserProfile.objects.update_or_create(user=self.florist.user, defaults={"role": "florist"})
+        self.client.force_authenticate(self.florist.user)
+        self.assertEqual(self._add(count=3).status_code, 403)
+        self.assertFalse(FloristSalaryEntry.objects.filter(source="extra_decoration").exists())
