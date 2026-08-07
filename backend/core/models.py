@@ -102,17 +102,27 @@ class Flower(TimeStampedModel):
 
 class FlowerVariant(TimeStampedModel):
     flower = models.ForeignKey(Flower, on_delete=models.PROTECT, related_name="variants")
-    name_uz = models.CharField(max_length=120)
-    color_uz = models.CharField(max_length=80)
+    name_uz = models.CharField(max_length=120, blank=True)
+    color_uz = models.CharField(max_length=80, blank=True)
     description_uz = models.TextField(blank=True)
     description_ru = models.TextField(blank=True)
     default_stems_per_bunch = models.PositiveIntegerField(default=10)
     minimum_sale_stems = models.PositiveIntegerField(default=1)
     image_url = models.URLField(blank=True)
     is_active = models.BooleanField(default=True)
+    # Navsiz kirim uchun gulning umumiy qatori. Kirimda nav so'ralmaydi,
+    # shuning uchun har gulda bitta shunday qator bo'ladi va partiya ichidagi
+    # gullar shunga bog'lanadi. Nav ro'yxatida ko'rinmaydi.
+    is_general = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["flower"], condition=models.Q(is_general=True), name="unique_general_flower_variant"),
+        ]
 
     def __str__(self):
-        return f"{self.flower.name_uz} · {self.name_uz} · {self.color_uz}"
+        parts = [self.flower.name_uz, self.name_uz, self.color_uz]
+        return " · ".join(part for part in parts if part)
 
 
 class Supplier(TimeStampedModel):
@@ -173,6 +183,14 @@ class StockDelivery(TimeStampedModel):
 
 
 class StockBatch(TimeStampedModel):
+    """Partiya ichidagi bitta gul qatori.
+
+    Kirimda nav so'ralmaydi: postavshik va yuk bitta bo'lgani uchun bitta
+    partiya ichida guli, bo'yi va tannarxi bir xil qatorlar bittaga qo'shilib
+    ketadi — soni ustiga qo'shiladi, yangi qator ochilmaydi. Skladda shuning
+    uchun "qaysi navdan qancha" emas, "qaysi guldan qancha" ko'rinadi.
+    """
+
     variant = models.ForeignKey(FlowerVariant, on_delete=models.PROTECT, related_name="batches")
     delivery = models.ForeignKey(StockDelivery, null=True, blank=True, on_delete=models.PROTECT, related_name="batches")
     supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_batches")
@@ -221,6 +239,15 @@ class StockBatch(TimeStampedModel):
     @property
     def stock_value(self):
         return self.remaining_stems * self.sale_price_per_stem
+
+    @property
+    def flower_name(self):
+        return self.variant.flower.name_uz
+
+    @property
+    def title(self):
+        """Skladda ko'rinadigan nom — gul va bo'y."""
+        return f"{self.variant} {self.height_label}".strip()
 
     def __str__(self):
         return f"{self.batch_number} · {self.variant}"

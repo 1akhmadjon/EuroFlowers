@@ -10,6 +10,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from .inventory_services import general_variant_for, merge_into_stock_batch, stock_merge_target
 from .models import AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 
 
@@ -682,6 +683,17 @@ class StockDeliverySerializer(serializers.ModelSerializer):
 
 
 class StockBatchSerializer(serializers.ModelSerializer):
+    """Partiya ichidagi gul qatori.
+
+    Kirimda nav so'ralmaydi — `flower` yuboriladi. Shu partiyada guli, bo'yi
+    va tannarxi bir xil qator allaqachon bo'lsa yangi qator ochilmaydi,
+    soni o'sha qatorga qo'shiladi va javobda `merged` true bo'ladi.
+    """
+
+    flower = serializers.PrimaryKeyRelatedField(queryset=Flower.objects.all(), required=False, write_only=True, help_text="Gul. Kirimda shu yuboriladi, nav so'ralmaydi.")
+    flower_detail = serializers.SerializerMethodField()
+    flower_name = serializers.CharField(read_only=True)
+    title = serializers.CharField(read_only=True)
     variant_detail = FlowerVariantSerializer(source="variant", read_only=True)
     supplier_detail = SupplierSerializer(source="supplier", read_only=True)
     delivery_detail = serializers.SerializerMethodField()
@@ -691,11 +703,14 @@ class StockBatchSerializer(serializers.ModelSerializer):
     stock_value = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     height_label = serializers.CharField(read_only=True)
     received_bunches = serializers.DecimalField(max_digits=10, decimal_places=2, write_only=True, required=False)
+    merged = serializers.SerializerMethodField()
+    merged_stems = serializers.SerializerMethodField()
 
     class Meta:
         model = StockBatch
         fields = "__all__"
         extra_kwargs = {
+            "variant": {"required": False},
             "received_stems": {"required": False},
             "remaining_stems": {"required": False},
             "batch_number": {"required": False},
@@ -705,6 +720,20 @@ class StockBatchSerializer(serializers.ModelSerializer):
             "sale_price_per_stem": {"required": False},
             "sale_price_per_bunch": {"required": False},
         }
+
+    @extend_schema_field(serializers.DictField())
+    def get_flower_detail(self, obj):
+        return FlowerSerializer(obj.variant.flower).data
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_merged(self, obj):
+        """Kirim mavjud qatorga qo'shildimi yoki yangi qator ochildimi."""
+        return bool(getattr(obj, "_merged", False))
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_merged_stems(self, obj):
+        """Shu kirimda qo'shilgan dona soni. Yangi qatorda kelgan songa teng."""
+        return int(getattr(obj, "_merged_stems", obj.received_stems or 0))
 
     @extend_schema_field(serializers.CharField())
     def get_remaining_bunches_label(self, obj):
@@ -811,6 +840,13 @@ class StockBatchSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        # Kirimda gul tanlanadi, nav emas. Nav yuborilsa eski usul deb qabul
+        # qilinadi — eski partiyalarni tahrirlash uchun kerak.
+        flower = attrs.pop("flower", None)
+        if flower is not None:
+            attrs["variant"] = general_variant_for(flower)
+        if not self.instance and not attrs.get("variant"):
+            raise serializers.ValidationError({"flower": "Gulni tanlang"})
         if not self.instance:
             # narxni pochkada ham, donada ham berish mumkin, lekin biri bo'lishi shart.
             # Tekin gulda tannarx umuman yozilmaydi.
@@ -848,7 +884,19 @@ class StockBatchSerializer(serializers.ModelSerializer):
             )
             validated_data["delivery"] = delivery
         validated_data["batch_number"] = validated_data["delivery"].number
-        return super().create(validated_data)
+        with transaction.atomic():
+            target = stock_merge_target(validated_data, lock=True)
+            if not target:
+                batch = super().create(validated_data)
+                batch._merged = False
+                batch._merged_stems = batch.received_stems
+                return batch
+            if not int(validated_data.get("received_stems") or 0):
+                raise serializers.ValidationError({"received_stems": "Kelgan sonni kiriting"})
+            added = merge_into_stock_batch(target, validated_data)
+        target._merged = True
+        target._merged_stems = added
+        return target
 
     def update(self, instance, validated_data):
         validated_data.pop("received_bunches", None)
@@ -2422,10 +2470,22 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
 
 class StockBatchVariantChangeSerializer(serializers.Serializer):
-    """Ishlatilgan partiyada gul navini almashtirish."""
+    """Ishlatilgan partiyada gulni almashtirish.
 
-    variant = serializers.PrimaryKeyRelatedField(queryset=FlowerVariant.objects.all())
+    Kirimda nav so'ralmaydi, shuning uchun `flower` yuboriladi. `variant`
+    eski partiyalarni to'g'rilash uchun qolgan.
+    """
+
+    flower = serializers.PrimaryKeyRelatedField(queryset=Flower.objects.all(), required=False, help_text="Yangi gul.")
+    variant = serializers.PrimaryKeyRelatedField(queryset=FlowerVariant.objects.all(), required=False, help_text="Eski usul — aniq nav.")
     reason = serializers.CharField(help_text="Nega almashtirilayotgani — audit jurnaliga yoziladi.")
+
+    def validate(self, attrs):
+        if not attrs.get("flower") and not attrs.get("variant"):
+            raise serializers.ValidationError({"flower": "Gulni tanlang"})
+        if attrs.get("flower") and not attrs.get("variant"):
+            attrs["variant"] = general_variant_for(attrs["flower"])
+        return attrs
 
 
 class DebtPayRequestSerializer(serializers.Serializer):

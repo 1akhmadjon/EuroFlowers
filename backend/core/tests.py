@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
-from .services import available_catalog_queryset, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
+from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -407,12 +407,19 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(history.discount_percent, Decimal("10.00"))
         self.assertEqual(history.discount_reason, "Doimiy mijoz")
 
-    def test_ai_stock_rows_return_first_available_batch_per_variant(self):
-        StockBatch.objects.create(variant=self.batch.variant, batch_number="T-2", height_cm=60, stems_per_bunch=20, received_stems=200, remaining_stems=200, cost_per_stem=21000, sale_price_per_stem=35000, sale_price_per_bunch=680000, received_at=timezone.localdate() + timedelta(days=1))
-        rows = ai_stock_rows("atirgul mondial", limit=10)
-        batch_ids = [row["batch_id"] for row in rows]
+    def test_ai_stock_rows_return_every_distinct_offer(self):
+        """Bo'yi yoki narxi boshqa partiya alohida taklif — AI ikkalasini ham ko'radi."""
+        other_price = StockBatch.objects.create(variant=self.batch.variant, batch_number="T-2", height_cm=60, stems_per_bunch=20, received_stems=200, remaining_stems=200, cost_per_stem=21000, sale_price_per_stem=35000, sale_price_per_bunch=680000, received_at=timezone.localdate() + timedelta(days=1))
+        batch_ids = [row["batch_id"] for row in ai_stock_rows("atirgul mondial", limit=10)]
         self.assertIn(self.batch.id, batch_ids)
-        self.assertNotIn(StockBatch.objects.get(batch_number="T-2").id, batch_ids)
+        self.assertIn(other_price.id, batch_ids)
+
+    def test_ai_stock_rows_skip_a_repeated_offer(self):
+        """Bo'yi ham, narxi ham bir xil partiya takrorlanmaydi — eng eskisi qoladi."""
+        same_offer = StockBatch.objects.create(variant=self.batch.variant, batch_number="T-3", height_cm=60, stems_per_bunch=20, received_stems=200, remaining_stems=200, cost_per_stem=20000, sale_price_per_stem=30000, sale_price_per_bunch=580000, received_at=timezone.localdate() + timedelta(days=1))
+        batch_ids = [row["batch_id"] for row in ai_stock_rows("atirgul mondial", limit=10)]
+        self.assertIn(self.batch.id, batch_ids)
+        self.assertNotIn(same_offer.id, batch_ids)
 
     def test_ai_stock_rows_treats_whitespace_query_as_all_stock(self):
         rows = ai_stock_rows(" ", limit=10)
@@ -4308,7 +4315,7 @@ class ApiTests(TestCase):
         batch = self._batch_with_usage(received=100, used=30)
         response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"variant": other.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("change-variant", str(response.data["variant"]))
+        self.assertIn("change-flower", str(response.data["flower"]))
         batch.refresh_from_db()
         self.assertEqual(batch.variant_id, self.batch.variant_id)
 
@@ -4326,7 +4333,7 @@ class ApiTests(TestCase):
         }, format="json")
         response = self.client.patch(f"/api/stock-batches/{created['id']}/", {"variant": other.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("variant", response.data)
+        self.assertIn("flower", response.data)
 
     def _used_batch_with_sale(self, name="Nav buketi"):
         other = FlowerVariant.objects.create(flower=self.batch.variant.flower, name_uz="Yangi nav", color_uz="Oq")
@@ -4933,7 +4940,8 @@ class ApiTests(TestCase):
             "cost_per_bunch": "25000", "sale_price_per_bunch": "50000",
         }
         batch_one = self.client.post("/api/stock-batches/", payload, format="json").json()
-        batch_two = self.client.post("/api/stock-batches/", payload, format="json").json()
+        # bo'yi boshqa — shuning uchun birinchi qatorga qo'shilmaydi, yangi qator ochiladi
+        batch_two = self.client.post("/api/stock-batches/", {**payload, "height_cm": 60}, format="json").json()
         batches = self.client.get("/api/stock-batches/").data["results"]
         self.assertEqual(batches[0]["id"], batch_two["id"])
         self.assertEqual(batches[1]["id"], batch_one["id"])
@@ -5026,7 +5034,7 @@ class ApiTests(TestCase):
         batch, _, other = self._used_batch_with_sale()
         response = self.client.patch(f"/api/stock-batches/{batch.id}/", {"variant": other.id}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("change-variant", str(response.data["variant"]))
+        self.assertIn("change-flower", str(response.data["flower"]))
 
     def test_changing_stems_per_bunch_recalculates_stem_prices(self):
         created = self.client.post("/api/stock-batches/", {
@@ -5197,10 +5205,12 @@ class ApiTests(TestCase):
         two = self.client.post("/api/stock-batches/", {**payload, "variant": second.id}, format="json")
         self.assertEqual(two.status_code, 201, two.json())
         self.assertEqual(StockBatch.objects.filter(batch_number="1").count(), 2)
-        # ayni gulga ayni raqam bilan yana qo'shsa ham to'sib qo'yilmaydi
+        # ayni gulni ayni raqam bilan yana kiritsa yangi qator ochilmaydi, soni qo'shiladi
         three = self.client.post("/api/stock-batches/", {**payload, "variant": first.id}, format="json")
         self.assertEqual(three.status_code, 201, three.json())
-        self.assertEqual(StockBatch.objects.filter(batch_number="1").count(), 3)
+        self.assertEqual(StockBatch.objects.filter(batch_number="1").count(), 2)
+        self.assertEqual(three.json()["id"], one.json()["id"])
+        self.assertEqual(three.json()["received_stems"], 40)
 
     @override_settings(OPENAI_API_KEY="")
     def test_mini_app_custom_quote_ai_returns_final_price_note(self):
@@ -5853,6 +5863,213 @@ class BranchExpenseTests(TestCase):
         self.assertEqual(Decimal(buckets["Parkent"]["expense_total"]), Decimal("70000"))
         only_branch = self.client.get("/api/accounting/", {"branch": self.branch.id}).json()
         self.assertEqual(Decimal(only_branch["summary"]["expense_total"]), Decimal("70000"))
+
+
+class StockIntakeMergeTests(TestCase):
+    """Partiya kirimi: nav so'ralmaydi, bo'yi va tannarxi bir xil qatorlar qo'shiladi."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("sklad", password="password", is_superuser=True, is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.rose = Flower.objects.create(name_uz="Atirgul", slug="atirgul-merge")
+        self.chrysanthemum = Flower.objects.create(name_uz="Xrizantema", slug="xrizantema-merge")
+        self.supplier = Supplier.objects.create(name="Gollandiya")
+        self.delivery = StockDelivery.objects.create(number="PT-114", received_at="2026-08-05", supplier=self.supplier)
+
+    def _post(self, **overrides):
+        payload = {
+            "delivery": self.delivery.id, "flower": self.rose.id, "height_cm": 40,
+            "stems_per_bunch": 25, "received_stems": 100,
+            "cost_per_stem": "8000", "sale_price_per_stem": "15000",
+        }
+        payload.update(overrides)
+        return self.client.post("/api/stock-batches/", payload, format="json")
+
+    def test_intake_takes_flower_without_variant(self):
+        response = self._post()
+        self.assertEqual(response.status_code, 201, response.data)
+        batch = StockBatch.objects.get(id=response.json()["id"])
+        self.assertEqual(batch.variant.flower_id, self.rose.id)
+        self.assertTrue(batch.variant.is_general)
+        self.assertEqual(batch.variant.name_uz, "")
+        self.assertEqual(batch.variant.color_uz, "")
+        # navsiz qatorning nomi faqat gul nomi bo'ladi, ortiqcha ajratgich qolmaydi
+        self.assertEqual(str(batch.variant), "Atirgul")
+        self.assertEqual(batch.flower_name, "Atirgul")
+        self.assertEqual(batch.title, "Atirgul 40 sm")
+
+    def test_intake_without_flower_is_rejected(self):
+        response = self.client.post("/api/stock-batches/", {
+            "delivery": self.delivery.id, "height_cm": 40, "stems_per_bunch": 25,
+            "received_stems": 100, "cost_per_stem": "8000", "sale_price_per_stem": "15000",
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("flower", response.data)
+
+    def test_same_flower_height_and_cost_are_added_together(self):
+        first = self._post(received_stems=100).json()
+        second = self._post(received_stems=130).json()
+        third = self._post(received_stems=150).json()
+        self.assertEqual(second["id"], first["id"])
+        self.assertEqual(third["id"], first["id"])
+        self.assertEqual(StockBatch.objects.filter(delivery=self.delivery).count(), 1)
+        batch = StockBatch.objects.get(id=first["id"])
+        self.assertEqual(batch.received_stems, 380)
+        self.assertEqual(batch.remaining_stems, 380)
+        self.assertFalse(first["merged"])
+        self.assertTrue(second["merged"])
+        self.assertEqual(second["merged_stems"], 130)
+        self.assertEqual(third["merged_stems"], 150)
+
+    def test_only_one_general_variant_is_created_per_flower(self):
+        self._post(received_stems=100)
+        self._post(received_stems=50, height_cm=30)
+        self._post(received_stems=50, cost_per_stem="9000")
+        self.assertEqual(FlowerVariant.objects.filter(flower=self.rose, is_general=True).count(), 1)
+
+    def test_different_height_stays_a_separate_row(self):
+        first = self._post(height_cm=40).json()
+        second = self._post(height_cm=30).json()
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(StockBatch.objects.filter(delivery=self.delivery).count(), 2)
+
+    def test_different_cost_stays_a_separate_row(self):
+        first = self._post(cost_per_stem="8000").json()
+        second = self._post(cost_per_stem="9000").json()
+        self.assertNotEqual(first["id"], second["id"])
+
+    def test_different_flower_stays_a_separate_row(self):
+        first = self._post(flower=self.rose.id).json()
+        second = self._post(flower=self.chrysanthemum.id).json()
+        self.assertNotEqual(first["id"], second["id"])
+
+    def test_free_flowers_do_not_merge_with_paid_ones(self):
+        paid = self._post(cost_per_stem="0").json()
+        free = self._post(is_free=True, cost_per_stem="0").json()
+        self.assertNotEqual(paid["id"], free["id"])
+
+    def test_other_delivery_stays_a_separate_row(self):
+        other = StockDelivery.objects.create(number="PT-115", received_at="2026-08-06", supplier=self.supplier)
+        first = self._post().json()
+        second = self._post(delivery=other.id).json()
+        self.assertNotEqual(first["id"], second["id"])
+
+    def test_last_sale_price_wins_for_the_whole_row(self):
+        first = self._post(received_stems=100, sale_price_per_stem="15000").json()
+        second = self._post(received_stems=100, sale_price_per_stem="18000").json()
+        self.assertEqual(second["id"], first["id"])
+        batch = StockBatch.objects.get(id=first["id"])
+        self.assertEqual(batch.sale_price_per_stem, Decimal("18000.00"))
+        # pochka narxi ham yangi dona narxidan qayta hisoblanadi
+        self.assertEqual(batch.sale_price_per_bunch, Decimal("450000.00"))
+        self.assertEqual(batch.cost_per_bunch, Decimal("200000.00"))
+
+    def test_used_stems_are_kept_when_more_arrives(self):
+        created = self._post(received_stems=100).json()
+        batch = StockBatch.objects.get(id=created["id"])
+        batch.remaining_stems = 60
+        batch.save(update_fields=["remaining_stems"])
+        self._post(received_stems=50)
+        batch.refresh_from_db()
+        self.assertEqual(batch.received_stems, 150)
+        self.assertEqual(batch.remaining_stems, 110)
+
+    def test_each_intake_writes_its_own_stock_movement(self):
+        created = self._post(received_stems=100).json()
+        self._post(received_stems=130)
+        movements = StockMovement.objects.filter(batch_id=created["id"], movement_type="in").order_by("id")
+        self.assertEqual([row.quantity_stems for row in movements], [100, 130])
+        self.assertEqual(StockBatch.objects.get(id=created["id"]).received_stems, sum(row.quantity_stems for row in movements))
+
+    def test_merge_is_written_to_audit(self):
+        self._post(received_stems=100)
+        self._post(received_stems=130)
+        row = AuditLog.objects.filter(action="stock_batch_merged").first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.after["added_stems"], 130)
+        self.assertEqual(row.after["received_stems"], 230)
+        self.assertIn("Atirgul 40 sm", row.summary)
+
+    def test_editing_received_stems_keeps_movement_total_in_step(self):
+        created = self._post(received_stems=100).json()
+        self._post(received_stems=130)
+        response = self.client.patch(f"/api/stock-batches/{created['id']}/", {"received_stems": 200}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        movements = StockMovement.objects.filter(batch_id=created["id"], movement_type="in").order_by("id")
+        self.assertEqual(sum(row.quantity_stems for row in movements), 200)
+        self.assertEqual([row.quantity_stems for row in movements], [100, 100])
+
+    def test_general_variants_are_hidden_from_the_variant_list(self):
+        self._post()
+        FlowerVariant.objects.create(flower=self.rose, name_uz="Freedom", color_uz="Qizil")
+        rows = self.client.get("/api/flower-variants/").json()["results"]
+        self.assertEqual([row["name_uz"] for row in rows], ["Freedom"])
+        everything = self.client.get("/api/flower-variants/", {"is_general": "true"}).json()["results"]
+        self.assertEqual(len(everything), 1)
+        self.assertTrue(everything[0]["is_general"])
+
+    def test_stock_list_can_be_filtered_by_flower(self):
+        self._post(flower=self.rose.id)
+        self._post(flower=self.chrysanthemum.id)
+        rows = self.client.get("/api/stock-batches/", {"flower": self.rose.id}).json()["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["flower_detail"]["name_uz"], "Atirgul")
+        self.assertEqual(rows[0]["title"], "Atirgul 40 sm")
+
+    def test_change_flower_moves_a_used_row_to_another_flower(self):
+        created = self._post().json()
+        response = self.client.post(f"/api/stock-batches/{created['id']}/change-flower/", {
+            "flower": self.chrysanthemum.id, "reason": "Kirimda xato yozilgan",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(StockBatch.objects.get(id=created["id"]).variant.flower_id, self.chrysanthemum.id)
+        self.assertEqual(response.json()["variant_change"]["new_variant"], "Xrizantema")
+
+    def test_change_flower_needs_a_flower(self):
+        created = self._post().json()
+        response = self.client.post(f"/api/stock-batches/{created['id']}/change-flower/", {"reason": "Sabab"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("flower", response.data)
+
+    def test_ai_sees_the_flower_name_without_a_variant(self):
+        created = self._post().json()
+        batch = StockBatch.objects.get(id=created["id"])
+        row = stock_batch_ai_row(batch)
+        self.assertEqual(row["display_name_uz"], "Atirgul")
+        self.assertEqual(row["flower_uz"], "Atirgul")
+        self.assertEqual(row["variant_uz"], "")
+        stock = ai_stock_rows()
+        self.assertEqual([item["display_name_uz"] for item in stock], ["Atirgul"])
+        variants = ai_flower_variant_rows()
+        self.assertEqual([item["display_name_uz"] for item in variants], ["Atirgul"])
+
+    def test_catalog_composition_summary_has_no_double_spaces(self):
+        created = self._post().json()
+        batch = StockBatch.objects.get(id=created["id"])
+        item = CatalogItem.objects.create(name_uz="Buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=1, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=batch, quantity_stems=20)
+        self.assertEqual([row["name_uz"] for row in catalog_composition_summary(item)], ["Atirgul"])
+
+    def test_ai_sees_every_height_and_price_of_one_flower(self):
+        self._post(height_cm=40, cost_per_stem="8000", sale_price_per_stem="15000")
+        self._post(height_cm=60, cost_per_stem="12000", sale_price_per_stem="25000")
+        self._post(height_cm=40, cost_per_stem="9000", sale_price_per_stem="17000")
+        rows = ai_stock_rows()
+        self.assertEqual(
+            [(row["height_label"], row["price_per_stem"]) for row in rows],
+            [("40 sm", "15000.00"), ("60 sm", "25000.00"), ("40 sm", "17000.00")],
+        )
+        variants = ai_flower_variant_rows()
+        self.assertEqual(len(variants[0]["active_stock"]), 3)
+
+    def test_ai_does_not_repeat_the_same_offer_twice(self):
+        other = StockDelivery.objects.create(number="PT-116", received_at="2026-08-07", supplier=self.supplier)
+        self._post(height_cm=40, sale_price_per_stem="15000")
+        self._post(delivery=other.id, height_cm=40, sale_price_per_stem="15000")
+        self.assertEqual(StockBatch.objects.count(), 2)
+        rows = ai_stock_rows()
+        self.assertEqual([(row["height_label"], row["price_per_stem"]) for row in rows], [("40 sm", "15000.00")])
 
 
 class FloristExtraDecorationTests(TestCase):

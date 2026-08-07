@@ -45,7 +45,7 @@ def catalog_composition_summary(item):
     rows = []
     for row in item.composition.select_related("stock_batch__variant__flower"):
         batch = row.stock_batch
-        name = f"{batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz}".strip()
+        name = " ".join(part for part in (batch.variant.flower.name_uz, batch.variant.name_uz, batch.variant.color_uz) if part)
         rows.append({"name_uz": name, "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)})
     return rows
 
@@ -400,12 +400,30 @@ def ai_stock_rows(query="", limit=24):
         queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz, row[1].name_uz))]
     rows = []
     for variant in queryset:
-        batches = getattr(variant, "ai_stock_batches", [])
-        if batches:
-            rows.append(stock_batch_ai_row(batches[0]))
-        if len(rows) >= limit:
-            break
+        for batch in distinct_stock_offers(getattr(variant, "ai_stock_batches", [])):
+            rows.append(stock_batch_ai_row(batch))
+            if len(rows) >= limit:
+                return rows[:limit]
     return rows[:limit]
+
+
+def distinct_stock_offers(batches):
+    """Mijozga aytish uchun bir-biridan farq qiladigan partiyalar.
+
+    Kirimda nav so'ralmaydi, shuning uchun bitta gulda bir nechta partiya
+    bo'ladi — bo'yi va narxi har xil. Ularning hammasi kerak, aks holda AI
+    guldan faqat bittasini ko'radi. Bo'yi ham, narxi ham bir xil bo'lsa esa
+    eng eskisi olinadi: mijozga bir xil taklifni ikki marta aytish shart emas.
+    """
+    seen = set()
+    offers = []
+    for batch in batches:
+        key = (batch.height_label, str(batch.sale_price_per_stem))
+        if key in seen:
+            continue
+        seen.add(key)
+        offers.append(batch)
+    return offers
 
 
 def ai_basket_rows(limit=20):
@@ -434,7 +452,7 @@ def ai_flower_variant_rows(query="", limit=24):
         queryset = [variant for _, variant in sorted(ranked, key=lambda row: (-row[0], row[1].flower.name_uz, row[1].color_uz))]
     rows = []
     for variant in queryset[:limit]:
-        stock_rows = StockBatch.objects.filter(variant=variant, is_active=True, remaining_stems__gt=0).order_by("received_at", "id")[:1]
+        stock_rows = distinct_stock_offers(StockBatch.objects.filter(variant=variant, is_active=True, remaining_stems__gt=0).order_by("received_at", "id"))
         rows.append({
             "variant_id": variant.id,
             "display_name_uz": flower_variant_display_name(variant, "uz"),

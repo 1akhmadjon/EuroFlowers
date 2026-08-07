@@ -35,10 +35,10 @@ from .models import Debt, Expense, MaterialDelivery, StockDelivery, AISettings, 
 from .permissions import RolePermission, has_page_permission
 from .serializers import FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import add_extra_decoration_salary, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
+from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .renderers import to_local
-from .services import mini_app_custom_quote_ai, normalize_phone, process_customer_message
+from .services import flower_variant_display_name, mini_app_custom_quote_ai, normalize_phone, process_customer_message
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -142,9 +142,12 @@ class PackagingMovementFilter(CreatedAtRangeFilter):
 
 
 class StockBatchFilter(CreatedAtRangeFilter):
+    # Kirimda nav so'ralmaydi, shuning uchun sklad guli bo'yicha filtrlanadi.
+    flower = django_filters.ModelChoiceFilter(field_name="variant__flower", queryset=Flower.objects.all())
+
     class Meta:
         model = StockBatch
-        fields = ["variant", "supplier", "delivery", "is_free", "height_cm", "height_from_cm", "height_to_cm", "is_active", "created_at"]
+        fields = ["flower", "variant", "supplier", "delivery", "is_free", "height_cm", "height_from_cm", "height_to_cm", "is_active", "created_at"]
 
 
 class FloristAttendanceFilter(CreatedAtRangeFilter):
@@ -1013,8 +1016,19 @@ class FlowerVariantViewSet(ScopedViewSet):
     write_roles = ["admin", "warehouse"]
     queryset = FlowerVariant.objects.select_related("flower").all()
     serializer_class = FlowerVariantSerializer
-    filterset_fields = ["flower", "is_active"]
+    filterset_fields = ["flower", "is_active", "is_general"]
     search_fields = ["name_uz", "color_uz", "flower__name_uz"]
+
+    def get_queryset(self):
+        """Navsiz kirim qatorlari nav ro'yxatida ko'rinmaydi.
+
+        Ular gul nomini ko'tarib yuradigan texnik qator, foydalanuvchi uchun
+        nav emas. Kerak bo'lsa ?is_general=true bilan chaqiriladi.
+        """
+        queryset = super().get_queryset()
+        if self.action != "list" or self.request.query_params.get("is_general"):
+            return queryset
+        return queryset.filter(is_general=False)
 
     def perform_destroy(self, instance):
         before = instance_snapshot(instance)
@@ -2006,12 +2020,28 @@ class StockBatchViewSet(ScopedViewSet):
     ordering = ["-created_at", "-id"]
 
     def perform_create(self, serializer):
+        """Kirim mavjud qatorga qo'shilgan bo'lsa ham jurnal to'g'ri qolishi kerak.
+
+        Qo'shilganda yangi qator ochilmaydi, shuning uchun kirim yozuvi va
+        auditga faqat shu safar qo'shilgan son yoziladi.
+        """
         batch = serializer.save()
-        StockMovement.objects.create(batch=batch, movement_type="in", quantity_stems=batch.received_stems, quantity_bunches=batch.received_stems / batch.stems_per_bunch, reason="Partiya kirimi", performed_by=self.request.user)
-        write_audit(self.request.user, "stock_received", batch, before={}, after=instance_snapshot(batch), request=self.request, summary=f"{batch.batch_number} partiya kirim qilindi")
+        merged = bool(getattr(batch, "_merged", False))
+        added = int(getattr(batch, "_merged_stems", batch.received_stems))
+        StockMovement.objects.create(batch=batch, movement_type="in", quantity_stems=added, quantity_bunches=Decimal(added) / Decimal(batch.stems_per_bunch or 1), reason="Partiyaga qo‘shildi" if merged else "Partiya kirimi", performed_by=self.request.user)
+        if merged:
+            write_audit(
+                self.request.user, "stock_batch_merged", batch,
+                before={"received_stems": batch.received_stems - added, "remaining_stems": batch.remaining_stems - added},
+                after={"received_stems": batch.received_stems, "remaining_stems": batch.remaining_stems, "added_stems": added},
+                request=self.request,
+                summary=f"{batch.batch_number} partiyada {batch.title} qatoriga {added} dona qo‘shildi",
+            )
+        else:
+            write_audit(self.request.user, "stock_received", batch, before={}, after=instance_snapshot(batch), request=self.request, summary=f"{batch.batch_number} partiya kirim qilindi")
         if batch.supplier_id:
             title = "Yangi gul kirimi"
-            body = f"{batch.supplier.name} postavshikdan {batch.variant.flower.name_uz} {batch.variant.name_uz} {batch.variant.color_uz} keldi. Partiya: {batch.batch_number}. Miqdor: {batch.received_stems} dona."
+            body = f"{batch.supplier.name} postavshikdan {flower_variant_display_name(batch.variant, 'uz')} {batch.height_label} keldi. Partiya: {batch.batch_number}. Miqdor: {added} dona."
             Notification.objects.create(notification_type="supplier_stock", title_uz=title, title_ru=title, body_uz=body, body_ru=body, reference_type="stock_batch", reference_id=batch.id)
             integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
             group_chat_id = integration.telegram_group_chat_id or settings.TELEGRAM_GROUP_CHAT_ID
@@ -2034,8 +2064,8 @@ class StockBatchViewSet(ScopedViewSet):
         new_variant = serializer.validated_data.get("variant")
         if new_variant is not None and new_variant.id != instance.variant_id and stock_batch_is_used(instance):
             raise serializers.ValidationError({
-                "variant": "Bu partiyadan allaqachon gul ishlatilgan. Navni almashtirish uchun "
-                           "«change-variant» amalidan foydalaning — u ishlatilgan joylarni ham moslaydi.",
+                "flower": "Bu partiyadan allaqachon gul ishlatilgan. Gulni almashtirish uchun "
+                          "«change-flower» amalidan foydalaning — u ishlatilgan joylarni ham moslaydi.",
             })
         old_received = instance.received_stems
         old_remaining = instance.remaining_stems
@@ -2056,12 +2086,10 @@ class StockBatchViewSet(ScopedViewSet):
         if new_received != old_received and not explicit_remaining:
             batch.remaining_stems = max(new_received - used, 0)
             batch.save(update_fields=["remaining_stems", "updated_at"])
-            # kirim yozuvi ham yangi songa moslanadi, aks holda jurnal to'g'ri kelmaydi
-            movement = StockMovement.objects.filter(batch=batch, movement_type="in").order_by("created_at", "id").first()
-            if movement:
-                movement.quantity_stems = new_received
-                movement.quantity_bunches = Decimal(new_received) / Decimal(batch.stems_per_bunch or 1)
-                movement.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
+            # Kirim yozuvlari ham yangi songa moslanadi, aks holda jurnal to'g'ri
+            # kelmaydi. Qatorga bir necha marta qo'shilgan bo'lsa yozuv ham bir
+            # nechta — farq oxirgisidan boshlab orqaga qarab taqsimlanadi.
+            adjust_stock_in_movements(batch, new_received)
             write_audit(
                 self.request.user, "stock_batch_quantity_edited", batch,
                 before={"received_stems": old_received, "remaining_stems": old_remaining},
@@ -2079,15 +2107,17 @@ class StockBatchViewSet(ScopedViewSet):
         return Response({
             "batch": batch.id,
             "batch_number": batch.batch_number,
+            "flower": batch.flower_name,
+            "title": batch.title,
             "variant": str(batch.variant),
             "is_used": stock_batch_is_used(batch),
             **summary,
         })
 
     @extend_schema(request=StockBatchVariantChangeSerializer, responses=StockBatchSerializer)
-    @action(detail=True, methods=["post"], url_path="change-variant")
-    def change_variant(self, request, pk=None):
-        """Ishlatilgan partiyada ham navni almashtiradi. Sabab majburiy."""
+    @action(detail=True, methods=["post"], url_path="change-flower")
+    def change_flower(self, request, pk=None):
+        """Ishlatilgan partiyada ham gulni almashtiradi. Sabab majburiy."""
         if not has_page_permission(request.user, "inventory", True):
             return forbidden()
         serializer = StockBatchVariantChangeSerializer(data=request.data)
@@ -2107,6 +2137,12 @@ class StockBatchViewSet(ScopedViewSet):
             "history_rows_updated": result["history_rows_updated"],
         }
         return Response(data)
+
+    @extend_schema(request=StockBatchVariantChangeSerializer, responses=StockBatchSerializer)
+    @action(detail=True, methods=["post"], url_path="change-variant")
+    def change_variant(self, request, pk=None):
+        """Eski nom — «change-flower» bilan bir xil ishlaydi."""
+        return self.change_flower(request, pk=pk)
 
     def destroy(self, request, *args, **kwargs):
         batch = self.get_object()
@@ -4407,7 +4443,7 @@ def mini_app_request_text(arrangement_type, quote, note=""):
         if row["type"] == "catalog":
             lines.append(f"- {row['name_uz']}: {row['quantity']} ta, {row['total']} so‘m")
         elif row["type"] == "stock":
-            name = f"{row['flower_uz']} {row['variant_uz']} {row['color_uz']}".strip()
+            name = " ".join(part for part in (row["flower_uz"], row["variant_uz"], row["color_uz"]) if part)
             lines.append(f"- {name}: {row['quantity_stems']} dona, {row['total']} so‘m")
         elif row["type"] == "custom_text":
             lines.append(f"- Mijoz matni: {row['request_text']}")

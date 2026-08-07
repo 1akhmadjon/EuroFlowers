@@ -2,7 +2,7 @@ import re
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, Branch, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
+from .models import AuditLog, Branch, FlowerVariant, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
 
 
 def money(value):
@@ -1857,6 +1857,103 @@ def stock_batch_usage_summary(batch):
         "stock_movements": StockMovement.objects.filter(batch=batch).count(),
         "used_stems": max(int(batch.received_stems or 0) - int(batch.remaining_stems or 0), 0),
     }
+
+
+def general_variant_for(flower):
+    """Gulning navsiz qatori — kirim shunga bog'lanadi.
+
+    Kirimda nav so'ralmaydi, shuning uchun har gulda bitta shunday qator
+    bo'ladi va u bir marta ochilib qayta ishlatilaveradi.
+    """
+    if flower is None:
+        raise ValueError("Gulni tanlang")
+    variant, _ = FlowerVariant.objects.get_or_create(
+        flower=flower, is_general=True,
+        defaults={"name_uz": "", "color_uz": "", "is_active": True},
+    )
+    return variant
+
+
+def stock_merge_target(validated_data, lock=False):
+    """Shu partiyada guli, bo'yi va tannarxi bir xil qator bo'lsa o'shani qaytaradi.
+
+    Postavshik ham, yuk ham bitta bo'lgani uchun kalitga partiya kifoya —
+    partiya o'zi bitta postavshikning bitta yukini bildiradi. Tekin gul
+    alohida turadi: uning tannarxi yo'q, pulli gul bilan qo'shilib ketmasligi kerak.
+    """
+    delivery = validated_data.get("delivery")
+    variant = validated_data.get("variant")
+    if not delivery or not variant:
+        return None
+    queryset = StockBatch.objects.filter(
+        delivery=delivery,
+        variant=variant,
+        is_active=True,
+        is_free=bool(validated_data.get("is_free")),
+        height_cm=validated_data.get("height_cm"),
+        height_from_cm=validated_data.get("height_from_cm"),
+        height_to_cm=validated_data.get("height_to_cm"),
+        cost_per_stem=Decimal(str(validated_data.get("cost_per_stem") or 0)),
+    ).order_by("id")
+    if lock:
+        queryset = queryset.select_for_update()
+    return queryset.first()
+
+
+def merge_into_stock_batch(target, validated_data):
+    """Yangi kirimni mavjud qatorga qo'shadi va qo'shilgan sonni qaytaradi.
+
+    Soni ustiga qo'shiladi. Sotuv narxi oxirgi kiritilganiga o'tadi —
+    bitta qatorda ikki xil sotuv narxi turolmaydi, shuning uchun oldin
+    kirgan gullar ham shu narxda sotiladi. Tannarx kalitning bir qismi,
+    demak o'zgarmaydi. Pochkadagi dona qatorning o'zinikicha qoladi va
+    pochka narxlari shunga qarab qayta hisoblanadi.
+    """
+    added = int(validated_data.get("received_stems") or 0)
+    if added <= 0:
+        raise ValueError("Kelgan sonni kiriting")
+    target.received_stems += added
+    target.remaining_stems += added
+    fields = {"received_stems", "remaining_stems", "updated_at"}
+    for key in ("sale_price_per_stem", "sale_price_per_stem_exact", "minimum_sale_stems"):
+        value = validated_data.get(key)
+        if value not in (None, ""):
+            setattr(target, key, value)
+            fields.add(key)
+    for key in ("image_url", "notes"):
+        value = validated_data.get(key)
+        if value and not getattr(target, key):
+            setattr(target, key, value)
+            fields.add(key)
+    if target.stems_per_bunch:
+        target.cost_per_bunch = (Decimal(target.cost_per_stem or 0) * target.stems_per_bunch).quantize(Decimal("0.01"))
+        target.sale_price_per_bunch = (Decimal(target.sale_price_per_stem or 0) * target.stems_per_bunch).quantize(Decimal("0.01"))
+        fields.update({"cost_per_bunch", "sale_price_per_bunch"})
+    target.save(update_fields=sorted(fields))
+    return added
+
+
+def adjust_stock_in_movements(batch, received_stems):
+    """Kirim yozuvlari yig'indisini kelgan songa tenglaydi.
+
+    Bitta qatorga bir necha marta qo'shilgan bo'lsa kirim yozuvi ham bir
+    nechta bo'ladi. Kelgan son qo'lda tuzatilganda farq oxirgi yozuvdan
+    boshlab orqaga qarab taqsimlanadi — shunda qaysi kirim o'zgargani
+    jurnalda ko'rinib turadi.
+    """
+    movements = list(StockMovement.objects.filter(batch=batch, movement_type="in").order_by("created_at", "id"))
+    if not movements:
+        return
+    delta = int(received_stems) - sum(int(row.quantity_stems or 0) for row in movements)
+    per_bunch = Decimal(batch.stems_per_bunch or 1)
+    for movement in reversed(movements):
+        if not delta:
+            break
+        value = max(int(movement.quantity_stems or 0) + delta, 0)
+        delta -= value - int(movement.quantity_stems or 0)
+        movement.quantity_stems = value
+        movement.quantity_bunches = Decimal(value) / per_bunch
+        movement.save(update_fields=["quantity_stems", "quantity_bunches", "updated_at"])
 
 
 def change_stock_batch_variant(batch, variant, reason="", user=None):
