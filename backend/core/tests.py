@@ -648,6 +648,23 @@ class BusinessRulesTests(TestCase):
         self.assertIn("qanaqa gullar bor", kwargs["input"][1]["content"])
         self.assertIn("105000.00", kwargs["input"][-1]["content"])
 
+    def test_prompt_shows_free_container_colors_first(self):
+        """Idish rangi savolida avval tekinlari aytiladi, pullisi keyin.
+
+        Promptni keyingi migratsiya qayta yozganda shu qoida tushib qolmasin.
+        """
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("7A. IDISH RANGI", prompt)
+        section = prompt.split("7A. IDISH RANGI", 1)[1].split("8. BUYURTMA", 1)[0]
+        for color in ["Havo rang", "Malla", "Oq", "Pushti", "Ko'k"]:
+            self.assertIn(color, section)
+        self.assertIn("Qizil va Tilla", section)
+        self.assertIn("100 000 so'm", section)
+        # Pulli ranglar faqat shu bo'limda tilga olinadi, boshqa joyda emas.
+        self.assertEqual(prompt.count("Tilla"), section.count("Tilla"))
+        # Eski qoida narxni oldindan aytishga undardi, u olib tashlandi.
+        self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
+
     def test_ai_tool_definitions_are_whitelisted(self):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_album", "send_stock_image", "send_stock_images"})
 
