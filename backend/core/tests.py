@@ -660,6 +660,8 @@ class BusinessRulesTests(TestCase):
             self.assertIn(color, section)
         self.assertIn("Qizil va Tilla", section)
         self.assertIn("100 000 so'm", section)
+        # Mijoz rang nomini aytsa yashirilmaydi — bu alohida holat.
+        self.assertIn("3-HOLAT. MIJOZ QIZIL YOKI TILLANI NOMMA-NOM SO'RADI", section)
         # Pulli ranglar faqat shu bo'limda tilga olinadi, boshqa joyda emas.
         self.assertEqual(prompt.count("Tilla"), section.count("Tilla"))
         # Eski qoida narxni oldindan aytishga undardi, u olib tashlandi.
