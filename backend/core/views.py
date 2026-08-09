@@ -2373,10 +2373,11 @@ class StockMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
         )
         return {
             "rows": base.count(),
+            # chiqim bazada manfiy yoziladi; bu yerda musbat son ko'rsatiladi
             "in_stems": agg["t_in"],
-            "out_stems": agg["t_out"],
-            "waste_stems": agg["t_waste"],
-            # kirim musbat, chiqim manfiy yozilgani uchun bu — sof o'zgarish
+            "out_stems": abs(agg["t_out"]),
+            "waste_stems": abs(agg["t_waste"]),
+            # sof o'zgarish: kirim − chiqim − chiqit
             "net_stems": agg["t_net"],
             "by_type": count_by(base, "movement_type"),
         }
@@ -2459,8 +2460,9 @@ class PackagingMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
         )
         return {
             "rows": base.count(),
+            # chiqim bazada manfiy yoziladi; bu yerda musbat son ko'rsatiladi
             "in_quantity": agg["t_in"],
-            "out_quantity": agg["t_out"],
+            "out_quantity": abs(agg["t_out"]),
             "net_quantity": agg["t_net"],
             "cost_total": money(agg["t_cost"]),
             "by_type": count_by(base, "movement_type"),

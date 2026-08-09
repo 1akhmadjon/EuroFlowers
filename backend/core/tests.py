@@ -6362,7 +6362,8 @@ class PaginationTotalsTests(TestCase):
         packaging = Packaging.objects.create(packaging_type="box", name_uz="Quti P", quantity=10, cost_price=Decimal("15000"), sale_price=Decimal("30000"))
         PackagingMovement.objects.create(packaging=packaging, movement_type="in", quantity=10, unit_cost=Decimal("15000"))
         StockMovement.objects.create(batch=self.batches[0], movement_type="in", quantity_stems=100)
-        StockMovement.objects.create(batch=self.batches[0], movement_type="out", quantity_stems=40)
+        # chiqim bazada manfiy yoziladi, javobda esa musbat ko'rinishi kerak
+        StockMovement.objects.create(batch=self.batches[0], movement_type="out", quantity_stems=-40)
         materials = self.client.get("/api/materials/").json()["totals"]
         self.assertEqual(materials["items"], 1)
         self.assertEqual(materials["quantity_total"], 10)
@@ -6372,6 +6373,7 @@ class PaginationTotalsTests(TestCase):
         self.assertEqual(stock_journal["rows"], 2)
         self.assertEqual(stock_journal["in_stems"], 100)
         self.assertEqual(stock_journal["out_stems"], 40)
+        self.assertEqual(stock_journal["net_stems"], 60)
         material_journal = self.client.get("/api/material-movements/").json()["totals"]
         self.assertEqual(material_journal["in_quantity"], 10)
         self.assertEqual(Decimal(material_journal["cost_total"]), Decimal("150000"))
