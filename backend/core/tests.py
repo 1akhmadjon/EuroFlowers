@@ -6208,3 +6208,170 @@ class FloristExtraDecorationTests(TestCase):
         self.client.force_authenticate(self.florist.user)
         self.assertEqual(self._add(count=3).status_code, 403)
         self.assertFalse(FloristSalaryEntry.objects.filter(source="extra_decoration").exists())
+
+
+class PaginationTotalsTests(TestCase):
+    """Katalog, sklad va floristlar ro'yxatlarining sahifalanishi va umumiy sonlari.
+
+    Asosiy talab: sahifada nechta yozuv ko'rinishidan qat'i nazar `totals`
+    butun filtr bo'yicha bo'lishi kerak.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("pager", password="password", is_superuser=True, is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        flower = Flower.objects.create(name_uz="Atirgul P", slug="rose-pager")
+        self.variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom P", color_uz="Qizil")
+        self.supplier = Supplier.objects.create(name="Hoji P", phone="+998901110000")
+        self.batches = [
+            StockBatch.objects.create(
+                variant=self.variant, supplier=self.supplier, batch_number=f"P-{index}",
+                height_cm=50 + index, stems_per_bunch=25, received_stems=100, remaining_stems=60,
+                cost_per_stem=Decimal("5000"), sale_price_per_stem=Decimal("9000"), sale_price_per_bunch=Decimal("225000"),
+            )
+            for index in range(3)
+        ]
+        florist_user = User.objects.create_user("pager-florist", password="password", first_name="Bekzod")
+        self.florist = FloristProfile.objects.create(user=florist_user, staff_type="florist", phone="+998901110001")
+        for index in range(35):
+            CatalogItem.objects.create(
+                name_uz=f"Buket {index}", arrangement_type="bouquet", price=Decimal("100000"),
+                quantity_total=2, quantity_sold=1, status="available", florist=self.florist,
+                calculated_cost_price=Decimal("40000"),
+            )
+
+    def test_catalog_list_returns_page_meta_and_whole_list_totals(self):
+        response = self.client.get("/api/catalog/")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 35)
+        self.assertEqual(body["page"], 1)
+        self.assertEqual(body["page_size"], 30)
+        self.assertEqual(body["total_pages"], 2)
+        self.assertTrue(body["has_next"])
+        self.assertFalse(body["has_previous"])
+        self.assertEqual(len(body["results"]), 30)
+        totals = body["totals"]
+        # sahifada 30 ta, jami sonlar esa 35 tasi bo'yicha
+        self.assertEqual(totals["items"], 35)
+        self.assertEqual(totals["quantity_total"], 70)
+        self.assertEqual(totals["quantity_sold"], 35)
+        self.assertEqual(totals["quantity_remaining"], 35)
+        self.assertEqual(Decimal(totals["remaining_value"]), Decimal("3500000"))
+        self.assertEqual(Decimal(totals["sold_value"]), Decimal("3500000"))
+        self.assertEqual(Decimal(totals["cost_total"]), Decimal("1400000"))
+        self.assertEqual(totals["by_status"], {"available": 35})
+
+    def test_second_page_totals_stay_the_same(self):
+        first = self.client.get("/api/catalog/").json()
+        second = self.client.get("/api/catalog/?page=2").json()
+        self.assertEqual(second["page"], 2)
+        self.assertEqual(len(second["results"]), 5)
+        self.assertFalse(second["has_next"])
+        self.assertTrue(second["has_previous"])
+        self.assertEqual(first["totals"], second["totals"])
+
+    def test_totals_follow_the_filter(self):
+        CatalogItem.objects.filter(name_uz="Buket 0").update(status="sold")
+        body = self.client.get("/api/catalog/?status=sold").json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["totals"]["items"], 1)
+        self.assertEqual(body["totals"]["quantity_total"], 2)
+        self.assertEqual(body["totals"]["by_status"], {"sold": 1})
+
+    def test_page_size_all_returns_everything_in_one_page(self):
+        body = self.client.get("/api/catalog/?page_size=all").json()
+        self.assertEqual(body["count"], 35)
+        self.assertEqual(body["total_pages"], 1)
+        self.assertFalse(body["has_next"])
+        self.assertEqual(len(body["results"]), 35)
+        self.assertEqual(body["totals"]["items"], 35)
+
+    def test_page_size_all_works_on_an_empty_list(self):
+        CatalogItem.objects.all().delete()
+        body = self.client.get("/api/catalog/?page_size=all").json()
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["results"], [])
+        self.assertEqual(body["totals"]["items"], 0)
+        self.assertEqual(Decimal(body["totals"]["remaining_value"]), Decimal("0"))
+
+    def test_stock_batch_totals_count_stems_and_money(self):
+        totals = self.client.get("/api/stock-batches/").json()["totals"]
+        self.assertEqual(totals["batches"], 3)
+        self.assertEqual(totals["received_stems"], 300)
+        self.assertEqual(totals["remaining_stems"], 180)
+        self.assertEqual(totals["used_stems"], 120)
+        self.assertEqual(totals["flowers"], 1)
+        self.assertEqual(totals["suppliers"], 1)
+        self.assertEqual(Decimal(totals["remaining_cost"]), Decimal("900000"))
+        self.assertEqual(Decimal(totals["remaining_sale_value"]), Decimal("1620000"))
+        self.assertEqual(Decimal(totals["received_cost"]), Decimal("1500000"))
+
+    def test_florist_totals_gather_salary_catalog_and_stock(self):
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("60000"), source="catalog", work_date="2026-08-01")
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("40000"), source="manual", work_date="2026-08-02")
+        FloristStockBalance.objects.create(florist=self.florist, batch=self.batches[0], remaining_stems=25)
+        totals = self.client.get("/api/florists/").json()["totals"]
+        self.assertEqual(totals["florists"], 1)
+        self.assertEqual(totals["active"], 1)
+        self.assertEqual(totals["by_staff_type"], {"florist": 1})
+        self.assertEqual(Decimal(totals["salary_total"]), Decimal("100000"))
+        self.assertEqual(totals["catalog_quantity"], 70)
+        self.assertEqual(totals["catalog_remaining"], 35)
+        self.assertEqual(totals["stock_stems"], 25)
+
+    def test_florist_stock_issue_totals_separate_issue_return_and_waste(self):
+        FloristStockIssue.objects.create(florist=self.florist, batch=self.batches[0], kind="issue", quantity_stems=50)
+        FloristStockIssue.objects.create(florist=self.florist, batch=self.batches[1], kind="issue", quantity_stems=30)
+        FloristStockIssue.objects.create(florist=self.florist, batch=self.batches[0], kind="return", quantity_stems=10)
+        FloristStockIssue.objects.create(florist=self.florist, batch=self.batches[0], kind="waste", quantity_stems=5)
+        totals = self.client.get("/api/florist-stock-issues/").json()["totals"]
+        self.assertEqual(totals["rows"], 4)
+        self.assertEqual(totals["issued_stems"], 80)
+        self.assertEqual(totals["returned_stems"], 10)
+        self.assertEqual(totals["wasted_stems"], 5)
+        self.assertEqual(totals["net_stems"], 65)
+        self.assertEqual(totals["florists"], 1)
+        self.assertEqual(totals["batches"], 2)
+
+    def test_florist_stock_balance_totals_include_cost(self):
+        FloristStockBalance.objects.create(florist=self.florist, batch=self.batches[0], remaining_stems=20)
+        FloristStockBalance.objects.create(florist=self.florist, batch=self.batches[1], remaining_stems=30)
+        totals = self.client.get("/api/florist-stock-balances/").json()["totals"]
+        self.assertEqual(totals["rows"], 2)
+        self.assertEqual(totals["remaining_stems"], 50)
+        self.assertEqual(Decimal(totals["cost_total"]), Decimal("250000"))
+
+    def test_salary_totals_split_by_source(self):
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("60000"), quantity=1, source="catalog", work_date="2026-08-01")
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("40000"), quantity=2, source="manual", work_date="2026-08-02")
+        totals = self.client.get("/api/florist-salary/").json()["totals"]
+        self.assertEqual(totals["entries"], 2)
+        self.assertEqual(Decimal(totals["amount_total"]), Decimal("100000"))
+        self.assertEqual(totals["quantity_total"], 3)
+        self.assertEqual(totals["by_source"]["catalog"], {"count": 1, "amount": "60000.00"})
+        self.assertEqual(totals["by_source"]["manual"], {"count": 1, "amount": "40000.00"})
+
+    def test_materials_and_movement_journals_carry_totals(self):
+        # bazada standart materiallar seed qilingan bo'lishi mumkin, shuning
+        # uchun jami sonlar faqat shu testning materiali bo'yicha tekshiriladi
+        Packaging.objects.all().delete()
+        PackagingMovement.objects.all().delete()
+        StockMovement.objects.all().delete()
+        packaging = Packaging.objects.create(packaging_type="box", name_uz="Quti P", quantity=10, cost_price=Decimal("15000"), sale_price=Decimal("30000"))
+        PackagingMovement.objects.create(packaging=packaging, movement_type="in", quantity=10, unit_cost=Decimal("15000"))
+        StockMovement.objects.create(batch=self.batches[0], movement_type="in", quantity_stems=100)
+        StockMovement.objects.create(batch=self.batches[0], movement_type="out", quantity_stems=40)
+        materials = self.client.get("/api/materials/").json()["totals"]
+        self.assertEqual(materials["items"], 1)
+        self.assertEqual(materials["quantity_total"], 10)
+        self.assertEqual(Decimal(materials["cost_value"]), Decimal("150000"))
+        self.assertEqual(Decimal(materials["sale_value"]), Decimal("300000"))
+        stock_journal = self.client.get("/api/stock-movements/").json()["totals"]
+        self.assertEqual(stock_journal["rows"], 2)
+        self.assertEqual(stock_journal["in_stems"], 100)
+        self.assertEqual(stock_journal["out_stems"], 40)
+        material_journal = self.client.get("/api/material-movements/").json()["totals"]
+        self.assertEqual(material_journal["in_quantity"], 10)
+        self.assertEqual(Decimal(material_journal["cost_total"]), Decimal("150000"))

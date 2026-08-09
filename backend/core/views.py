@@ -4,9 +4,9 @@ from django.core.files.storage import default_storage
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
 from django.db import transaction
-from django.db.models import Case, Count, DateTimeField, DecimalField, F, IntegerField, Max, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models import Case, Count, DateTimeField, DecimalField, ExpressionWrapper, F, IntegerField, Max, OuterRef, Q, Subquery, Sum, Value, When
 from django.db.models.deletion import ProtectedError
-from django.db.models.functions import Coalesce, TruncDate
+from django.db.models.functions import Coalesce, Greatest, TruncDate
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
 from datetime import date, datetime, time, timedelta
@@ -32,6 +32,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
 from .serializers import FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
@@ -39,6 +40,58 @@ from .inventory_services import add_extra_decoration_salary, adjust_stock_in_mov
 from .platform_services import instagram_send, telegram_send
 from .renderers import to_local
 from .services import flower_variant_display_name, mini_app_custom_quote_ai, normalize_phone, process_customer_message
+
+
+# ── Ro'yxatlarning umumiy sonlari uchun yordamchilar ────────────────────────
+# Sahifada 30 ta yozuv ko'rinsa ham jami sonlar butun filtr bo'yicha
+# hisoblanadi, shuning uchun hammasi bitta SQL so'rovda yig'iladi.
+
+MONEY_FIELD = DecimalField(max_digits=20, decimal_places=4)
+
+# Katalogda hali qo'lda turgan dona: jami − sotilgan − chiqit − buzilgan
+CATALOG_REMAINING_EXPR = Greatest(
+    F("quantity_total") - F("quantity_sold") - F("quantity_wasted") - F("quantity_reworked"),
+    Value(0),
+    output_field=IntegerField(),
+)
+
+
+def int_sum(expression):
+    """Butun sonli yig'indi. Bo'sh ro'yxatda null emas, 0 qaytadi."""
+    return Coalesce(Sum(expression), Value(0), output_field=IntegerField())
+
+
+def money_sum(expression):
+    """Pul yig'indisi. Bo'sh ro'yxatda null emas, 0 qaytadi."""
+    return Coalesce(Sum(expression, output_field=MONEY_FIELD), Value(Decimal("0"), output_field=MONEY_FIELD))
+
+
+def money_product(left, right):
+    """Son × narx. Tur aralashib ketmasligi uchun natija turi aniq beriladi."""
+    return ExpressionWrapper(left * right, output_field=MONEY_FIELD)
+
+
+def stem_price_expr(rounded_field, exact_field):
+    """Dona narxi: aniq qiymat bor bo'lsa o'sha, bo'lmasa yaxlitlangani.
+
+    Serializerdagi `cost_per_stem_exact or cost_per_stem` qoidasining SQL dagi
+    ko'rinishi — eski qatorlarda `_exact` to'ldirilmagan bo'lishi mumkin.
+    """
+    return Case(
+        When(**{f"{exact_field}__gt": 0}, then=F(exact_field)),
+        default=F(rounded_field),
+        output_field=MONEY_FIELD,
+    )
+
+
+def count_by(queryset, field):
+    """{qiymat: nechta} — sahifadan emas, butun filtrdan."""
+    rows = queryset.order_by().values(field).annotate(rows=Count("id"))
+    return {row[field]: row["rows"] for row in rows}
+
+
+def distinct_count(queryset, field):
+    return queryset.order_by().values(field).distinct().count()
 
 
 class CreatedAtRangeFilter(django_filters.FilterSet):
@@ -1373,13 +1426,16 @@ def florist_stats_data(profile, request, include_sales=True):
     }
 
 
-class FloristProfileViewSet(ScopedViewSet):
+class FloristProfileViewSet(TotalsListMixin, ScopedViewSet):
     permission_page = "florists"
     write_roles = ["admin", "supervisor"]
     queryset = FloristProfile.objects.select_related("user").all()
     serializer_class = FloristProfileSerializer
     filterset_fields = ["staff_type", "is_active"]
     search_fields = ["user__first_name", "user__last_name", "user__username", "phone"]
+    ordering_fields = ["user__first_name", "user__username", "created_at", "daily_pay"]
+    # annotatsiya modeldagi tartibni yo'qotadi, shuning uchun bu yerda aniq yoziladi
+    ordering = ["user__first_name", "user__username", "id"]
 
     def get_queryset(self):
         catalog_quantity = CatalogItem.objects.filter(florist=OuterRef("pk")).values("florist").annotate(total=Coalesce(Sum("quantity_total"), 0)).values("total")[:1]
@@ -1391,6 +1447,37 @@ class FloristProfileViewSet(ScopedViewSet):
         if role in ["florist", "apprentice"]:
             return queryset.filter(user=self.request.user)
         return queryset
+
+    def get_list_totals(self, queryset):
+        """Floristlar sahifasi: jami ish haqi, yasagan katalogi, qo'lidagi guli.
+
+        Ro'yxatning o'zi annotatsiyalangani uchun jami sonlar annotatsiya
+        ustidan emas, filtrga tushgan floristlarning id'si bo'yicha alohida
+        hisoblanadi — shunda SQL sodda va natija aniq bo'ladi.
+        """
+        ids = list(queryset.order_by().values_list("pk", flat=True))
+        profiles = FloristProfile.objects.filter(pk__in=ids)
+        salary = FloristSalaryEntry.objects.filter(florist_id__in=ids).aggregate(
+            t_amount=money_sum(F("amount")),
+        )
+        catalog = CatalogItem.objects.filter(florist_id__in=ids).aggregate(
+            t_quantity=int_sum("quantity_total"),
+            t_remaining=int_sum(CATALOG_REMAINING_EXPR),
+        )
+        stock = FloristStockBalance.objects.filter(florist_id__in=ids, remaining_stems__gt=0).aggregate(
+            t_stems=int_sum("remaining_stems"),
+        )
+        return {
+            "florists": len(ids),
+            "active": profiles.filter(is_active=True).count(),
+            "inactive": profiles.filter(is_active=False).count(),
+            "by_staff_type": count_by(profiles, "staff_type"),
+            "salary_total": money(salary["t_amount"]),
+            "catalog_quantity": catalog["t_quantity"],
+            "catalog_remaining": catalog["t_remaining"],
+            # floristlarning qo'lida yopilmagan gul
+            "stock_stems": stock["t_stems"],
+        }
 
     @action(detail=False, methods=["get"], url_path="me")
     def me_profile(self, request):
@@ -1439,7 +1526,7 @@ class FloristProfileViewSet(ScopedViewSet):
         return Response(json_safe(florist_stats_data(profile, request, include_sales=False)))
 
 
-class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
+class FloristStockIssueViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     """Skladdan floristga chiqarilgan va qaytarilgan gullar tarixi."""
 
     permission_classes = [RolePermission]
@@ -1448,6 +1535,7 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = FloristStockIssueSerializer
     filterset_fields = ["florist", "batch", "kind"]
     ordering_fields = ["created_at", "quantity_stems"]
+    ordering = ["-created_at", "-id"]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1455,6 +1543,25 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
             return queryset
         profile = FloristProfile.objects.filter(user=self.request.user).first()
         return queryset.filter(florist=profile) if profile else queryset.none()
+
+    def get_list_totals(self, queryset):
+        """Chiqim tarixi: qancha chiqarildi, qancha qaytdi, qancha chiqitga ketdi."""
+        base = queryset.order_by()
+
+        def by_kind(kind):
+            return int_sum(Case(When(kind=kind, then=F("quantity_stems")), default=Value(0), output_field=IntegerField()))
+
+        agg = base.aggregate(t_issued=by_kind("issue"), t_returned=by_kind("return"), t_wasted=by_kind("waste"))
+        return {
+            "rows": base.count(),
+            "issued_stems": agg["t_issued"],
+            "returned_stems": agg["t_returned"],
+            "wasted_stems": agg["t_wasted"],
+            # floristda qolishi kerak bo'lgan son: chiqarilgan − qaytgan − chiqit
+            "net_stems": agg["t_issued"] - agg["t_returned"] - agg["t_wasted"],
+            "florists": distinct_count(base, "florist"),
+            "batches": distinct_count(base, "batch"),
+        }
 
     @extend_schema(request=FloristStockIssueEditSerializer, responses=FloristStockIssueSerializer)
     @action(detail=True, methods=["patch"], url_path="edit")
@@ -1544,7 +1651,7 @@ class FloristStockIssueViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(FloristStockIssueSerializer(issue).data, status=status.HTTP_201_CREATED)
 
 
-class FloristStockBalanceViewSet(viewsets.ReadOnlyModelViewSet):
+class FloristStockBalanceViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     """Floristlarning qo'lidagi gul qoldig'i. Katalog qo'shishda shu ro'yxatdan tanlanadi."""
 
     permission_classes = [RolePermission]
@@ -1552,7 +1659,8 @@ class FloristStockBalanceViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = FloristStockBalance.objects.select_related("florist__user", "batch__variant__flower").all()
     serializer_class = FloristStockBalanceSerializer
     filterset_fields = ["florist", "batch"]
-    ordering_fields = ["remaining_stems"]
+    ordering_fields = ["remaining_stems", "created_at"]
+    ordering = ["florist_id", "batch_id", "id"]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1562,6 +1670,22 @@ class FloristStockBalanceViewSet(viewsets.ReadOnlyModelViewSet):
             return queryset
         profile = FloristProfile.objects.filter(user=self.request.user).first()
         return queryset.filter(florist=profile) if profile else queryset.none()
+
+    def get_list_totals(self, queryset):
+        """Floristlar qo'lidagi qoldiq: nechta dona va qancha tannarx."""
+        base = queryset.order_by()
+        cost = stem_price_expr("batch__cost_per_stem", "batch__cost_per_stem_exact")
+        agg = base.aggregate(
+            t_remaining=int_sum("remaining_stems"),
+            t_cost=money_sum(money_product(F("remaining_stems"), cost)),
+        )
+        return {
+            "rows": base.count(),
+            "remaining_stems": agg["t_remaining"],
+            "cost_total": money(agg["t_cost"]),
+            "florists": distinct_count(base, "florist"),
+            "batches": distinct_count(base, "batch"),
+        }
 
     @extend_schema(
         parameters=[
@@ -1913,12 +2037,14 @@ class FloristAttendanceViewSet(ScopedViewSet):
         return Response(self.get_serializer(row).data)
 
 
-class FloristSalaryEntryViewSet(ScopedViewSet):
+class FloristSalaryEntryViewSet(TotalsListMixin, ScopedViewSet):
     permission_page = "florists"
     write_roles = ["admin", "supervisor"]
     queryset = FloristSalaryEntry.objects.select_related("florist__user", "catalog_item", "attendance", "created_by").all()
     serializer_class = FloristSalaryEntrySerializer
     filterset_class = FloristSalaryEntryFilter
+    ordering_fields = ["work_date", "amount", "created_at"]
+    ordering = ["-work_date", "-id"]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1927,6 +2053,21 @@ class FloristSalaryEntryViewSet(ScopedViewSet):
             profile = FloristProfile.objects.filter(user=self.request.user).first()
             return queryset.filter(florist=profile) if profile else queryset.none()
         return queryset
+
+    def get_list_totals(self, queryset):
+        """Ish haqi ro'yxati: jami summa va nima uchun yozilgani bo'yicha bo'linishi."""
+        base = queryset.order_by()
+        agg = base.aggregate(t_amount=money_sum(F("amount")), t_quantity=int_sum("quantity"))
+        by_source = {}
+        for row in base.values("source").annotate(t_rows=Count("id"), t_amount=money_sum(F("amount"))):
+            by_source[row["source"]] = {"count": row["t_rows"], "amount": money(row["t_amount"])}
+        return {
+            "entries": base.count(),
+            "amount_total": money(agg["t_amount"]),
+            "quantity_total": agg["t_quantity"],
+            "florists": distinct_count(base, "florist"),
+            "by_source": by_source,
+        }
 
     def perform_create(self, serializer):
         entry = serializer.save(created_by=self.request.user)
@@ -1984,7 +2125,7 @@ def recalculate_stem_prices(batch):
     return batch
 
 
-class StockDeliveryViewSet(ScopedViewSet):
+class StockDeliveryViewSet(TotalsListMixin, ScopedViewSet):
     """Partiya. Avval ochiladi, keyin ichiga gullar qo'shiladi."""
 
     permission_page = "inventory"
@@ -1995,6 +2136,24 @@ class StockDeliveryViewSet(ScopedViewSet):
     search_fields = ["number", "note", "supplier__name"]
     ordering_fields = ["received_at", "number", "created_at"]
     ordering = ["-created_at", "-id"]
+
+    def get_list_totals(self, queryset):
+        """Kirim partiyalari: nechta partiya, ichida qancha gul va qancha pul."""
+        base = queryset.order_by()
+        batches = StockBatch.objects.filter(delivery__in=base.values("pk"))
+        agg = batches.aggregate(
+            t_received=int_sum("received_stems"),
+            t_remaining=int_sum("remaining_stems"),
+            t_cost=money_sum(money_product(F("received_stems"), stem_price_expr("cost_per_stem", "cost_per_stem_exact"))),
+        )
+        return {
+            "deliveries": base.count(),
+            "active_deliveries": base.filter(is_active=True).count(),
+            "batches": batches.count(),
+            "received_stems": agg["t_received"],
+            "remaining_stems": agg["t_remaining"],
+            "cost_total": money(agg["t_cost"]),
+        }
 
     def perform_create(self, serializer):
         delivery = serializer.save(created_by=self.request.user)
@@ -2008,7 +2167,7 @@ class StockDeliveryViewSet(ScopedViewSet):
         return Response(StockBatchSerializer(rows, many=True).data)
 
 
-class StockBatchViewSet(ScopedViewSet):
+class StockBatchViewSet(TotalsListMixin, ScopedViewSet):
     permission_page = "inventory"
     write_roles = ["admin", "warehouse"]
     queryset = StockBatch.objects.select_related("variant__flower", "supplier", "delivery").all()
@@ -2018,6 +2177,32 @@ class StockBatchViewSet(ScopedViewSet):
     ordering_fields = ["received_at", "created_at", "remaining_stems", "sale_price_per_stem", "height_cm", "height_from_cm", "height_to_cm"]
     # oxirgi qo'shilgani birinchi turadi
     ordering = ["-created_at", "-id"]
+
+    def get_list_totals(self, queryset):
+        """Sklad sahifasi: qancha gul bor, tannarxi va sotuv qiymati qancha."""
+        base = queryset.order_by()
+        cost = stem_price_expr("cost_per_stem", "cost_per_stem_exact")
+        sale = stem_price_expr("sale_price_per_stem", "sale_price_per_stem_exact")
+        agg = base.aggregate(
+            t_received=int_sum("received_stems"),
+            t_remaining=int_sum("remaining_stems"),
+            t_received_cost=money_sum(money_product(F("received_stems"), cost)),
+            t_remaining_cost=money_sum(money_product(F("remaining_stems"), cost)),
+            t_remaining_sale=money_sum(money_product(F("remaining_stems"), sale)),
+        )
+        return {
+            "batches": base.count(),
+            "active_batches": base.filter(is_active=True).count(),
+            "flowers": distinct_count(base, "variant"),
+            "suppliers": distinct_count(base.exclude(supplier=None), "supplier"),
+            "received_stems": agg["t_received"],
+            "remaining_stems": agg["t_remaining"],
+            "used_stems": max(agg["t_received"] - agg["t_remaining"], 0),
+            "received_cost": money(agg["t_received_cost"]),
+            # skladda hozir turgan gulning tannarxi va sotuvdagi qiymati
+            "remaining_cost": money(agg["t_remaining_cost"]),
+            "remaining_sale_value": money(agg["t_remaining_sale"]),
+        }
 
     def perform_create(self, serializer):
         """Kirim mavjud qatorga qo'shilgan bo'lsa ham jurnal to'g'ri qolishi kerak.
@@ -2167,15 +2352,37 @@ class StockBatchViewSet(ScopedViewSet):
         return Response(StockMovementSerializer(movement).data)
 
 
-class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
+class StockMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [RolePermission]
     permission_page = "inventory"
     queryset = StockMovement.objects.select_related("batch__variant__flower", "performed_by").all()
     serializer_class = StockMovementSerializer
     filterset_class = StockMovementFilter
+    ordering_fields = ["created_at", "quantity_stems"]
+    # bir vaqtda yozilgan qatorlar sahifalarda takrorlanmasligi uchun id ham
+    ordering = ["-created_at", "-id"]
+
+    def get_list_totals(self, queryset):
+        """Sklad harakati jurnali: qancha kirdi, qancha chiqdi."""
+        base = queryset.order_by()
+        agg = base.aggregate(
+            t_in=int_sum(Case(When(movement_type="in", then=F("quantity_stems")), default=Value(0), output_field=IntegerField())),
+            t_out=int_sum(Case(When(movement_type="out", then=F("quantity_stems")), default=Value(0), output_field=IntegerField())),
+            t_waste=int_sum(Case(When(movement_type="waste", then=F("quantity_stems")), default=Value(0), output_field=IntegerField())),
+            t_net=int_sum("quantity_stems"),
+        )
+        return {
+            "rows": base.count(),
+            "in_stems": agg["t_in"],
+            "out_stems": agg["t_out"],
+            "waste_stems": agg["t_waste"],
+            # kirim musbat, chiqim manfiy yozilgani uchun bu — sof o'zgarish
+            "net_stems": agg["t_net"],
+            "by_type": count_by(base, "movement_type"),
+        }
 
 
-class PackagingViewSet(ScopedViewSet):
+class PackagingViewSet(TotalsListMixin, ScopedViewSet):
     permission_page = "inventory"
     write_roles = ["admin", "warehouse"]
     queryset = Packaging.objects.all()
@@ -2183,6 +2390,25 @@ class PackagingViewSet(ScopedViewSet):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
     filterset_fields = ["packaging_type", "is_active", "unit", "basket_material", "size"]
     search_fields = ["name_uz", "size"]
+    ordering_fields = ["name_uz", "quantity", "cost_price", "sale_price", "created_at"]
+    ordering = ["name_uz", "id"]
+
+    def get_list_totals(self, queryset):
+        """Materiallar: nechta dona qoldi, tannarxi va sotuv qiymati qancha."""
+        base = queryset.order_by()
+        agg = base.aggregate(
+            t_quantity=int_sum("quantity"),
+            t_cost=money_sum(money_product(F("quantity"), F("cost_price"))),
+            t_sale=money_sum(money_product(F("quantity"), F("sale_price"))),
+        )
+        return {
+            "items": base.count(),
+            "active_items": base.filter(is_active=True).count(),
+            "quantity_total": agg["t_quantity"],
+            "cost_value": money(agg["t_cost"]),
+            "sale_value": money(agg["t_sale"]),
+            "by_type": count_by(base, "packaging_type"),
+        }
 
     def perform_create(self, serializer):
         packaging = serializer.save()
@@ -2213,15 +2439,35 @@ class PackagingViewSet(ScopedViewSet):
         return Response(PackagingMovementSerializer(movement).data)
 
 
-class PackagingMovementViewSet(viewsets.ReadOnlyModelViewSet):
+class PackagingMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [RolePermission]
     permission_page = "inventory"
     queryset = PackagingMovement.objects.select_related("packaging", "performed_by", "delivery__supplier").all()
     serializer_class = PackagingMovementSerializer
     filterset_class = PackagingMovementFilter
+    ordering_fields = ["created_at", "quantity"]
+    ordering = ["-created_at", "-id"]
+
+    def get_list_totals(self, queryset):
+        """Material harakati jurnali: qancha kirdi, qancha chiqdi, qancha pul."""
+        base = queryset.order_by()
+        agg = base.aggregate(
+            t_in=int_sum(Case(When(movement_type="in", then=F("quantity")), default=Value(0), output_field=IntegerField())),
+            t_out=int_sum(Case(When(movement_type="out", then=F("quantity")), default=Value(0), output_field=IntegerField())),
+            t_net=int_sum("quantity"),
+            t_cost=money_sum(money_product(F("quantity"), F("unit_cost"))),
+        )
+        return {
+            "rows": base.count(),
+            "in_quantity": agg["t_in"],
+            "out_quantity": agg["t_out"],
+            "net_quantity": agg["t_net"],
+            "cost_total": money(agg["t_cost"]),
+            "by_type": count_by(base, "movement_type"),
+        }
 
 
-class MaterialDeliveryViewSet(ScopedViewSet):
+class MaterialDeliveryViewSet(TotalsListMixin, ScopedViewSet):
     """Material partiyasi. Avval ochiladi, keyin ichiga materiallar kiritiladi."""
 
     permission_page = "inventory"
@@ -2232,6 +2478,22 @@ class MaterialDeliveryViewSet(ScopedViewSet):
     search_fields = ["number", "note", "supplier__name"]
     ordering_fields = ["received_at", "number", "created_at"]
     ordering = ["-created_at", "-id"]
+
+    def get_list_totals(self, queryset):
+        """Material partiyalari: nechta partiya, ichida qancha material va pul."""
+        base = queryset.order_by()
+        rows = PackagingMovement.objects.filter(delivery__in=base.values("pk"), movement_type="in")
+        agg = rows.aggregate(
+            t_quantity=int_sum("quantity"),
+            t_cost=money_sum(money_product(F("quantity"), F("unit_cost"))),
+        )
+        return {
+            "deliveries": base.count(),
+            "active_deliveries": base.filter(is_active=True).count(),
+            "items": rows.count(),
+            "quantity_total": agg["t_quantity"],
+            "cost_total": money(agg["t_cost"]),
+        }
 
     def perform_create(self, serializer):
         delivery = serializer.save(created_by=self.request.user)
@@ -2486,7 +2748,7 @@ class BranchViewSet(ScopedViewSet):
         return super().get_permissions()
 
 
-class CatalogTransferViewSet(viewsets.ReadOnlyModelViewSet):
+class CatalogTransferViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     """Filialga yuborilgan katalog tarixi."""
 
     permission_classes = [RolePermission]
@@ -2495,12 +2757,29 @@ class CatalogTransferViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CatalogTransferSerializer
     filterset_fields = ["branch", "source_item", "target_item"]
     ordering_fields = ["created_at", "quantity"]
+    ordering = ["-created_at", "-id"]
 
     def get_queryset(self):
         # filial faqat o'ziga kelgan yuborishlarni ko'radi
         branch = user_branch(self.request.user)
         queryset = super().get_queryset()
         return queryset.filter(branch=branch) if branch else queryset
+
+    def get_list_totals(self, queryset):
+        """Filialga yuborishlar: nechta dona va qaysi narxda."""
+        base = queryset.order_by()
+        agg = base.aggregate(
+            t_quantity=int_sum("quantity"),
+            t_source_value=money_sum(money_product(F("quantity"), F("source_price"))),
+            t_target_value=money_sum(money_product(F("quantity"), F("target_price"))),
+        )
+        return {
+            "transfers": base.count(),
+            "quantity_total": agg["t_quantity"],
+            "source_value": money(agg["t_source_value"]),
+            "target_value": money(agg["t_target_value"]),
+            "branches": distinct_count(base, "branch"),
+        }
 
 
 class DebtViewSet(ScopedViewSet):
@@ -2683,7 +2962,7 @@ class BranchReportView(APIView):
         return Response(json_safe(branch_report_data(request)))
 
 
-class CatalogReworkViewSet(viewsets.ReadOnlyModelViewSet):
+class CatalogReworkViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     """Restavratsiya tarixi va yangi restavratsiya yaratish.
 
     Buzilgan katalog mahsulotlari sotuvda ko'rinmaydi, lekin shu tarixda qoladi.
@@ -2700,6 +2979,28 @@ class CatalogReworkViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ["florist"]
     ordering_fields = ["created_at", "florist_amount", "input_stems", "output_stems"]
     ordering = ["-created_at", "-id"]
+
+    def get_list_totals(self, queryset):
+        """Restavratsiya: qancha gul kirdi, qancha chiqdi, qancha chiqitga ketdi."""
+        base = queryset.order_by()
+        agg = base.aggregate(
+            t_input=int_sum("input_stems"),
+            t_output=int_sum("output_stems"),
+            t_waste=int_sum("waste_stems"),
+            t_input_cost=money_sum(F("input_cost")),
+            t_waste_cost=money_sum(F("waste_cost")),
+            t_florist_amount=money_sum(F("florist_amount")),
+        )
+        return {
+            "reworks": base.count(),
+            "input_stems": agg["t_input"],
+            "output_stems": agg["t_output"],
+            "waste_stems": agg["t_waste"],
+            "input_cost": money(agg["t_input_cost"]),
+            "waste_cost": money(agg["t_waste_cost"]),
+            "florist_amount": money(agg["t_florist_amount"]),
+            "florists": distinct_count(base, "florist"),
+        }
 
     @extend_schema(request=CatalogReworkCreateSerializer, responses=CatalogReworkSerializer)
     def create(self, request, *args, **kwargs):
@@ -2723,7 +3024,7 @@ class CatalogReworkViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(CatalogReworkSerializer(rework).data, status=status.HTTP_201_CREATED)
 
 
-class CatalogItemViewSet(ScopedViewSet):
+class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
     queryset = CatalogItem.objects.select_related("social_post", "florist__user", "decoration_florist__user", "customer").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
@@ -2738,6 +3039,37 @@ class CatalogItemViewSet(ScopedViewSet):
 
     def get_queryset(self):
         return scope_catalog_to_branch(super().get_queryset(), self.request.user)
+
+    def get_list_totals(self, queryset):
+        """Katalog sahifasi: nechta dona bor, qancha turadi, tannarxi qancha."""
+        base = queryset.order_by()
+        agg = base.aggregate(
+            t_quantity=int_sum("quantity_total"),
+            t_sold=int_sum("quantity_sold"),
+            t_wasted=int_sum("quantity_wasted"),
+            t_reworked=int_sum("quantity_reworked"),
+            t_remaining=int_sum(CATALOG_REMAINING_EXPR),
+            t_cost=money_sum(F("calculated_cost_price")),
+            t_discount=money_sum(F("discount_amount")),
+            t_remaining_value=money_sum(money_product(CATALOG_REMAINING_EXPR, F("price"))),
+            t_sold_value=money_sum(money_product(F("quantity_sold"), F("price"))),
+        )
+        return {
+            "items": base.count(),
+            "quantity_total": agg["t_quantity"],
+            "quantity_sold": agg["t_sold"],
+            "quantity_wasted": agg["t_wasted"],
+            "quantity_reworked": agg["t_reworked"],
+            "quantity_remaining": agg["t_remaining"],
+            # qo'lda turgan dona × sotuv narxi
+            "remaining_value": money(agg["t_remaining_value"]),
+            # sotilgan dona × sotuv narxi (chegirmasiz; aniq tushum /catalog/sales/ da)
+            "sold_value": money(agg["t_sold_value"]),
+            "cost_total": money(agg["t_cost"]),
+            "discount_total": money(agg["t_discount"]),
+            "by_status": count_by(base, "status"),
+            "by_kind": count_by(base, "catalog_kind"),
+        }
 
     def perform_create(self, serializer):
         # Filial foydalanuvchisi yangi katalog yaratmaydi, unga faqat yuboriladi.
