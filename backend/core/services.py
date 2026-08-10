@@ -14,6 +14,23 @@ from .platform_services import instagram_send_carousel, instagram_send_image, op
 AI_REPLY_WAIT_SECONDS = 7
 AI_FOLLOW_UP_DELAY_SECONDS = 30 * 60
 
+# Sklad AI ga ko'rsatilmaydi. Bu nomlar tool ro'yxatidan olib tashlangan, model baribir
+# chaqirib qolsa execute_ai_tool unga operatorga topshirish yo'riqnomasini qaytaradi.
+AI_HIDDEN_STOCK_TOOLS = {"get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_stock_image", "send_stock_images"}
+
+LEAD_TOPIC_LABELS = {
+    "catalog_order": "Katalogdan buyurtma",
+    "custom_order": "Yasatma buyurtma",
+    "photo_request": "Rasm bo'yicha so'rov",
+    "question": "Savol",
+    "other": "Boshqa mavzu",
+}
+
+ARRANGEMENT_LABELS = [("bouquet", "buket"), ("basket", "savat"), ("stems", "donalab"), ("catalog", "katalog mahsuloti")]
+
+MAX_LEAD_PHOTO_URLS = 5
+MAX_CONTEXT_ATTACHMENTS = 6
+
 
 def parse_lead_date(value):
     text = (value or "").strip()
@@ -476,6 +493,24 @@ def ai_flower_variant_rows(query="", limit=24):
     return rows
 
 
+def customer_attachment_rows(history_messages):
+    """Mijoz yuborgan rasm va media havolalari, eng yangisi oxirida.
+
+    Havolalar Instagram yoki Telegram tomonidan beriladi, biz ularni serverga
+    ko'chirmaymiz — leadga aynan shu havola yoziladi.
+    """
+    rows = []
+    for message in history_messages:
+        if message.sender != "customer":
+            continue
+        for attachment in (message.metadata or {}).get("attachments", []) or []:
+            url = attachment.get("url")
+            if not url or any(row["url"] == url for row in rows):
+                continue
+            rows.append({"kind": attachment.get("kind") or "media", "url": url})
+    return rows[-MAX_CONTEXT_ATTACHMENTS:]
+
+
 def ai_post_context(conversation):
     if not conversation.social_post_id:
         return None
@@ -612,6 +647,63 @@ def calculate_custom_arrangement_price(stock_items):
     }
 
 
+def lead_request_details(arguments):
+    """Operator ko'radigan qo'shimcha izoh maydonlari. AI tool argumentlaridan olinadi."""
+    topic = (arguments.get("topic") or "").strip()
+    return {
+        "topic": topic if topic in LEAD_TOPIC_LABELS else "",
+        "flowers_text": (arguments.get("flowers_text") or "").strip()[:400],
+        "size_text": (arguments.get("size_text") or "").strip()[:200],
+        "photo_urls": customer_photo_urls(arguments.get("photo_urls")),
+    }
+
+
+def customer_photo_urls(values):
+    """Mijoz yuborgan rasm havolalari. Rasm serverga saqlanmaydi, faqat havola yoziladi."""
+    urls = []
+    for value in values or []:
+        url = str(value or "").strip()
+        if url.startswith("http") and url not in urls:
+            urls.append(url[:500])
+    return urls[:MAX_LEAD_PHOTO_URLS]
+
+
+def lead_summary_text(lead):
+    """Operator suhbat ustida ko'radigan bir qatorlik xulosa."""
+    details = lead.details or {}
+    parts = [LEAD_TOPIC_LABELS.get(details.get("topic"), "So'rov")]
+    if lead.arrangement_type:
+        parts.append(dict(ARRANGEMENT_LABELS).get(lead.arrangement_type, lead.arrangement_type))
+    if details.get("flowers_text"):
+        parts.append(f"gul {details['flowers_text']}")
+    if details.get("size_text"):
+        parts.append(f"hajmi {details['size_text']}")
+    if details.get("photo_urls"):
+        parts.append(f"{len(details['photo_urls'])} ta rasm havolasi")
+    if lead.request_uz:
+        parts.append(lead.request_uz)
+    return " · ".join(parts)[:2000]
+
+
+def save_conversation_ai_summary(conversation, lead):
+    """Lead yaratilgach yoki yangilangach suhbat xulosasini yozib qo'yadi."""
+    summary = lead_summary_text(lead)
+    if summary == conversation.ai_summary:
+        return
+    conversation.ai_summary = summary
+    conversation.save(update_fields=["ai_summary", "updated_at"])
+
+
+def stock_hidden_result(name):
+    """AI dan olib tashlangan sklad tool'lari chaqirilsa qaytariladigan yo'riqnoma."""
+    return {
+        "ok": False,
+        "detail": "stock_not_available_to_ai",
+        "tool": name,
+        "instruction": "Sklad ma'lumoti AI ga berilmaydi. Mijozga gul ro'yxati, dona narxi yoki sklad rasmi ko'rsatilmaydi. Ism va telefonni ol, qaysi guldan, qanday hajmda va buketmi yoki savatmi ekanini so'ra, keyin client_lead_create chaqir va aniq narxni operator aytishini ayt.",
+    }
+
+
 def ai_tool_definitions():
     lead_catalog_item_schema = {
         "type": "object",
@@ -622,16 +714,13 @@ def ai_tool_definitions():
         "required": ["catalog_name", "quantity"],
         "additionalProperties": False,
     }
-    lead_stock_item_schema = {
-        "type": "object",
-        "properties": {
-            "batch_id": {"type": "integer"},
-            "quantity_stems": {"type": "integer"},
-            "quantity_bunches": {"type": "number"},
-        },
-        "required": ["batch_id", "quantity_stems", "quantity_bunches"],
-        "additionalProperties": False,
+    lead_request_properties = {
+        "topic": {"type": ["string", "null"], "enum": list(LEAD_TOPIC_LABELS) + [None], "description": "So'rov turi. custom_order — mijoz o'zi yasatmoqchi, photo_request — mijoz rasm yubordi, question — AI javob berolmaydigan savol."},
+        "flowers_text": {"type": ["string", "null"], "description": "Mijoz aytgan gul turlari, o'z so'zi bilan. Bilmasa null."},
+        "size_text": {"type": ["string", "null"], "description": "Hajm yoki dona soni, mijoz aytganidek. Masalan 51 dona, katta, o'rtacha. Bilmasa null."},
+        "photo_urls": {"type": "array", "items": {"type": "string"}, "description": "Mijoz yuborgan rasm havolalari. Suhbatdagi havolani o'zgartirmasdan ko'chir."},
     }
+    lead_request_keys = list(lead_request_properties)
     return [
         {
             "type": "function",
@@ -648,7 +737,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "client_lead_create",
-            "description": "Mijoz aniq buyurtma qilmoqchi bo'lsa va ism-telefon olingan bo'lsa lead yaratish. request_text faqat o'zbekcha, mijoz so'ragan narsani aniq yoz.",
+            "description": "Ism va telefon olingach so'rovni operatorga topshirish. Katalog buyurtmasi ham, yasatma buyurtma ham, rasm bo'yicha so'rov ham, AI javob berolmagan savol ham shu tool orqali yoziladi. request_text faqat o'zbekcha, mijoz so'ragan narsani aniq yoz.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -656,17 +745,17 @@ def ai_tool_definitions():
                     "phone": {"type": ["string", "null"]},
                     "request_text": {"type": "string"},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
-                    "estimated_price": {"type": ["number", "null"]},
+                    "estimated_price": {"type": ["number", "null"], "description": "Faqat katalog mahsulotining aniq narxi. Yasatma buyurtmada null."},
                     "florist_fee": {"type": ["number", "null"]},
                     "fulfillment": {"type": ["string", "null"], "enum": ["delivery", "pickup", None]},
                     "delivery_address": {"type": ["string", "null"]},
                     "desired_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
                     "desired_time": {"type": ["string", "null"], "description": "HH:MM"},
                     "catalog_items": {"type": "array", "items": lead_catalog_item_schema},
-                    "stock_items": {"type": "array", "items": lead_stock_item_schema},
                     "note": {"type": ["string", "null"]},
+                    **lead_request_properties,
                 },
-                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "stock_items", "note"],
+                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
                 "additionalProperties": False,
             },
             "strict": True,
@@ -691,10 +780,10 @@ def ai_tool_definitions():
                     "desired_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
                     "desired_time": {"type": ["string", "null"], "description": "HH:MM"},
                     "catalog_items": {"type": ["array", "null"], "items": lead_catalog_item_schema},
-                    "stock_items": {"type": ["array", "null"], "items": lead_stock_item_schema},
                     "note": {"type": ["string", "null"]},
+                    **lead_request_properties,
                 },
-                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "stock_items", "note"],
+                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
                 "additionalProperties": False,
             },
             "strict": True,
@@ -702,53 +791,14 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish. Mijoz skladdagi aniq guldan yasalgan tayyor mahsulotni so'rasa, o'sha gulning batch_id sini made_from_batch_id ga yuboring.",
+            "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "box", None]},
-                    "made_from_batch_id": {"type": ["integer", "null"], "description": "Shu sklad partiyasidan yasalgan katalog mahsulotlari"},
                 },
-                "required": ["query", "arrangement_type", "made_from_batch_id"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "get_stock",
-            "description": "Skladdagi gul variantlari va narxlarini olish. Bu tool faqat gullar uchun, savat/qadoq/materiallarni qaytarmaydi. Butun sklad ro'yxati kerak bo'lsa query ni bo'sh string qoldiring; 'all', 'hammasi' kabi so'z yozmang. Aniq gul yoki rang qidirilsagina query ga o'sha nomni yozing. Natijada price_per_stem dona narxi, stems_per_pochka bir pochkadagi gul soni, price_per_pochka esa bitta pochka narxi. Pochka bu bog'lam, dostavka emas.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Bo'sh string = butun sklad. Aks holda gul nomi yoki rangi."}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "get_flower_variant_info",
-            "description": "Gul turi/navi/rangi haqida izoh va mavjud stock ma'lumotlarini olish.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "calculate_custom_arrangement_price",
-            "description": "Custom buket yoki savat narxini aniq hisoblash. AI narxni o'zi hisoblamaydi, shu tool qaytargan total va display_summary_uz dan foydalanadi.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "stock_items": {"type": "array", "items": lead_stock_item_schema},
-                },
-                "required": ["stock_items"],
+                "required": ["query", "arrangement_type"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -778,35 +828,6 @@ def ai_tool_definitions():
                     "catalog_ids": {"type": "array", "items": {"type": "integer"}, "description": "Bo'sh massiv = butun katalog. Aks holda get_catalog qaytargan catalog_id lar."},
                 },
                 "required": ["catalog_ids"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "send_stock_image",
-            "description": "Skladdagi aniq gul turi/navi/rangi rasmini mijozga yuborish.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "batch_id": {"type": ["integer", "null"]},
-                },
-                "required": ["query", "batch_id"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-        {
-            "type": "function",
-            "name": "send_stock_images",
-            "description": "Skladdagi bir nechta gul turi/navi/rangi rasmlarini mijozga yuborish.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "queries": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["queries"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -1014,17 +1035,13 @@ def send_stock_batch_image(conversation, batch):
 
 def execute_ai_tool(name, arguments, conversation):
     customer = conversation.customer
+    if name in AI_HIDDEN_STOCK_TOOLS:
+        return stock_hidden_result(name)
     if name == "client_leads_get":
         limit = max(1, min(int(arguments.get("limit") or 5), 20))
         return {"leads": recent_customer_orders(customer)[:limit]}
     if name == "get_catalog":
-        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "", made_from_batch_id=arguments.get("made_from_batch_id"))}
-    if name == "get_stock":
-        return {"stock": ai_stock_rows(arguments.get("query") or "", limit=100)}
-    if name == "get_flower_variant_info":
-        return {"variants": ai_flower_variant_rows(arguments.get("query") or "", limit=60)}
-    if name == "calculate_custom_arrangement_price":
-        return calculate_custom_arrangement_price(arguments.get("stock_items") or [])
+        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "")}
     if name == "send_catalog_album":
         catalog_ids = [int(value) for value in (arguments.get("catalog_ids") or []) if str(value).isdigit() or isinstance(value, int)]
         items = catalog_album_items(catalog_ids)
@@ -1042,21 +1059,6 @@ def execute_ai_tool(name, arguments, conversation):
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
-    if name == "send_stock_images":
-        results = []
-        seen = set()
-        for query in arguments.get("queries") or []:
-            batch = _stock_batch_for_ai(query=query)
-            if not batch or batch.id in seen:
-                continue
-            seen.add(batch.id)
-            results.append(send_stock_batch_image(conversation, batch))
-        return {"ok": bool(results), "images": results}
-    if name == "send_stock_image":
-        batch = _stock_batch_for_ai(query=arguments.get("query") or "", batch_id=arguments.get("batch_id"))
-        if not batch:
-            return {"ok": False, "detail": "stock_not_found"}
-        return send_stock_batch_image(conversation, batch)
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}
     name_value = (arguments.get("customer_name") or "").strip()
@@ -1083,6 +1085,7 @@ def execute_ai_tool(name, arguments, conversation):
         "stock_items": arguments.get("stock_items") or [],
         "note": arguments.get("note") or "",
         "created_by": "ai_tool",
+        **lead_request_details(arguments),
     }
     if name == "client_lead_edit":
         lead = Lead.objects.filter(id=arguments.get("lead_id"), customer=customer).first()
@@ -1116,8 +1119,12 @@ def execute_ai_tool(name, arguments, conversation):
         if desired_time:
             lead.desired_time = desired_time[:20]
             fields.append("desired_time")
-        if arguments.get("catalog_items") is not None or arguments.get("stock_items") is not None or arguments.get("note"):
-            lead.details = details
+        # Tahrirda faqat yuborilgan maydon yangilanadi. Butun details ni almashtirsak
+        # avvalgi izoh, gul turi va rasm havolasi yo'qolib ketardi.
+        changed_details = {key: value for key, value in details.items() if value not in (None, "", [], {})}
+        changed_details.pop("created_by", None)
+        if changed_details:
+            lead.details = {**(lead.details or {}), **changed_details}
             fields.append("details")
         if fields:
             lead.save(update_fields=list(set(fields)) + ["updated_at"])
@@ -1135,6 +1142,7 @@ def execute_ai_tool(name, arguments, conversation):
                 quantity_stems = int(row.get("quantity_stems") or 0)
                 if batch and quantity_stems > 0:
                     LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
+        save_conversation_ai_summary(conversation, lead)
         return {"ok": True, "lead_id": lead.id}
     if not request_text:
         return {"ok": False, "detail": "request_text_required"}
@@ -1168,6 +1176,7 @@ def execute_ai_tool(name, arguments, conversation):
         if batch and quantity_stems > 0:
             LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
     Notification.objects.create(notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
+    save_conversation_ai_summary(conversation, lead)
     return {"ok": True, "lead_id": lead.id}
 
 
@@ -1188,12 +1197,8 @@ def ai_response_schema():
                 "type": "array",
                 "items": {"type": "object", "properties": {"catalog_name": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["catalog_name", "quantity"], "additionalProperties": False},
             },
-            "stock_items": {
-                "type": "array",
-                "items": {"type": "object", "properties": {"batch_id": {"type": "integer"}, "quantity_stems": {"type": "integer"}, "quantity_bunches": {"type": "number"}}, "required": ["batch_id", "quantity_stems", "quantity_bunches"], "additionalProperties": False},
-            },
         },
-        "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items", "stock_items"],
+        "required": ["reply", "detected_language", "customer_name", "phone", "lead_ready", "lead_request", "arrangement_type", "estimated_price", "handoff", "catalog_items"],
         "additionalProperties": False,
     }
 
@@ -1253,6 +1258,7 @@ def ai_reply(conversation):
             "fresh_session": fresh_session,
             "has_ai_reply_in_session": has_ai_reply_in_session,
             "pending_customer_messages": pending_customer_messages,
+            "customer_attachments": customer_attachment_rows(history_messages),
             "social_post": ai_post_context(conversation),
             "open_lead": {
                 "id": open_lead.id,

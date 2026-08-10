@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from .models import AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
-from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, stock_batch_ai_row
+from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, send_stock_batch_image, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -182,26 +182,26 @@ class BusinessRulesTests(TestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.fulfillment, "pickup")
 
-    def test_stock_image_tool_reports_failure_instead_of_claiming_sent(self):
+    def test_stock_image_helper_reports_failure_instead_of_claiming_sent(self):
         from unittest.mock import patch
         customer = Customer.objects.create(instagram_user_id="ig-image-fail")
         conversation = Conversation.objects.create(customer=customer)
         self.batch.image_url = "https://example.com/rose.jpg"
         self.batch.save(update_fields=["image_url", "updated_at"])
         with patch("core.services.instagram_send_image", side_effect=requests.HTTPError("400 Bad Request")):
-            result = execute_ai_tool("send_stock_image", {"query": "Mondial", "batch_id": self.batch.id}, conversation)
+            result = send_stock_batch_image(conversation, self.batch)
         self.assertFalse(result["ok"])
         self.assertFalse(result["image_sent"])
         self.assertEqual(result["detail"], "send_failed")
 
-    def test_stock_image_tool_confirms_delivery_on_success(self):
+    def test_stock_image_helper_confirms_delivery_on_success(self):
         from unittest.mock import patch
         customer = Customer.objects.create(instagram_user_id="ig-image-ok")
         conversation = Conversation.objects.create(customer=customer)
         self.batch.image_url = "https://example.com/rose.jpg"
         self.batch.save(update_fields=["image_url", "updated_at"])
         with patch("core.services.instagram_send_image", return_value={"message_id": "mid-1"}):
-            result = execute_ai_tool("send_stock_image", {"query": "Mondial", "batch_id": self.batch.id}, conversation)
+            result = send_stock_batch_image(conversation, self.batch)
         self.assertTrue(result["ok"])
         self.assertTrue(result["image_sent"])
 
@@ -638,7 +638,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_album", "send_stock_image", "send_stock_images"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "send_catalog_image", "send_catalog_album"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
@@ -668,7 +668,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_catalog_image", "send_catalog_album", "send_stock_image", "send_stock_images"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "send_catalog_image", "send_catalog_album"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = CatalogItem.objects.create(name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
@@ -681,11 +681,20 @@ class BusinessRulesTests(TestCase):
         self.assertIn(basket.name_uz, names)
         self.assertNotIn(self.item.name_uz, names)
 
-    def test_get_stock_tool_does_not_return_baskets_when_flower_is_missing(self):
+    def test_stock_rows_do_not_return_baskets_when_flower_is_missing(self):
+        self.assertEqual(ai_stock_rows("gortenziya", limit=10), [])
+
+    def test_stock_tools_are_hidden_from_the_ai(self):
+        """Sklad AI ga ko'rsatilmaydi — tool ro'yxatida ham, javobda ham."""
         customer = Customer.objects.create(instagram_user_id="telegram:13")
         conversation = Conversation.objects.create(customer=customer)
-        result = execute_ai_tool("get_stock", {"query": "gortenziya"}, conversation)
-        self.assertEqual(result, {"stock": []})
+        exposed = {tool["name"] for tool in ai_tool_definitions()}
+        for name in ["get_stock", "get_flower_variant_info", "calculate_custom_arrangement_price", "send_stock_image", "send_stock_images"]:
+            self.assertNotIn(name, exposed)
+            result = execute_ai_tool(name, {"query": "atirgul"}, conversation)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["detail"], "stock_not_available_to_ai")
+            self.assertIn("client_lead_create", result["instruction"])
 
     def test_calculate_custom_arrangement_price_is_deterministic(self):
         BusinessSettings.objects.update_or_create(pk=1, defaults={"default_florist_fee": Decimal("50000")})
@@ -707,25 +716,23 @@ class BusinessRulesTests(TestCase):
         second = StockBatch.objects.create(variant=self.batch.variant, batch_number="T-PRUT", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=10000, sale_price_per_stem=15000, sale_price_per_bunch=300000)
         customer = Customer.objects.create(instagram_user_id="telegram:calc")
         conversation = Conversation.objects.create(customer=customer)
-        result = execute_ai_tool("calculate_custom_arrangement_price", {
-            "stock_items": [
-                {"batch_id": self.batch.id, "quantity_stems": 10, "quantity_bunches": 0},
-                {"batch_id": second.id, "quantity_stems": 10, "quantity_bunches": 0},
-            ],
-        }, conversation)
+        result = calculate_custom_arrangement_price([
+            {"batch_id": self.batch.id, "quantity_stems": 10, "quantity_bunches": 0},
+            {"batch_id": second.id, "quantity_stems": 10, "quantity_bunches": 0},
+        ])
         self.assertTrue(result["ok"])
         self.assertEqual(result["flower_subtotal"], "300000")
         self.assertEqual(result["total"], "350000")
         self.assertEqual(len(result["lines"]), 2)
 
-    def test_send_stock_image_tool_sends_flower_image(self):
+    def test_send_stock_batch_image_sends_flower_image(self):
         self.batch.image_url = "https://example.com/freedom.jpg"
         self.batch.save(update_fields=["image_url", "updated_at"])
         customer = Customer.objects.create(instagram_user_id="telegram:13")
         conversation = Conversation.objects.create(customer=customer)
         from unittest.mock import patch
         with patch("core.services.telegram_send_image", return_value={"ok": True}) as image_mock:
-            result = execute_ai_tool("send_stock_image", {"query": "Mondial", "batch_id": None}, conversation)
+            result = send_stock_batch_image(conversation, self.batch)
         self.assertTrue(result["ok"])
         self.assertEqual(result["image_url"], "https://example.com/freedom.jpg")
         image_mock.assert_called_once_with("13", "https://example.com/freedom.jpg")
@@ -6377,3 +6384,188 @@ class PaginationTotalsTests(TestCase):
         material_journal = self.client.get("/api/material-movements/").json()["totals"]
         self.assertEqual(material_journal["in_quantity"], 10)
         self.assertEqual(Decimal(material_journal["cost_total"]), Decimal("150000"))
+
+
+class OperatorHandoffTests(TestCase):
+    """Sklad AI dan olib tashlangach so'rovlar operatorga qanday topshirilishi."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_user_id="telegram:7001", name="Ahmad", phone="+998901112233")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+
+    def create_lead(self, **overrides):
+        arguments = {
+            "customer_name": None,
+            "phone": None,
+            "request_text": "Mijoz Jumila pushti atirguldan katta buket yasatmoqchi",
+            "arrangement_type": "bouquet",
+            "estimated_price": None,
+            "florist_fee": None,
+            "fulfillment": None,
+            "delivery_address": None,
+            "desired_date": None,
+            "desired_time": None,
+            "catalog_items": [],
+            "note": "Tug'ilgan kunga sovg'a",
+            "topic": "custom_order",
+            "flowers_text": "jumila pushti",
+            "size_text": "51 dona",
+            "photo_urls": [],
+        }
+        arguments.update(overrides)
+        return execute_ai_tool("client_lead_create", arguments, self.conversation)
+
+    def test_custom_order_lead_keeps_flowers_size_and_note(self):
+        result = self.create_lead()
+        self.assertTrue(result["ok"])
+        details = Lead.objects.get(id=result["lead_id"]).details
+        self.assertEqual(details["topic"], "custom_order")
+        self.assertEqual(details["flowers_text"], "jumila pushti")
+        self.assertEqual(details["size_text"], "51 dona")
+        self.assertEqual(details["note"], "Tug'ilgan kunga sovg'a")
+
+    def test_custom_order_lead_carries_no_price(self):
+        """Yasatma buyurtmada narxni operator qo'yadi, AI emas."""
+        lead = Lead.objects.get(id=self.create_lead()["lead_id"])
+        self.assertIsNone(lead.estimated_price)
+        self.assertEqual(lead.florist_fee, Decimal("0"))
+
+    def test_photo_request_lead_stores_the_link_without_downloading_it(self):
+        url = "https://api.telegram.org/file/bot123/photos/file_9.jpg"
+        result = self.create_lead(
+            topic="photo_request",
+            request_text="Mijoz rasm yubordi va shu buketdan bormi deb so'radi",
+            flowers_text=None,
+            size_text=None,
+            photo_urls=[url, url, "not-a-link"],
+        )
+        details = Lead.objects.get(id=result["lead_id"]).details
+        self.assertEqual(details["photo_urls"], [url])
+        self.assertEqual(details["flowers_text"], "")
+
+    def test_photo_urls_are_capped(self):
+        urls = [f"https://cdn.example.com/{index}.jpg" for index in range(9)]
+        result = self.create_lead(topic="photo_request", photo_urls=urls)
+        self.assertEqual(Lead.objects.get(id=result["lead_id"]).details["photo_urls"], urls[:5])
+
+    def test_lead_creation_writes_the_conversation_summary(self):
+        self.create_lead()
+        self.conversation.refresh_from_db()
+        summary = self.conversation.ai_summary
+        self.assertIn("Yasatma buyurtma", summary)
+        self.assertIn("buket", summary)
+        self.assertIn("jumila pushti", summary)
+        self.assertIn("51 dona", summary)
+
+    def test_question_lead_summary_names_the_topic(self):
+        self.create_lead(topic="question", request_text="Mijoz to'y bezagi haqida so'radi", flowers_text=None, size_text=None, arrangement_type=None)
+        self.conversation.refresh_from_db()
+        self.assertTrue(self.conversation.ai_summary.startswith("Savol"))
+        self.assertIn("to'y bezagi", self.conversation.ai_summary)
+
+    def test_lead_edit_keeps_earlier_details(self):
+        lead_id = self.create_lead()["lead_id"]
+        execute_ai_tool("client_lead_edit", {
+            "lead_id": lead_id,
+            "customer_name": None,
+            "phone": None,
+            "request_text": None,
+            "status": None,
+            "arrangement_type": None,
+            "estimated_price": None,
+            "florist_fee": None,
+            "fulfillment": "pickup",
+            "delivery_address": None,
+            "desired_date": None,
+            "desired_time": None,
+            "catalog_items": None,
+            "note": None,
+            "topic": None,
+            "flowers_text": None,
+            "size_text": "80 dona",
+            "photo_urls": [],
+        }, self.conversation)
+        lead = Lead.objects.get(id=lead_id)
+        self.assertEqual(lead.fulfillment, "pickup")
+        self.assertEqual(lead.details["size_text"], "80 dona")
+        self.assertEqual(lead.details["note"], "Tug'ilgan kunga sovg'a")
+
+    def test_lead_still_needs_a_name_and_a_phone(self):
+        stranger = Customer.objects.create(instagram_user_id="telegram:7002")
+        conversation = Conversation.objects.create(customer=stranger)
+        result = execute_ai_tool("client_lead_create", {
+            "customer_name": None, "phone": None, "request_text": "Savol bor", "arrangement_type": None,
+            "estimated_price": None, "florist_fee": None, "fulfillment": None, "delivery_address": None,
+            "desired_date": None, "desired_time": None, "catalog_items": [], "note": None,
+            "topic": "question", "flowers_text": None, "size_text": None, "photo_urls": [],
+        }, conversation)
+        self.assertEqual(result["detail"], "customer_name_required")
+
+    def test_customer_photo_links_reach_the_ai_context(self):
+        self.conversation.messages.create(sender="customer", text="Salom")
+        self.conversation.messages.create(
+            sender="customer",
+            text="Shundan bormi\nMijoz yuborgan rasm: https://cdn.example.com/a.jpg",
+            metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/a.jpg"}]},
+        )
+        self.conversation.messages.create(sender="ai", text="Operatorlarimiz aniq javob berishadi", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/ours.jpg"}]})
+        rows = customer_attachment_rows(list(self.conversation.messages.order_by("created_at", "id")))
+        self.assertEqual(rows, [{"kind": "photo", "url": "https://cdn.example.com/a.jpg"}])
+
+    def test_telegram_photo_is_labelled_as_a_customer_photo(self):
+        from unittest.mock import patch
+        payload = {
+            "update_id": 7100,
+            "message": {
+                "message_id": 91,
+                "chat": {"id": 7100},
+                "from": {"id": 7100, "first_name": "Aziz"},
+                "photo": [{"file_id": "photo-small", "file_size": 100}, {"file_id": "photo-big", "file_size": 900}],
+                "caption": "Shundan bormi",
+            },
+        }
+        with patch("core.webhook_services.telegram_file_url", return_value="https://api.telegram.org/file/bot1/photo.jpg"):
+            jobs = resolve_telegram_update(payload)
+        self.assertEqual(len(jobs), 1)
+        message = Message.objects.get(id=jobs[0]["message_id"])
+        self.assertEqual(message.metadata["attachments"][0]["kind"], "photo")
+        self.assertIn("Mijoz yuborgan rasm: https://api.telegram.org/file/bot1/photo.jpg", message.text)
+
+
+class NoStockPromptTests(TestCase):
+    """Prompt keyingi migratsiyalarda sklad qoidalariga qaytib ketmasin."""
+
+    def setUp(self):
+        self.prompt = AISettings.objects.get(pk=1).system_prompt
+
+    def test_prompt_no_longer_mentions_the_stock_tools(self):
+        for name in ["get_stock", "calculate_custom_arrangement_price", "send_stock_image", "get_flower_variant_info", "batch_id", "price_per_stem"]:
+            self.assertNotIn(name, self.prompt)
+
+    def test_prompt_forbids_showing_the_stock_list(self):
+        section = self.prompt.split("4. SKLAD SENDA YO'Q", 1)[1].split("5. KATALOG", 1)[0]
+        self.assertIn("senga BERILMAYDI", section)
+        self.assertIn("YASATMA TARTIBI", section)
+        self.assertIn("flowers_text", section)
+        self.assertIn("size_text", section)
+        self.assertIn("Aniq narxni faqat operator aytadi", section)
+        self.assertNotIn("Skladimizda hozir quyidagi gullar bor", self.prompt)
+
+    def test_prompt_describes_the_customer_photo_flow(self):
+        section = self.prompt.split("6A. MIJOZ RASM YUBORSA", 1)[1].split("7. NARX", 1)[0]
+        self.assertIn("photo_request", section)
+        self.assertIn("photo_urls", section)
+        self.assertIn("customer_attachments", section)
+        self.assertIn("KO'RMAYSAN", section)
+
+    def test_prompt_routes_unknown_topics_to_an_operator(self):
+        section = self.prompt.split("8B. JAVOB BEROLMAGAN SAVOL", 1)[1].split("9. DO'KON MA'LUMOTLARI", 1)[0]
+        self.assertIn("2-HOLAT. ISM VA TELEFON ALLAQACHON BOR", section)
+        self.assertIn("operatorimiz siz bilan bog'lanib, aniq ma'lumot bersinmi", section)
+        self.assertIn("Roziligisiz lead yaratma", section)
+        self.assertIn("client_lead_create", section)
+
+    def test_prompt_lists_every_lead_topic(self):
+        section = self.prompt.split("8. BUYURTMA", 1)[1].split("8A. OPERATORGA ULASH", 1)[0]
+        for topic in ["catalog_order", "custom_order", "photo_request", "question", "other"]:
+            self.assertIn(topic, section)

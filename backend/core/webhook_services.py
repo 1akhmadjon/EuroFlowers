@@ -45,7 +45,12 @@ def attachment_kind(source, attachment_type, url):
         return "story"
     if "reel" in text:
         return "reel"
-    if "post" in text or "media" in text or "instagram.com/p/" in text:
+    if "post" in text or "instagram.com/p/" in text:
+        return "post"
+    # Mijoz o'zi suratga olgan yoki galereyadan yuborgan rasm. Story va post yuqorida ajratilgan.
+    if "photo" in text or "image" in text:
+        return "photo"
+    if "media" in text:
         return "post"
     return "media"
 
@@ -55,6 +60,7 @@ def attachment_label(kind):
         "story": "Story link",
         "post": "Post link",
         "reel": "Reel link",
+        "photo": "Mijoz yuborgan rasm",
         "voice": "Voice message",
         "media": "Media link",
     }.get(kind, "Media link")
