@@ -6570,6 +6570,29 @@ class NoStockPromptTests(TestCase):
         for topic in ["catalog_order", "custom_order", "photo_request", "question", "other"]:
             self.assertIn(topic, section)
 
+    def test_prompt_does_not_promise_an_operator_for_off_topic_questions(self):
+        """Ob-havo yoki bizda yo'q mahsulot uchun operator va'da qilinmasin."""
+        section = self.prompt.split("8B. JAVOB BEROLMAGAN SAVOL", 1)[1].split("9. DO'KON MA'LUMOTLARI", 1)[0]
+        self.assertIn("B. DO'KONGA UMUMAN TEGISHLI EMAS", section)
+        self.assertIn("operatorga TOPSHIRMA, lead ham YARATMA", section)
+        self.assertIn("Operatorlarimiz havoga oid aniq ma'lumot berishadi", section)
+        self.assertIn("C. BIZDA YO'Q MAHSULOT", section)
+
+    def test_prompt_keeps_the_contact_block_to_one_message(self):
+        section = self.prompt.split("8A. OPERATORGA ULASH", 1)[1].split("8B. JAVOB BEROLMAGAN", 1)[0]
+        self.assertIn("BIR SUHBATDA BIR MARTA", section)
+        self.assertIn("Ketma-ket ikki xabarda takrorlash qat'iy taqiqlanadi", section)
+        self.assertIn("Ism va telefon allaqachon olingan bo'lsa bu blokni umuman yozma", section)
+        self.assertIn("IKKI MARTA so'rama", section)
+
+    def test_prompt_hides_the_word_stock_from_the_customer(self):
+        self.assertIn('MIJOZGA "SKLAD" SO\'ZINI AYTMA', self.prompt)
+        self.assertIn("Biz skladdagi to'liq ro'yxatni yubormaymiz", self.prompt)
+
+    def test_prompt_states_the_paid_container_price(self):
+        section = self.prompt.split("7A. IDISH RANGI", 1)[1].split("8. BUYURTMA", 1)[0]
+        self.assertIn("Qizil bo'ladi, u 100 000 so'm", section)
+
     def test_prompt_keeps_the_flower_field_to_flower_names_only(self):
         """flowers_text ga butun jumla emas, faqat gul nomi tushsin."""
         self.assertIn("Butun jumlani yoki so'rovni bu yerga ko'chirma", self.prompt)
