@@ -716,8 +716,8 @@ def ai_tool_definitions():
     }
     lead_request_properties = {
         "topic": {"type": ["string", "null"], "enum": list(LEAD_TOPIC_LABELS) + [None], "description": "So'rov turi. custom_order — mijoz o'zi yasatmoqchi, photo_request — mijoz rasm yubordi, question — AI javob berolmaydigan savol."},
-        "flowers_text": {"type": ["string", "null"], "description": "Mijoz aytgan gul turlari, o'z so'zi bilan. Bilmasa null."},
-        "size_text": {"type": ["string", "null"], "description": "Hajm yoki dona soni, mijoz aytganidek. Masalan 51 dona, katta, o'rtacha. Bilmasa null."},
+        "flowers_text": {"type": ["string", "null"], "description": "Faqat gul nomlari va ranglari, mijozning so'zi bilan. Masalan \"jumila pushti\". Butun jumlani ko'chirma. Mijoz gul aytmagan bo'lsa null."},
+        "size_text": {"type": ["string", "null"], "description": "Faqat hajm yoki dona soni. Masalan \"51 dona\", \"katta\". Bilmasa null."},
         "photo_urls": {"type": "array", "items": {"type": "string"}, "description": "Mijoz yuborgan rasm havolalari. Suhbatdagi havolani o'zgartirmasdan ko'chir."},
     }
     lead_request_keys = list(lead_request_properties)

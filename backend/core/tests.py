@@ -6569,3 +6569,8 @@ class NoStockPromptTests(TestCase):
         section = self.prompt.split("8. BUYURTMA", 1)[1].split("8A. OPERATORGA ULASH", 1)[0]
         for topic in ["catalog_order", "custom_order", "photo_request", "question", "other"]:
             self.assertIn(topic, section)
+
+    def test_prompt_keeps_the_flower_field_to_flower_names_only(self):
+        """flowers_text ga butun jumla emas, faqat gul nomi tushsin."""
+        self.assertIn("Butun jumlani yoki so'rovni bu yerga ko'chirma", self.prompt)
+        self.assertIn('flowers_text ga "Jumila pushti atirgul", size_text ga "51 dona, katta"', self.prompt)
