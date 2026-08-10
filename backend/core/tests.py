@@ -6592,6 +6592,8 @@ class NoStockPromptTests(TestCase):
     def test_prompt_states_the_paid_container_price(self):
         section = self.prompt.split("7A. IDISH RANGI", 1)[1].split("8. BUYURTMA", 1)[0]
         self.assertIn("Qizil bo'ladi, u 100 000 so'm", section)
+        # Yakuniy "operatorlar bog'lanadi" jumlasi narx qatorini yutib yubormasin.
+        self.assertIn("yakuniy jumla bu qatorni almashtirmaydi", section)
 
     def test_prompt_keeps_the_flower_field_to_flower_names_only(self):
         """flowers_text ga butun jumla emas, faqat gul nomi tushsin."""
