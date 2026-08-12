@@ -1432,7 +1432,7 @@ class SocialPostSerializer(serializers.ModelSerializer):
         from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary
         user = getattr(self.context.get("request"), "user", None)
         for item_data in merge_catalog_item_payloads(catalog_items):
-            payment_type = item_data.pop("payment_type", "")
+            item_data.pop("payment_type", "")
             has_composition = "composition" in item_data
             composition = item_data.pop("composition", None)
             has_materials = "materials" in item_data
@@ -1455,17 +1455,9 @@ class SocialPostSerializer(serializers.ModelSerializer):
                 for key, value in item_data.items():
                     setattr(item, key, value)
                 item.social_post = post
-                if item.catalog_kind == "custom":
-                    item.status = "sold"
-                    item.quantity_sold = item.quantity_total
-                    item.sold_at = timezone.now()
                 item.save()
             else:
                 item_data = apply_volume_rate_to_attrs(item_data, item_data)
-                if item_data.get("catalog_kind") == "custom":
-                    item_data["status"] = "sold"
-                    item_data["quantity_sold"] = item_data.get("quantity_total") or 1
-                    item_data["sold_at"] = timezone.now()
                 item = CatalogItem.objects.create(social_post=post, **item_data)
             if has_composition:
                 item.composition.all().delete()
@@ -1492,14 +1484,6 @@ class SocialPostSerializer(serializers.ModelSerializer):
             if item.catalog_kind == "custom":
                 if not item.history.filter(action="created").exists():
                     create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi")
-                if not item.history.filter(action="sold").exists():
-                    snapshot = None
-                    if payment_type:
-                        from .inventory_services import catalog_snapshot
-                        snapshot = catalog_snapshot(item)
-                        snapshot["payment_type"] = payment_type
-                    create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot)
-                    notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             elif not item.history.filter(action="created").exists():
                 create_catalog_history(item, "created", user=user, note="Katalog qo‘shildi")
 
@@ -1763,8 +1747,8 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
-        payment_type = validated_data.pop("payment_type", "")
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary
+        validated_data.pop("payment_type", "")
         validated_data["customer"] = resolve_or_create_customer(
             customer=validated_data.pop("customer", None),
             name=validated_data.pop("customer_name", ""),
@@ -1775,10 +1759,6 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         created_at = validated_data.pop("created_at", None)
         validated_data = apply_volume_rate_to_attrs(validated_data, getattr(self, "initial_data", {}))
         validated_data = self._sync_social_post_image_data(validated_data)
-        if validated_data.get("catalog_kind") == "custom":
-            validated_data["status"] = "sold"
-            validated_data["quantity_sold"] = validated_data.get("quantity_total") or 1
-            validated_data["sold_at"] = timezone.now()
         user = getattr(self.context.get("request"), "user", None)
         with transaction.atomic():
             item = CatalogItem.objects.create(**validated_data)
@@ -1802,28 +1782,6 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             sync_catalog_decoration_salary(item, user)
             create_catalog_history(item, "created", user=user, note="Custom katalog qo‘shildi" if item.catalog_kind == "custom" else "Katalog qo‘shildi")
             notify_florist_catalog(item, "Yangi ish biriktirildi", f"{item.name_uz} katalogi sizga biriktirildi.")
-            if item.catalog_kind == "custom":
-                snapshot = None
-                if payment_type:
-                    from .inventory_services import catalog_snapshot
-                    snapshot = catalog_snapshot(item)
-                    snapshot["payment_type"] = payment_type
-                if item.reservation_id:
-                    reservation = item.reservation
-                    if snapshot is None:
-                        from .inventory_services import catalog_snapshot
-                        snapshot = catalog_snapshot(item)
-                    paid = reservation_paid_amount(reservation)
-                    total = Decimal(item.price or 0) * Decimal(item.quantity_sold or 1)
-                    snapshot["reservation"] = {"id": reservation.id, "customer": str(reservation.customer), "paid_amount": str(paid), "sale_total": str(total), "remaining_due": str(max(total - paid, Decimal("0")))}
-                    reservation.catalog_item = item
-                    reservation.status = "fulfilled"
-                    reservation.save(update_fields=["catalog_item", "status", "updated_at"])
-                    reservation = sync_reservation_payment_status(reservation)
-                else:
-                    reservation = None
-                create_catalog_history(item, "sold", user=user, quantity=item.quantity_sold, listed_unit_price=custom_component_unit_price(item), sold_unit_price=item.price, discount_reason=item.discount_reason, snapshot=snapshot, reservation=reservation)
-                notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {item.quantity_sold} ta sotildi.")
             self._sync_social_post_image(item)
             if created_at:
                 # katalog o'tib ketgan kunga yozilsa, tarix va florist ish haqi
@@ -1834,8 +1792,8 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         return item
 
     def update(self, instance, validated_data):
-        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, reservation_paid_amount, restore_catalog_inventory, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary, sync_reservation_payment_status
-        payment_type = validated_data.pop("payment_type", "")
+        from .inventory_services import create_catalog_history, deduct_catalog_inventory, notify_florist_catalog, restore_catalog_inventory, sync_catalog_decoration_salary, sync_catalog_financials, sync_catalog_florist_salary
+        validated_data.pop("payment_type", "")
         customer_name = validated_data.pop("customer_name", "")
         customer_phone = validated_data.pop("customer_phone", "")
         if "customer" in validated_data or customer_name or customer_phone:
@@ -1881,11 +1839,6 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             if materials is not None:
                 instance.materials.all().delete()
                 CatalogMaterialUsage.objects.bulk_create([CatalogMaterialUsage(catalog_item=instance, **row) for row in materials])
-            if instance.catalog_kind == "custom":
-                instance.status = "sold"
-                instance.quantity_sold = instance.quantity_total
-                instance.sold_at = instance.sold_at or timezone.now()
-                instance.save(update_fields=["status", "quantity_sold", "sold_at", "updated_at"])
             try:
                 if composition is not None or materials is not None:
                     deduct_catalog_inventory(instance, user, instance.quantity_total)
@@ -1908,28 +1861,6 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             if instance.florist_id and instance.florist_id != old_florist_id:
                 notify_florist_catalog(instance, "Yangi ish biriktirildi", f"{instance.name_uz} katalogi sizga biriktirildi.")
             create_catalog_history(instance, "updated", user=user, note="Katalog o‘zgartirildi")
-            if instance.catalog_kind == "custom" and not instance.history.filter(action="sold").exists():
-                snapshot = None
-                if payment_type:
-                    from .inventory_services import catalog_snapshot
-                    snapshot = catalog_snapshot(instance)
-                    snapshot["payment_type"] = payment_type
-                if instance.reservation_id:
-                    reservation = instance.reservation
-                    if snapshot is None:
-                        from .inventory_services import catalog_snapshot
-                        snapshot = catalog_snapshot(instance)
-                    paid = reservation_paid_amount(reservation)
-                    total = Decimal(instance.price or 0) * Decimal(instance.quantity_sold or 1)
-                    snapshot["reservation"] = {"id": reservation.id, "customer": str(reservation.customer), "paid_amount": str(paid), "sale_total": str(total), "remaining_due": str(max(total - paid, Decimal("0")))}
-                    reservation.catalog_item = instance
-                    reservation.status = "fulfilled"
-                    reservation.save(update_fields=["catalog_item", "status", "updated_at"])
-                    reservation = sync_reservation_payment_status(reservation)
-                else:
-                    reservation = None
-                create_catalog_history(instance, "sold", user=user, quantity=instance.quantity_sold, listed_unit_price=custom_component_unit_price(instance), sold_unit_price=instance.price, discount_reason=instance.discount_reason, snapshot=snapshot, reservation=reservation)
-                notify_florist_catalog(instance, "Katalog sotildi", f"{instance.name_uz} katalogidan {instance.quantity_sold} ta sotildi.")
             self._sync_social_post_image(instance)
         return instance
 
