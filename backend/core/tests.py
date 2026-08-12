@@ -6270,6 +6270,12 @@ class PaginationTotalsTests(TestCase):
         self.assertEqual(Decimal(totals["sold_value"]), Decimal("3500000"))
         self.assertEqual(Decimal(totals["cost_total"]), Decimal("1400000"))
         self.assertEqual(totals["by_status"], {"available": 35})
+        self.assertEqual(totals["status_counts"]["all"], 35)
+        self.assertEqual(totals["status_counts"]["available"], 35)
+        self.assertEqual(totals["status_counts"]["sold"], 0)
+        self.assertEqual(totals["available_count"], 35)
+        self.assertEqual(totals["sold_count"], 0)
+        self.assertEqual(totals["archived_count"], 0)
 
     def test_second_page_totals_stay_the_same(self):
         first = self.client.get("/api/catalog/").json()
@@ -6287,6 +6293,11 @@ class PaginationTotalsTests(TestCase):
         self.assertEqual(body["totals"]["items"], 1)
         self.assertEqual(body["totals"]["quantity_total"], 2)
         self.assertEqual(body["totals"]["by_status"], {"sold": 1})
+        self.assertEqual(body["totals"]["status_counts"]["all"], 35)
+        self.assertEqual(body["totals"]["status_counts"]["available"], 34)
+        self.assertEqual(body["totals"]["status_counts"]["sold"], 1)
+        self.assertEqual(body["totals"]["available_count"], 34)
+        self.assertEqual(body["totals"]["sold_count"], 1)
 
     def test_page_size_all_returns_everything_in_one_page(self):
         body = self.client.get("/api/catalog/?page_size=all").json()

@@ -3042,9 +3042,31 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
     def get_queryset(self):
         return scope_catalog_to_branch(super().get_queryset(), self.request.user)
 
+    def get_status_count_queryset(self):
+        queryset = self.get_queryset()
+        for field in ["arrangement_type", "catalog_kind", "florist", "customer"]:
+            value = self.request.query_params.get(field)
+            if value not in [None, ""]:
+                queryset = queryset.filter(**{field: value})
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            query = Q()
+            for field in self.search_fields:
+                query |= Q(**{f"{field}__icontains": search})
+            queryset = queryset.filter(query)
+        return queryset
+
+    def catalog_status_counts(self):
+        queryset = self.get_status_count_queryset()
+        counts = {key: 0 for key, _ in CatalogItem.STATUS_CHOICES}
+        counts.update(count_by(queryset, "status"))
+        counts["all"] = queryset.count()
+        return counts
+
     def get_list_totals(self, queryset):
         """Katalog sahifasi: nechta dona bor, qancha turadi, tannarxi qancha."""
         base = queryset.order_by()
+        status_counts = self.catalog_status_counts()
         agg = base.aggregate(
             t_quantity=int_sum("quantity_total"),
             t_sold=int_sum("quantity_sold"),
@@ -3070,6 +3092,10 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
             "cost_total": money(agg["t_cost"]),
             "discount_total": money(agg["t_discount"]),
             "by_status": count_by(base, "status"),
+            "status_counts": status_counts,
+            "available_count": status_counts.get("available", 0),
+            "sold_count": status_counts.get("sold", 0),
+            "archived_count": status_counts.get("archived", 0),
             "by_kind": count_by(base, "catalog_kind"),
         }
 
