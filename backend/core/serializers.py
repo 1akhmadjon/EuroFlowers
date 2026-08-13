@@ -12,6 +12,7 @@ from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .inventory_services import general_variant_for, merge_into_stock_batch, stock_merge_target
 from .models import AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .permissions import FLORIST_ALLOWED_PAGES
 
 
 class DetailValidationError(APIException):
@@ -57,6 +58,8 @@ def permission_matrix(user) -> list[dict[str, Any]]:
     role = getattr(getattr(user, "profile", None), "role", None)
     for page, label in PagePermission.PAGE_CHOICES:
         if role != "developer" and page in PagePermission.DEVELOPER_ONLY_PAGES:
+            continue
+        if role in ["florist", "apprentice"] and page not in FLORIST_ALLOWED_PAGES:
             continue
         row = rows.get(page)
         default_access = bool(user.is_superuser and not row)

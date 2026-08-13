@@ -2,12 +2,17 @@ from rest_framework.permissions import BasePermission, SAFE_METHODS
 from .models import PagePermission
 
 
+FLORIST_ALLOWED_PAGES = {"florists", "attendance", "notifications"}
+
+
 def has_page_permission(user, page, control=False):
     if not user or not user.is_authenticated:
         return False
     role = getattr(getattr(user, "profile", None), "role", None)
     if role == "developer":
         return True
+    if role in ["florist", "apprentice"] and page and page not in FLORIST_ALLOWED_PAGES:
+        return False
     if page in PagePermission.DEVELOPER_ONLY_PAGES:
         return False
     if not page:

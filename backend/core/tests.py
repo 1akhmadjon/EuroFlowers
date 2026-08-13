@@ -3096,6 +3096,7 @@ class ApiTests(TestCase):
         PagePermission.objects.create(user=florist_user, page="notifications", can_view=True, can_control=False)
         Notification.objects.create(notification_type="lead", title_uz="Global", title_ru="Global", body_uz="Global", body_ru="Global")
         target = Notification.objects.create(target_user=florist_user, notification_type="florist_salary", title_uz="Target", title_ru="Target", body_uz="Target", body_ru="Target")
+        Notification.objects.create(target_user=florist_user, notification_type="florist_catalog", title_uz="Catalog sold", title_ru="Catalog sold", body_uz="Catalog sold", body_ru="Catalog sold")
         self.client.force_authenticate(florist_user)
         response = self.client.get("/api/notifications/")
         self.assertEqual(response.status_code, 200)
@@ -3127,6 +3128,23 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         salary_florist_ids = [row["florist"] for row in response.json()["results"]]
         self.assertEqual(salary_florist_ids, [own_profile.id])
+
+    def test_florist_role_cannot_access_global_business_pages_even_with_permissions(self):
+        florist_user = User.objects.create_user("restricted-florist", password="password", first_name="Ali")
+        UserProfile.objects.create(user=florist_user, role="florist")
+        FloristProfile.objects.create(user=florist_user, staff_type="florist")
+        for page in ["dashboard", "catalog", "expenses", "audit"]:
+            PagePermission.objects.create(user=florist_user, page=page, can_view=True, can_control=True)
+        for page in ["florists", "attendance", "notifications"]:
+            PagePermission.objects.create(user=florist_user, page=page, can_view=True, can_control=False)
+        self.client.force_authenticate(florist_user)
+        for path in ["/api/dashboard/", "/api/analytics/", "/api/catalog/", "/api/expenses/", "/api/audit/"]:
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 403, path)
+        response = self.client.get("/api/florists/me/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        pages = [row["page"] for row in permission_matrix(florist_user)]
+        self.assertEqual(pages, ["florists", "attendance", "notifications"])
 
     def test_notification_mark_read_marks_single_notification(self):
         UserProfile.objects.create(user=self.user, role="admin")

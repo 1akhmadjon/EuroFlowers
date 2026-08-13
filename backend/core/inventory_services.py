@@ -1555,7 +1555,6 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
         if sold_at:
             CatalogHistory.objects.filter(pk=history.pk).update(created_at=sold_at)
             history.created_at = sold_at
-        notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
         AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "payment_type": payment_type or "", "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason, "reservation": reservation.id if reservation else None})
     return item
 
@@ -1599,7 +1598,6 @@ def deduct_lead_stock(lead, user):
                 item.status = "sold"
                 item.sold_at = timezone.now()
             item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
-            notify_florist_catalog(item, "Katalog sotildi", f"{item.name_uz} katalogidan {quantity} ta sotildi.")
         for row in stock_rows:
             batch = row.stock_batch
             batch.remaining_stems -= row.quantity_stems
@@ -2160,7 +2158,6 @@ def waste_catalog_item(item, user, quantity=1, reason=""):
                    "unit_cost": str(unit_cost), "loss": str(unit_cost * Decimal(quantity)),
                    "reason": reason, "history": history.id},
         )
-        notify_florist_catalog(item, "Katalog chiqitga chiqdi", f"{item.name_uz} katalogidan {quantity} ta chiqitga chiqarildi.")
     return item
 
 
