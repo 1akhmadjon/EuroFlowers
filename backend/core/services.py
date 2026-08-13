@@ -61,6 +61,8 @@ def valid_customer_name(value):
 def catalog_composition_summary(item):
     rows = []
     for row in item.composition.select_related("stock_batch__variant__flower"):
+        if int(row.quantity_stems or 0) <= 0:
+            continue
         batch = row.stock_batch
         name = " ".join(part for part in (batch.variant.flower.name_uz, batch.variant.name_uz, batch.variant.color_uz) if part)
         rows.append({"name_uz": name, "quantity_stems": row.quantity_stems, "quantity_bunches": str(row.quantity_bunches)})

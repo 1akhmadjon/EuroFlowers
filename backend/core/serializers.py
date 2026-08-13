@@ -1116,12 +1116,20 @@ class PackagingMovementSerializer(serializers.ModelSerializer):
         read_only_fields = ["performed_by"]
 
 
+class CatalogCompositionListSerializer(serializers.ListSerializer):
+    def to_representation(self, data):
+        iterable = data.all() if hasattr(data, "all") else data
+        rows = [row for row in iterable if int(getattr(row, "quantity_stems", 0) or 0) > 0]
+        return super().to_representation(rows)
+
+
 class CatalogCompositionSerializer(serializers.ModelSerializer):
     batch_detail = StockBatchSerializer(source="stock_batch", read_only=True)
 
     class Meta:
         model = CatalogComposition
         fields = ["id", "stock_batch", "batch_detail", "quantity_stems", "quantity_bunches"]
+        list_serializer_class = CatalogCompositionListSerializer
         # Florist katalogida gul tanlanadi, lekin soni yozilmaydi — u chiqim
         # yopilganda hisoblanadi. Shuning uchun son majburiy emas.
         extra_kwargs = {"quantity_stems": {"required": False, "default": 0}}
