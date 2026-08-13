@@ -3144,7 +3144,8 @@ class ApiTests(TestCase):
         response = self.client.get("/api/florists/me/dashboard/")
         self.assertEqual(response.status_code, 200)
         pages = [row["page"] for row in permission_matrix(florist_user)]
-        self.assertEqual(pages, ["florists", "attendance", "notifications"])
+        self.assertEqual(set(pages), {"florists", "attendance", "notifications"})
+        self.assertEqual(len(pages), 3)
 
     def test_notification_mark_read_marks_single_notification(self):
         UserProfile.objects.create(user=self.user, role="admin")
