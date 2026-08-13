@@ -176,7 +176,10 @@ def notification_queryset_for_user(user):
     if role != "developer":
         queryset = notification_references_developer(queryset)
     if role in ["florist", "apprentice"]:
-        return queryset.filter(target_user=user).exclude(notification_type="florist_catalog")
+        return queryset.filter(target_user=user).exclude(
+            Q(notification_type="florist_catalog") &
+            (Q(title_uz__icontains="sotildi") | Q(body_uz__icontains="sotildi") | Q(title_uz__icontains="chiqit") | Q(body_uz__icontains="chiqit"))
+        )
     return queryset.filter(Q(target_user__isnull=True) | Q(target_user=user))
 
 
