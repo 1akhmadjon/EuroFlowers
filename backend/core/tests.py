@@ -13,7 +13,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 import requests
 from rest_framework.test import APIClient
-from .models import AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AICatalogItem, AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, send_stock_batch_image, stock_batch_ai_row
@@ -208,7 +208,7 @@ class BusinessRulesTests(TestCase):
     def make_album_catalog(self, count):
         items = []
         for index in range(count):
-            items.append(CatalogItem.objects.create(name_uz=f"Albom buket {index + 1}", arrangement_type="bouquet", price=100000 * (index + 1), status="available", image_url=f"https://example.com/album-{index + 1}.jpg"))
+            items.append(AICatalogItem.objects.create(name=f"Albom buket {index + 1}", arrangement_type="bouquet", price=100000 * (index + 1), quantity=1, image_url=f"https://example.com/album-{index + 1}.jpg"))
         return items
 
     def test_catalog_album_sends_every_item_in_one_message(self):
@@ -433,11 +433,13 @@ class BusinessRulesTests(TestCase):
         self.assertIn("Атиргул", rows[0]["display_name_uz_cyril"])
 
     def test_ai_catalog_rows_treats_whitespace_query_as_all_catalog(self):
-        self.item.status = "available"
-        self.item.save(update_fields=["status", "updated_at"])
+        item = AICatalogItem.objects.create(name="AI oq buket", arrangement_type="bouquet", price=500000, quantity=2, volume="M", note="Oq premium buket")
         rows = ai_catalog_rows(" ", limit=10)
         self.assertTrue(rows)
-        self.assertEqual(rows[0]["name_uz"], self.item.name_uz)
+        self.assertEqual(rows[0]["catalog_id"], item.id)
+        self.assertEqual(rows[0]["name_uz"], item.name)
+        self.assertEqual(rows[0]["quantity"], 2)
+        self.assertEqual(rows[0]["volume"], "M")
 
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
@@ -578,14 +580,14 @@ class BusinessRulesTests(TestCase):
 
     def test_ai_catalog_generic_query_returns_available_items(self):
         from .services import ai_catalog_rows
-        self.item.status = "available"
-        self.item.save(update_fields=["status", "updated_at"])
-        CatalogItem.objects.create(name_uz="Sotilgan buket", arrangement_type="bouquet", price=500000, status="available", quantity_total=1, quantity_sold=1)
-        CatalogItem.objects.create(name_uz="Arxiv buket", arrangement_type="bouquet", price=500000, status="archived")
+        AICatalogItem.objects.create(name="AI oq buket", arrangement_type="bouquet", price=500000, quantity=1)
+        AICatalogItem.objects.create(name="AI tugagan buket", arrangement_type="bouquet", price=500000, quantity=0)
+        AICatalogItem.objects.create(name="AI arxiv buket", arrangement_type="bouquet", price=500000, quantity=1, is_active=False)
+        CatalogItem.objects.create(name_uz="Ichki CRM buket", arrangement_type="bouquet", price=500000, status="available")
         for query in ["vitrina", "vitrinada qanaqa gulla bor", "katalogdagi tayyor mahsulotlar"]:
             rows = ai_catalog_rows(query)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["name_uz"], "Oq buket")
+            self.assertEqual(rows[0]["name_uz"], "AI oq buket")
 
     @override_settings(BACKUP_TELEGRAM_GROUP_ID="-1003718639311", BACKUP_TELEGRAM_THREAD_ID="1542", BACKUP_TELEGRAM_COMMAND="/eurodan_backup_tashachi")
     def test_backup_command_matches_only_configured_group_thread(self):
@@ -670,15 +672,14 @@ class BusinessRulesTests(TestCase):
         self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "send_catalog_image", "send_catalog_album"})
 
     def test_get_catalog_tool_filters_baskets(self):
-        basket = CatalogItem.objects.create(name_uz="Oq savat", arrangement_type="basket", price=700000, status="available")
-        self.item.status = "available"
-        self.item.save(update_fields=["status", "updated_at"])
+        basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
+        bouquet = AICatalogItem.objects.create(name="Oq buket", arrangement_type="bouquet", price=500000, quantity=1)
         customer = Customer.objects.create(instagram_user_id="telegram:11")
         conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": "basket"}, conversation)
         names = {row["name_uz"] for row in result["catalog"]}
-        self.assertIn(basket.name_uz, names)
-        self.assertNotIn(self.item.name_uz, names)
+        self.assertIn(basket.name, names)
+        self.assertNotIn(bouquet.name, names)
 
     def test_stock_rows_do_not_return_baskets_when_flower_is_missing(self):
         self.assertEqual(ai_stock_rows("gortenziya", limit=10), [])

@@ -580,6 +580,26 @@ class CatalogItem(TimeStampedModel):
         ordering = ["-created_at"]
 
 
+class AICatalogItem(TimeStampedModel):
+    ARRANGEMENT_CHOICES = [("bouquet", "Buket"), ("basket", "Savat"), ("box", "Quti"), ("other", "Boshqa")]
+    name = models.CharField(max_length=180)
+    arrangement_type = models.CharField(max_length=20, choices=ARRANGEMENT_CHOICES, default="bouquet")
+    quantity = models.PositiveIntegerField(default=1)
+    volume = models.CharField(max_length=120, blank=True)
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    note = models.TextField(blank=True)
+    image_url = models.URLField(blank=True)
+    instagram_link = models.URLField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="ai_catalog_items")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return self.name
+
+
 class CatalogTransfer(TimeStampedModel):
     """1-filialdan boshqa filialga yuborilgan katalog mahsuloti."""
 

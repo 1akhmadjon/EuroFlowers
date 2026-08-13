@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
+from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
 from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group
 
 
@@ -73,6 +73,10 @@ def available_catalog_queryset():
     return CatalogItem.objects.filter(status="available").annotate(
         used_quantity=F("quantity_sold") + F("quantity_wasted") + F("quantity_reworked")
     ).filter(used_quantity__lt=F("quantity_total"))
+
+
+def available_ai_catalog_queryset():
+    return AICatalogItem.objects.filter(is_active=True, quantity__gt=0)
 
 
 def stock_availability(batch):
@@ -358,37 +362,31 @@ def recent_customer_orders(customer):
 
 def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=None):
     query = (query or "").strip()
-    queryset = available_catalog_queryset().select_related("social_post").prefetch_related("composition__stock_batch__variant__flower").order_by("-created_at")
-    if arrangement_type in ["bouquet", "basket", "box"]:
+    queryset = available_ai_catalog_queryset().order_by("-created_at", "-id")
+    if arrangement_type in ["bouquet", "basket", "box", "other"]:
         queryset = queryset.filter(arrangement_type=arrangement_type)
     if made_from_batch_id:
-        # Skladdagi gul rasmi aslida buket rasmi. Mijoz "shu guldan bormi" desa
-        # o'sha guldan yasalgan tayyor katalog mahsulotlarini qaytaramiz.
-        batch = StockBatch.objects.filter(id=made_from_batch_id).select_related("variant").first()
-        if batch:
-            queryset = queryset.filter(composition__stock_batch__variant=batch.variant).distinct()
-        else:
-            queryset = queryset.none()
+        queryset = queryset.none()
     generic_query_terms = {"vitrina", "katalog", "catalog", "tayyor", "mahsulot", "gulla", "buketlar", "savatlar"}
     normalized_query = compact_match_text(query)
     is_generic_query = bool(normalized_query) and any(term in normalized_query for term in generic_query_terms)
     if query and not is_generic_query:
-        queryset = queryset.filter(Q(name_uz__icontains=query) | Q(description_uz__icontains=query) | Q(description_ru__icontains=query))
+        queryset = queryset.filter(Q(name__icontains=query) | Q(volume__icontains=query) | Q(note__icontains=query) | Q(instagram_link__icontains=query))
     rows = []
     for row in queryset[:limit]:
-        image_url = row.image_url or (row.social_post.image_url if row.social_post_id else "")
         rows.append({
             "catalog_id": row.id,
-            "name_uz": row.name_uz,
+            "name_uz": row.name,
             "type": row.arrangement_type,
-            "description_uz": row.description_uz,
-            "description_ru": row.description_ru,
+            "quantity": row.quantity,
+            "volume": row.volume,
+            "description_uz": row.note,
+            "description_ru": "",
             "price": str(row.price),
-            "has_image": bool(image_url),
-            "image_url": image_url,
-            "social_post_type": row.social_post.post_type if row.social_post_id else "",
-            "social_post_permalink": row.social_post.permalink if row.social_post_id else "",
-            "composition": catalog_composition_summary(row),
+            "has_image": bool(row.image_url),
+            "image_url": row.image_url,
+            "instagram_link": row.instagram_link,
+            "composition": [],
         })
     return rows
 
@@ -515,7 +513,13 @@ def ai_post_context(conversation):
     if not conversation.social_post_id:
         return None
     post = conversation.social_post
-    post_catalog = available_catalog_queryset().filter(social_post=post).prefetch_related("composition__stock_batch__variant__flower")
+    links = [post.permalink, post.webhook_story_url]
+    post_catalog = available_ai_catalog_queryset()
+    link_query = Q()
+    for link in links:
+        if link:
+            link_query |= Q(instagram_link__startswith=link) | Q(instagram_link__contains=link)
+    post_catalog = post_catalog.filter(link_query) if link_query else post_catalog.none()
     return {
         "type": post.post_type,
         "title_uz": post.title_uz,
@@ -524,16 +528,18 @@ def ai_post_context(conversation):
         "description_ru": post.description_ru,
         "price": str(post.price or ""),
         "catalog": [{
-            "name_uz": row.name_uz,
+            "name_uz": row.name,
             "type": row.arrangement_type,
-            "description_uz": row.description_uz,
-            "description_ru": row.description_ru,
-            "height_cm": row.height_cm,
-            "diameter_cm": row.diameter_cm,
+            "description_uz": row.note,
+            "description_ru": "",
+            "height_cm": None,
+            "diameter_cm": None,
+            "quantity": row.quantity,
+            "volume": row.volume,
             "price": str(row.price),
-            "has_image": bool(row.image_url or post.image_url),
-            "image_url": row.image_url or post.image_url,
-            "composition": catalog_composition_summary(row),
+            "has_image": bool(row.image_url),
+            "image_url": row.image_url,
+            "composition": [],
         } for row in post_catalog],
     }
 
@@ -791,7 +797,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "Hozir sotuvdagi katalogdagi tayyor buket/savat/kompozitsiyalarni olish.",
+            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -806,7 +812,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "send_catalog_image",
-            "description": "Katalogdagi bitta aniq buket/savat rasmini mijozga yuborish. Butun katalog kerak bo'lsa send_catalog_album ishlat. catalog_id ma'lum bo'lsa uni yubor, aks holda query ga nomini yoz.",
+            "description": "AI katalogdagi bitta aniq buket/savat rasmini mijozga yuborish. Butun katalog kerak bo'lsa send_catalog_album ishlat. catalog_id ma'lum bo'lsa uni yubor, aks holda query ga nomini yoz.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -821,7 +827,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "send_catalog_album",
-            "description": "Katalogni mijozga rasm albomi qilib yuborish. Mijoz katalogni, vitrinani, tayyor buketlarni yoki nima borligini so'rasa shu tool chaqiriladi va katalog matn ro'yxati qilib yozilmaydi. catalog_ids bo'sh bo'lsa sotuvdagi barcha mahsulot yuboriladi. Rasmlar bitta xabarda albom bo'lib boradi, har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz ko'rgan raqam bilan bir xil, mijoz keyin birinchisi, 2-chisi desa o'sha position dagi catalog_id olinadi.",
+            "description": "AI katalogni mijozga rasm albomi qilib yuborish. Mijoz katalogni, vitrinani, tayyor buketlarni yoki nima borligini so'rasa shu tool chaqiriladi va katalog matn ro'yxati qilib yozilmaydi. catalog_ids bo'sh bo'lsa AI katalogdagi faol mahsulotlar yuboriladi. Rasmlar bitta xabarda albom bo'lib boradi, har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz ko'rgan raqam bilan bir xil, mijoz keyin birinchisi, 2-chisi desa o'sha position dagi catalog_id olinadi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -854,26 +860,26 @@ def send_image_to_customer(customer, image_url):
 
 def send_catalog_item_image(conversation, item):
     customer = conversation.customer
-    image_url = item.image_url or (item.social_post.image_url if item.social_post_id else "")
+    item_name = getattr(item, "name", getattr(item, "name_uz", ""))
+    image_url = catalog_item_image_url(item)
     if not image_url:
-        return {"ok": False, "detail": "image_not_found", "catalog_id": item.id, "catalog_name": item.name_uz}
+        return {"ok": False, "detail": "image_not_found", "catalog_id": item.id, "catalog_name": item_name}
     delivered, detail, sent = send_image_to_customer(customer, image_url)
-    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item_name, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
     if not delivered:
-        return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item.name_uz}
-    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item.name_uz, "image_url": image_url}
+        return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item_name}
+    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "image_url": image_url}
 
 
 CATALOG_ALBUM_MAX_PER_MESSAGE = 10
 
 
 def catalog_item_image_url(item):
-    return item.image_url or (item.social_post.image_url if item.social_post_id else "")
+    return item.image_url or (item.social_post.image_url if getattr(item, "social_post_id", None) else "")
 
 
 def catalog_album_queryset():
-    """Albom tartibi. get_catalog bilan bir xil, shuning uchun mijoz ko'rgan raqam va tool natijasidagi position bir xil bo'ladi."""
-    return available_catalog_queryset().select_related("social_post").order_by("-created_at", "-id")
+    return available_ai_catalog_queryset().order_by("-created_at", "-id")
 
 
 def catalog_album_items(catalog_ids=None, limit=60):
@@ -895,8 +901,9 @@ def send_catalog_album(conversation, items):
     not_sent = []
     for item in items:
         image_url = catalog_item_image_url(item)
+        item_name = getattr(item, "name", getattr(item, "name_uz", ""))
         if not image_url:
-            not_sent.append({"catalog_id": item.id, "name": item.name_uz, "detail": "image_not_found"})
+            not_sent.append({"catalog_id": item.id, "name": item_name, "detail": "image_not_found"})
             continue
         rows.append({"item": item, "image_url": image_url})
     platform = "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram"
@@ -909,7 +916,7 @@ def send_catalog_album(conversation, items):
     for row in rows:
         position += 1
         row["position"] = position
-        row["caption"] = f"{row['position']}. {row['item'].name_uz} — {money_uz(row['item'].price)} so'm"
+        row["caption"] = f"{row['position']}. {row['item'].name} — {money_uz(row['item'].price)} so'm"
     sent_items = []
     messages_sent = 0
     album_chunks = 0
@@ -930,7 +937,7 @@ def send_catalog_album(conversation, items):
                 messages_sent += 1
                 sent_items.append(catalog_album_row(row, True, "one_by_one"))
             else:
-                not_sent.append({"catalog_id": row["item"].id, "name": row["item"].name_uz, "detail": single.get("detail") or "send_failed"})
+                not_sent.append({"catalog_id": row["item"].id, "name": row["item"].name, "detail": single.get("detail") or "send_failed"})
     if album_chunks and fallback_chunks:
         sent_as = "mixed"
     elif album_chunks:
@@ -955,7 +962,7 @@ def catalog_album_row(row, delivered, detail):
     return {
         "position": row["position"],
         "catalog_id": item.id,
-        "name": item.name_uz,
+        "name": item.name,
         "price": str(item.price),
         "type": item.arrangement_type,
         "image_url": row["image_url"],
@@ -983,7 +990,7 @@ def send_catalog_album_chunk(customer, platform, chat_id, chunk):
             else:
                 result = telegram_send_media_group(chat_id, [{"image_url": row["image_url"], "caption": row["caption"]} for row in chunk])
         else:
-            result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name_uz}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk])
+            result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk])
     except Exception as error:
         print(f"CATALOG_ALBUM_FAILED customer={customer.id} platform={platform} count={len(chunk)} error={error}", flush=True)
         return False, "album_failed"
@@ -1054,8 +1061,6 @@ def execute_ai_tool(name, arguments, conversation):
         item = catalog_album_queryset().filter(id=catalog_id).first() if catalog_id else None
         if not item:
             item = _catalog_item_for_ai(query)
-        if not item:
-            item = available_catalog_queryset().filter(Q(name_uz__icontains=query)).select_related("social_post").first()
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
@@ -1496,17 +1501,17 @@ def _catalog_item_for_ai(*values):
     for value in values:
         if value:
             texts.extend(_catalog_text_aliases(compact_match_text(value)))
-    available_items = list(available_catalog_queryset())
+    available_items = list(available_ai_catalog_queryset())
     for text in texts:
         for item in available_items:
-            name = compact_match_text(item.name_uz)
+            name = compact_match_text(item.name)
             if name and name in text:
                 return item
             tokens = [token for token in name.split() if token not in {"buketi", "buket", "guldasta", "kompozitsiya"}]
             if len(tokens) >= 2 and all(token in text for token in tokens[:2]):
                 return item
             if len(tokens) == 1 and len(tokens[0]) >= 4 and tokens[0] in text:
-                matches = [row for row in available_items if tokens[0] in compact_match_text(row.name_uz).split()]
+                matches = [row for row in available_items if tokens[0] in compact_match_text(row.name).split()]
                 if len(matches) == 1:
                     return item
     return None

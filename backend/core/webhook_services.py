@@ -4,7 +4,7 @@ import re
 from django.conf import settings
 from django.db.models import Q
 
-from .models import CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
+from .models import AICatalogItem, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
 from .platform_services import find_active_story_by_media_url, find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
 from .services import ingest_customer_message
 
@@ -144,6 +144,21 @@ def catalog_item_by_url(url=""):
     return queryset.order_by("-updated_at", "-created_at").first()
 
 
+def ai_catalog_item_by_url(url=""):
+    normalized = normalize_instagram_permalink(url)
+    asset_id = media_id_from_url(url)
+    is_instagram_permalink = "instagram.com/" in normalized
+    query = Q()
+    if normalized and is_instagram_permalink:
+        query |= Q(instagram_link__startswith=normalized)
+    if asset_id:
+        query |= Q(instagram_link__contains=asset_id)
+    if not query:
+        return None
+    queryset = AICatalogItem.objects.filter(query, is_active=True, quantity__gt=0).distinct()
+    return queryset.order_by("-updated_at", "-created_at").first()
+
+
 def social_post_type_from_url(url, fallback="post"):
     normalized = normalize_instagram_permalink(url)
     if "/stories/" in normalized:
@@ -191,6 +206,31 @@ def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
     item.social_post = post
     item.save(update_fields=["social_post", "updated_at"])
     return post
+
+
+def social_post_from_ai_catalog_item(item, webhook_event=None, permalink=""):
+    if not item:
+        return None
+    permalink = permalink or item.instagram_link
+    media_id = (webhook_event.media_id or webhook_event.story_id) if webhook_event else ""
+    if not media_id or SocialPost.objects.filter(media_id=media_id).exists():
+        media_id = f"ai-catalog-item-{item.id}"
+    post_type = social_post_type_from_url(permalink, "story" if webhook_event and webhook_event.event_type in ["story_reply", "story_send"] else "post")
+    return SocialPost.objects.create(
+        post_type=post_type,
+        media_id=media_id,
+        permalink=permalink,
+        story_share_id=story_share_id_from_url(permalink),
+        webhook_story_id=(webhook_event.story_id or webhook_event.media_id) if webhook_event and post_type == "story" else "",
+        webhook_story_url=webhook_event.story_url if webhook_event and post_type == "story" else "",
+        title_uz=item.name,
+        title_ru=item.name,
+        description_uz=item.note,
+        description_ru="",
+        price=item.price,
+        image_url=item.image_url,
+        is_active=True,
+    )
 
 
 def append_story_webhook_id(post, story_id):
@@ -316,6 +356,9 @@ def link_story_post_from_event(webhook_event):
         story_api_id = str(story.get("id", ""))
         post = social_post_by_media_or_url(story_api_id, story_permalink)
         if not post:
+            ai_item = ai_catalog_item_by_url(story_permalink)
+            post = social_post_from_ai_catalog_item(ai_item, webhook_event, story_permalink)
+        if not post:
             item = catalog_item_by_url(story_permalink)
             post = social_post_from_catalog_item(item, webhook_event, story_permalink)
         if post:
@@ -365,6 +408,9 @@ def link_media_post_from_event(webhook_event):
                 return exact
     if webhook_event.story_url:
         exact = social_post_by_media_or_url(media_id, webhook_event.story_url)
+        if not exact:
+            ai_item = ai_catalog_item_by_url(webhook_event.story_url)
+            exact = social_post_from_ai_catalog_item(ai_item, webhook_event, webhook_event.story_url)
         if not exact:
             item = catalog_item_by_url(webhook_event.story_url)
             exact = social_post_from_catalog_item(item, webhook_event, webhook_event.story_url)
