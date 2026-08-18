@@ -1029,6 +1029,7 @@ class MaterialReceiveSerializer(serializers.Serializer):
 
 
 class PackagingSerializer(serializers.ModelSerializer):
+    packaging_type = serializers.ChoiceField(choices=Packaging.TYPE_CHOICES, required=False, default="other")
     image = serializers.FileField(write_only=True, required=False)
     quantity_label = serializers.CharField(read_only=True)
     packaging_type_label = serializers.CharField(source="get_packaging_type_display", read_only=True)
@@ -1055,6 +1056,11 @@ class PackagingSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if not self.instance:
+            attrs["packaging_type"] = attrs.get("packaging_type") or "other"
+            attrs["unit"] = attrs.get("unit") or "piece"
+            attrs["cost_price"] = attrs.get("cost_price") or Decimal("0")
+            attrs["sale_price"] = attrs.get("sale_price") or Decimal("0")
         kind = attrs.get("packaging_type") or getattr(self.instance, "packaging_type", None)
         size = (attrs.get("size") if "size" in attrs else getattr(self.instance, "size", "")) or ""
         if kind == "basket":
