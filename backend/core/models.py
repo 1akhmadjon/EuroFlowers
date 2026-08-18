@@ -276,7 +276,7 @@ class StockMovement(TimeStampedModel):
 
 
 class Packaging(TimeStampedModel):
-    TYPE_CHOICES = [("wrap", "Buket qog‘ozi"), ("basket", "Savat"), ("box", "Quti"), ("other", "Boshqalar")]
+    TYPE_CHOICES = [("wrap", "Buket qog‘ozi"), ("basket", "Savat"), ("box", "Quti"), ("material", "Material"), ("other", "Aksessuar")]
     UNIT_CHOICES = [("piece", "Dona"), ("bunch", "Pochka")]
     BASKET_MATERIAL_CHOICES = [
         ("wooden", "Yog‘ochli"),
