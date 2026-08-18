@@ -202,15 +202,49 @@ class FlowerVariantSerializer(serializers.ModelSerializer):
 class SupplierSerializer(serializers.ModelSerializer):
     batches_count = serializers.IntegerField(read_only=True)
     total_received_stems = serializers.IntegerField(read_only=True)
-    # Postavshikdan har safar to'liq to'lab olinadi — qarz ko'rsatkichi yo'q,
-    # faqat umumiy sotib olingan summa turadi.
+    material_deliveries_count = serializers.IntegerField(read_only=True)
+    material_received_quantity = serializers.IntegerField(read_only=True)
+    flower_purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    material_purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     paid_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     last_payment_at = serializers.DateField(read_only=True)
+    material_deliveries = serializers.SerializerMethodField()
 
     class Meta:
         model = Supplier
         fields = "__all__"
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_material_deliveries(self, obj):
+        if not self.context.get("include_material_deliveries"):
+            return []
+        deliveries = obj.material_deliveries.prefetch_related("movements__packaging").order_by("-received_at", "-id")[:50]
+        rows = []
+        for delivery in deliveries:
+            movements = [row for row in delivery.movements.all() if row.movement_type == "in"]
+            rows.append({
+                "id": delivery.id,
+                "number": delivery.number,
+                "received_at": delivery.received_at,
+                "note": delivery.note,
+                "is_active": delivery.is_active,
+                "item_count": len(movements),
+                "total_quantity": sum(row.quantity for row in movements),
+                "total_cost": sum((Decimal(row.quantity) * Decimal(row.unit_cost or 0) for row in movements), Decimal("0")),
+                "items": [
+                    {
+                        "movement_id": row.id,
+                        "packaging": row.packaging_id,
+                        "name_uz": row.packaging.name_uz,
+                        "packaging_type": row.packaging.packaging_type,
+                        "quantity": row.quantity,
+                        "unit_cost": row.unit_cost,
+                    }
+                    for row in movements
+                ],
+            })
+        return rows
 
 
 class SupplierPaymentSerializer(serializers.ModelSerializer):
@@ -2801,6 +2835,14 @@ class PackagingMovementRequestSerializer(serializers.Serializer):
         elif attrs["quantity"] < 1:
             raise serializers.ValidationError({"quantity": "Musbat son kiriting"})
         return attrs
+
+
+class PackagingSellRequestSerializer(serializers.Serializer):
+    quantity = serializers.IntegerField(min_value=1, required=False, default=1)
+    sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
+    payment_type = serializers.ChoiceField(choices=["cash", "card", "debt", "mixed"], required=False, allow_blank=True)
+    reason = serializers.CharField(required=False, allow_blank=True)
+    sold_at = serializers.DateTimeField(required=False)
 
 
 class MiniAppInitSerializer(serializers.Serializer):

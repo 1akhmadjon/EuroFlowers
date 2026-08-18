@@ -246,7 +246,7 @@ def add_extra_decoration_salary(florist, count, unit_amount=None, work_date=None
     return entry, True
 
 
-def deduct_catalog_sale_materials(item, materials, quantity, history, user):
+def deduct_catalog_sale_materials(item, materials, quantity, history, user, payment_type=""):
     rows = []
     for row in materials or []:
         packaging = row["packaging"]
@@ -267,13 +267,57 @@ def deduct_catalog_sale_materials(item, materials, quantity, history, user):
             packaging=packaging,
             movement_type="out",
             quantity=-amount,
+            unit_cost=packaging.cost_price,
+            unit_price=packaging.sale_price,
+            payment_type=payment_type or "",
             reference_type="catalog_sale",
             reference_id=history.id,
             reason=f"{item.name_uz} sotuviga ishlatildi",
             performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
-        snapshot_rows.append({"material": packaging.name_uz, "type": packaging.packaging_type, "quantity": amount})
+        snapshot_rows.append({"material": packaging.name_uz, "type": packaging.packaging_type, "quantity": amount, "unit_cost": str(packaging.cost_price), "sale_price": str(packaging.sale_price)})
     return snapshot_rows
+
+
+def sell_packaging_item(packaging, quantity=1, sale_price=None, payment_type="", reason="", user=None, sold_at=None):
+    with transaction.atomic():
+        packaging = Packaging.objects.select_for_update().get(pk=packaging.pk)
+        quantity = int(quantity or 1)
+        if quantity < 1:
+            raise ValueError("Sotiladigan son 1 dan kam bo‘lmasligi kerak")
+        if packaging.quantity < quantity:
+            raise ValueError(f"{packaging.name_uz} qoldig‘i yetarli emas. Kerak {quantity}, bor {packaging.quantity}")
+        listed_price = Decimal(packaging.sale_price or 0)
+        sold_price = Decimal(str(sale_price)) if sale_price not in [None, ""] else listed_price
+        if sold_price < 0:
+            raise ValueError("Sotuv narxi 0 dan kam bo‘lishi mumkin emas")
+        before = packaging.quantity
+        packaging.quantity -= quantity
+        packaging.save(update_fields=["quantity", "updated_at"])
+        movement = PackagingMovement.objects.create(
+            packaging=packaging,
+            movement_type="out",
+            quantity=-quantity,
+            unit_cost=packaging.cost_price,
+            unit_price=sold_price,
+            payment_type=payment_type or "",
+            reference_type="packaging_sale",
+            reason=reason or f"{packaging.name_uz} alohida sotildi",
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        if sold_at:
+            PackagingMovement.objects.filter(pk=movement.pk).update(created_at=sold_at)
+            movement.created_at = sold_at
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="packaging_sold",
+            summary=f"{packaging.name_uz} alohida sotildi",
+            entity_type="Packaging",
+            entity_id=str(packaging.id),
+            before={"quantity": before},
+            after={"quantity": packaging.quantity, "sold_quantity": quantity, "unit_price": str(sold_price), "payment_type": payment_type or "", "movement": movement.id, "reason": reason or ""},
+        )
+    return movement
 
 
 def add_catalog_sale_decoration_salary(item, florist, quantity, user, sold_at=None):
@@ -1535,7 +1579,7 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
             reservation.save(update_fields=["catalog_item", "status", "updated_at"])
             reservation = sync_reservation_payment_status(reservation)
         history = create_catalog_history(item, "sold", user=user, quantity=quantity, listed_unit_price=listed_price, sold_unit_price=sold_price, discount_reason=discount_reason, snapshot=snapshot, reservation=reservation)
-        material_rows = deduct_catalog_sale_materials(item, materials, quantity, history, user)
+        material_rows = deduct_catalog_sale_materials(item, materials, quantity, history, user, payment_type=payment_type or "")
         if material_rows:
             snapshot["sale_materials"] = material_rows
             history.snapshot = snapshot

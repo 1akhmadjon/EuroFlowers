@@ -34,9 +34,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
-from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
+from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .renderers import to_local
 from .services import flower_variant_display_name, mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -1110,31 +1110,52 @@ def parse_report_date(value, field):
 
 
 def supplier_rollup_queryset(date_from=None, date_to=None):
-    """Postavshik bo'yicha yig'ma hisob.
-
-    date_from / date_to berilsa, sotib olingan summa, partiya soni va to'langan
-    summa faqat shu oraliq bo'yicha hisoblanadi. Oxirgi to'lov sanasi esa
-    har doim umumiy tarixdan olinadi.
-    """
     money = DecimalField(max_digits=16, decimal_places=2)
     batch_range = Q()
+    material_delivery_range = Q()
+    material_movement_range = Q()
     payment_range = Q()
     joined_range = Q()
     if date_from:
         batch_range &= Q(received_at__gte=date_from)
+        material_delivery_range &= Q(received_at__gte=date_from)
+        material_movement_range &= Q(delivery__received_at__gte=date_from)
         payment_range &= Q(paid_at__gte=date_from)
         joined_range &= Q(stock_batches__received_at__gte=date_from)
     if date_to:
         batch_range &= Q(received_at__lte=date_to)
+        material_delivery_range &= Q(received_at__lte=date_to)
+        material_movement_range &= Q(delivery__received_at__lte=date_to)
         payment_range &= Q(paid_at__lte=date_to)
         joined_range &= Q(stock_batches__received_at__lte=date_to)
     joined_filter = joined_range if (date_from or date_to) else None
-    purchase = Subquery(
+    flower_purchase = Subquery(
         StockBatch.objects.filter(batch_range, supplier=OuterRef("pk"))
         .values("supplier")
         .annotate(total=Coalesce(Sum(F("received_stems") * F("cost_per_stem"), output_field=money), Value(Decimal("0"), output_field=money)))
         .values("total")[:1],
         output_field=money,
+    )
+    material_purchase = Subquery(
+        PackagingMovement.objects.filter(material_movement_range, delivery__supplier=OuterRef("pk"), movement_type="in")
+        .values("delivery__supplier")
+        .annotate(total=Coalesce(Sum(F("quantity") * F("unit_cost"), output_field=money), Value(Decimal("0"), output_field=money)))
+        .values("total")[:1],
+        output_field=money,
+    )
+    material_delivery_count = Subquery(
+        MaterialDelivery.objects.filter(material_delivery_range, supplier=OuterRef("pk"))
+        .values("supplier")
+        .annotate(total=Count("id"))
+        .values("total")[:1],
+        output_field=IntegerField(),
+    )
+    material_quantity = Subquery(
+        PackagingMovement.objects.filter(material_movement_range, delivery__supplier=OuterRef("pk"), movement_type="in")
+        .values("delivery__supplier")
+        .annotate(total=Coalesce(Sum("quantity"), Value(0), output_field=IntegerField()))
+        .values("total")[:1],
+        output_field=IntegerField(),
     )
     paid = Subquery(
         SupplierPayment.objects.filter(payment_range, supplier=OuterRef("pk"))
@@ -1145,12 +1166,14 @@ def supplier_rollup_queryset(date_from=None, date_to=None):
     )
     last_paid = Subquery(SupplierPayment.objects.filter(supplier=OuterRef("pk")).order_by("-paid_at", "-id").values("paid_at")[:1])
     zero = Value(Decimal("0"), output_field=money)
-    # Postavshikdan har safar to'liq to'lab olinadi, qarz tushunchasi yo'q.
-    # Shuning uchun faqat umumiy sotib olingan summa hisoblanadi.
     return Supplier.objects.annotate(
         batches_count=Count("stock_batches", distinct=True, filter=joined_filter),
         total_received_stems=Coalesce(Sum("stock_batches__received_stems", filter=joined_filter), 0),
-        purchase_total=Coalesce(purchase, zero),
+        material_deliveries_count=Coalesce(material_delivery_count, Value(0), output_field=IntegerField()),
+        material_received_quantity=Coalesce(material_quantity, Value(0), output_field=IntegerField()),
+        flower_purchase_total=Coalesce(flower_purchase, zero),
+        material_purchase_total=Coalesce(material_purchase, zero),
+        purchase_total=Coalesce(flower_purchase, zero) + Coalesce(material_purchase, zero),
         paid_total=Coalesce(paid, zero),
         last_payment_at=last_paid,
     )
@@ -1188,6 +1211,12 @@ class SupplierViewSet(ScopedViewSet):
             # annotate GROUP BY dan keyin tartib yo'qoladi, sahifalash barqaror bo'lishi uchun qaytaramiz
             queryset = queryset.order_by(*(queryset.model._meta.ordering or ["id"]))
         return queryset
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if getattr(self, "action", "") == "retrieve":
+            context["include_material_deliveries"] = True
+        return context
 
 
 class SupplierPaymentViewSet(ScopedViewSet):
@@ -2442,6 +2471,26 @@ class PackagingViewSet(TotalsListMixin, ScopedViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(PackagingMovementSerializer(movement).data)
 
+    @extend_schema(request=PackagingSellRequestSerializer, responses=PackagingMovementSerializer)
+    @action(detail=True, methods=["post"])
+    def sell(self, request, pk=None):
+        packaging = self.get_object()
+        serializer = PackagingSellRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            movement = sell_packaging_item(
+                packaging,
+                quantity=serializer.validated_data.get("quantity", 1),
+                sale_price=serializer.validated_data.get("sale_price"),
+                payment_type=serializer.validated_data.get("payment_type", ""),
+                reason=serializer.validated_data.get("reason", ""),
+                user=request.user,
+                sold_at=serializer.validated_data.get("sold_at"),
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PackagingMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
+
 
 class PackagingMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [RolePermission]
@@ -2460,6 +2509,7 @@ class PackagingMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
             t_out=int_sum(Case(When(movement_type="out", then=F("quantity")), default=Value(0), output_field=IntegerField())),
             t_net=int_sum("quantity"),
             t_cost=money_sum(money_product(F("quantity"), F("unit_cost"))),
+            t_sale=money_sum(Case(When(movement_type="out", then=money_product(-F("quantity"), F("unit_price"))), default=Value(Decimal("0"), output_field=MONEY_FIELD), output_field=MONEY_FIELD)),
         )
         return {
             "rows": base.count(),
@@ -2468,6 +2518,7 @@ class PackagingMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
             "out_quantity": abs(agg["t_out"]),
             "net_quantity": agg["t_net"],
             "cost_total": money(agg["t_cost"]),
+            "sale_total": money(agg["t_sale"]),
             "by_type": count_by(base, "movement_type"),
         }
 

@@ -339,6 +339,8 @@ class PackagingMovement(TimeStampedModel):
     packaging = models.ForeignKey(Packaging, on_delete=models.PROTECT, related_name="movements")
     delivery = models.ForeignKey(MaterialDelivery, null=True, blank=True, on_delete=models.PROTECT, related_name="movements")
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payment_type = models.CharField(max_length=20, blank=True, default="")
     movement_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     quantity = models.IntegerField()
     reference_type = models.CharField(max_length=40, blank=True)
