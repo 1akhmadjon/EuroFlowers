@@ -34,7 +34,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
 from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
-from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
 from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
@@ -3083,7 +3083,7 @@ class CatalogReworkViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
 class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
     permission_page = "catalog"
     write_roles = ["admin", "florist", "content", "warehouse"]
-    queryset = CatalogItem.objects.select_related("social_post", "florist__user", "decoration_florist__user", "customer").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging").all()
+    queryset = CatalogItem.objects.all()
     serializer_class = CatalogItemSerializer
     filterset_fields = ["status", "arrangement_type", "catalog_kind", "florist", "customer"]
     ordering_fields = ["created_at", "sold_at", "price", "name_uz", "quantity_total"]
@@ -3093,11 +3093,30 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
     search_fields = ["name_uz", "description_uz", "description_ru", "customer__name", "customer__phone"]
 
+    def get_serializer_class(self):
+        if getattr(self, "action", "") == "list":
+            return CatalogItemListSerializer
+        return CatalogItemSerializer
+
+    def base_catalog_queryset(self):
+        queryset = CatalogItem.objects.select_related("branch", "florist__user", "decoration_florist__user", "customer")
+        if getattr(self, "action", "") != "list":
+            queryset = queryset.select_related("social_post").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging", "history__created_by")
+        return scope_catalog_to_branch(queryset, self.request.user)
+
     def get_queryset(self):
-        return scope_catalog_to_branch(super().get_queryset(), self.request.user)
+        queryset = self.base_catalog_queryset()
+        if getattr(self, "action", "") != "list":
+            return queryset
+        status_group = (self.request.query_params.get("status_group") or "").strip().lower()
+        if status_group in ["available", "sold", "archived"]:
+            queryset = queryset.filter(status=status_group)
+        elif status_group in ["active", "sale", "sotuvda"]:
+            queryset = queryset.filter(status="available")
+        return queryset
 
     def get_status_count_queryset(self):
-        queryset = self.get_queryset()
+        queryset = self.base_catalog_queryset()
         for field in ["arrangement_type", "catalog_kind", "florist", "customer"]:
             value = self.request.query_params.get(field)
             if value not in [None, ""]:
@@ -3116,6 +3135,18 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         counts.update(count_by(queryset, "status"))
         counts["all"] = queryset.count()
         return counts
+
+    @extend_schema(parameters=[
+        OpenApiParameter("status_group", str, description="available, sold, archived yoki all"),
+        OpenApiParameter("status", str, description="Aniq status: draft, available, reserved, sold, archived"),
+        OpenApiParameter("arrangement_type", str, description="bouquet, basket yoki box"),
+        OpenApiParameter("catalog_kind", str, description="standard yoki custom"),
+        OpenApiParameter("florist", OpenApiTypes.INT, description="Florist ID"),
+        OpenApiParameter("customer", OpenApiTypes.INT, description="Mijoz ID"),
+        OpenApiParameter("search", str, description="Nomi, izoh yoki mijoz bo‘yicha qidirish"),
+    ])
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
     def get_list_totals(self, queryset):
         """Katalog sahifasi: nechta dona bor, qancha turadi, tannarxi qancha."""

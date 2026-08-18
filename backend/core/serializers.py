@@ -1654,6 +1654,77 @@ class CatalogTransferRequestSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True)
 
 
+class CatalogItemListSerializer(serializers.ModelSerializer):
+    florist_name = serializers.SerializerMethodField(read_only=True)
+    decoration_florist_name = serializers.SerializerMethodField(read_only=True)
+    customer_detail = serializers.SerializerMethodField(read_only=True)
+    branch_name = serializers.SerializerMethodField(read_only=True)
+    quantity_remaining = serializers.SerializerMethodField(read_only=True)
+    profit = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = CatalogItem
+        fields = [
+            "id", "name_uz", "arrangement_type", "catalog_kind", "volume", "branch", "branch_name",
+            "customer", "customer_detail", "florist", "florist_name", "decoration_florist",
+            "decoration_florist_name", "height_cm", "diameter_cm", "price", "calculated_cost_price",
+            "discount_amount", "discount_percent", "status", "image_url", "instagram_story_url",
+            "quantity_total", "quantity_sold", "quantity_wasted", "quantity_reworked",
+            "quantity_remaining", "sold_at", "created_at", "updated_at", "profit",
+        ]
+
+    @extend_schema_field(serializers.CharField())
+    def get_branch_name(self, obj):
+        return obj.branch.name if obj.branch_id else "Asosiy filial"
+
+    @extend_schema_field(serializers.CharField())
+    def get_florist_name(self, obj):
+        if not obj.florist_id:
+            return ""
+        return str(obj.florist)
+
+    @extend_schema_field(serializers.CharField())
+    def get_decoration_florist_name(self, obj):
+        if not obj.decoration_florist_id:
+            return ""
+        return str(obj.decoration_florist)
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_quantity_remaining(self, obj):
+        return max(int(obj.quantity_total or 0) - int(obj.quantity_sold or 0) - int(obj.quantity_wasted or 0) - int(obj.quantity_reworked or 0), 0)
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_customer_detail(self, obj):
+        if not obj.customer_id:
+            return None
+        return {"id": obj.customer_id, "name": obj.customer.name, "phone": obj.customer.phone, "masked_phone": obj.customer.masked_phone}
+
+    @extend_schema_field(serializers.DictField())
+    def get_profit(self, obj):
+        total = Decimal(obj.quantity_total or 1)
+        if total <= 0:
+            total = Decimal("1")
+        cost_total = Decimal(obj.calculated_cost_price or 0)
+        price = Decimal(obj.price or 0)
+        unit_cost = (cost_total / total).quantize(Decimal("0.01"))
+        unit_profit = (price - unit_cost).quantize(Decimal("0.01"))
+        margin = (unit_profit / price * 100).quantize(Decimal("0.01")) if price else Decimal("0")
+        sold = Decimal(obj.quantity_sold or 0)
+        return {
+            "unit_price": str(price),
+            "unit_cost": str(unit_cost),
+            "unit_profit": str(unit_profit),
+            "unit_margin_percent": str(margin),
+            "realized_profit": str((unit_profit * sold).quantize(Decimal("0.01"))),
+        }
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if request_user_branch(self):
+            data = strip_branch_sensitive_catalog(data)
+        return data
+
+
 class CatalogItemSerializer(serializers.ModelSerializer):
     composition = CatalogCompositionSerializer(many=True, required=False)
     materials = CatalogMaterialUsageSerializer(many=True, required=False)
