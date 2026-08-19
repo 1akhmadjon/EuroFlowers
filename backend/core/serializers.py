@@ -1713,7 +1713,9 @@ class CatalogListMaterialSerializer(serializers.ModelSerializer):
 
 class CatalogItemListSerializer(serializers.ModelSerializer):
     florist_name = serializers.SerializerMethodField(read_only=True)
+    florist_detail = serializers.SerializerMethodField(read_only=True)
     decoration_florist_name = serializers.SerializerMethodField(read_only=True)
+    decoration_florist_detail = serializers.SerializerMethodField(read_only=True)
     customer_detail = serializers.SerializerMethodField(read_only=True)
     branch_name = serializers.SerializerMethodField(read_only=True)
     quantity_remaining = serializers.SerializerMethodField(read_only=True)
@@ -1725,8 +1727,8 @@ class CatalogItemListSerializer(serializers.ModelSerializer):
         model = CatalogItem
         fields = [
             "id", "name_uz", "arrangement_type", "catalog_kind", "volume", "branch", "branch_name",
-            "customer", "customer_detail", "florist", "florist_name", "decoration_florist",
-            "decoration_florist_name", "height_cm", "diameter_cm", "price", "calculated_cost_price",
+            "customer", "customer_detail", "florist", "florist_name", "florist_detail", "decoration_florist",
+            "decoration_florist_name", "decoration_florist_detail", "height_cm", "diameter_cm", "price", "calculated_cost_price",
             "discount_amount", "discount_percent", "status", "image_url", "instagram_story_url",
             "quantity_total", "quantity_sold", "quantity_wasted", "quantity_reworked",
             "quantity_remaining", "sold_at", "created_at", "updated_at", "profit",
@@ -1743,11 +1745,29 @@ class CatalogItemListSerializer(serializers.ModelSerializer):
             return ""
         return str(obj.florist)
 
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_florist_detail(self, obj):
+        return self._florist_payload(obj.florist) if obj.florist_id else None
+
     @extend_schema_field(serializers.CharField())
     def get_decoration_florist_name(self, obj):
         if not obj.decoration_florist_id:
             return ""
         return str(obj.decoration_florist)
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_decoration_florist_detail(self, obj):
+        return self._florist_payload(obj.decoration_florist) if obj.decoration_florist_id else None
+
+    def _florist_payload(self, florist):
+        return {
+            "id": florist.id,
+            "name": str(florist),
+            "staff_type": florist.staff_type,
+            "staff_type_label": florist.get_staff_type_display(),
+            "phone": florist.phone,
+            "user": florist.user_id,
+        }
 
     @extend_schema_field(serializers.IntegerField())
     def get_quantity_remaining(self, obj):
