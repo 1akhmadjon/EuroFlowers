@@ -3141,12 +3141,13 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         rows = (
             queryset.order_by()
             .filter(arrangement_type="bouquet")
+            .annotate(row_remaining=CATALOG_REMAINING_EXPR)
             .values("volume")
             .annotate(
                 items_count=Count("id"),
                 quantity_total=int_sum("quantity_total"),
                 quantity_sold=int_sum("quantity_sold"),
-                quantity_remaining=int_sum(CATALOG_REMAINING_EXPR),
+                quantity_remaining=int_sum("row_remaining"),
             )
             .order_by("volume")
         )
