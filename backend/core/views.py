@@ -3137,6 +3137,33 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         counts["all"] = queryset.count()
         return counts
 
+    def bouquet_volume_summary(self, queryset):
+        rows = (
+            queryset.order_by()
+            .filter(arrangement_type="bouquet")
+            .values("volume")
+            .annotate(
+                items_count=Count("id"),
+                quantity_total=int_sum("quantity_total"),
+                quantity_sold=int_sum("quantity_sold"),
+                quantity_remaining=int_sum(CATALOG_REMAINING_EXPR),
+            )
+            .order_by("volume")
+        )
+        summary = []
+        for row in rows:
+            label = f"{volume_text(row['volume'])} buket {row['quantity_remaining']} ta"
+            summary.append({
+                "volume": row["volume"] or "",
+                "volume_label": volume_text(row["volume"]),
+                "label": label,
+                "items_count": row["items_count"],
+                "quantity_total": row["quantity_total"],
+                "quantity_sold": row["quantity_sold"],
+                "quantity_remaining": row["quantity_remaining"],
+            })
+        return summary
+
     @extend_schema(parameters=[
         OpenApiParameter("status_group", str, description="available, sold, archived yoki all"),
         OpenApiParameter("status", str, description="Aniq status: draft, available, reserved, sold, archived"),
@@ -3183,6 +3210,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
             "sold_count": status_counts.get("sold", 0),
             "archived_count": status_counts.get("archived", 0),
             "by_kind": count_by(base, "catalog_kind"),
+            "bouquet_volume_summary": self.bouquet_volume_summary(base),
         }
 
     def perform_create(self, serializer):
