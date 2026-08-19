@@ -1712,8 +1712,10 @@ class CatalogListMaterialSerializer(serializers.ModelSerializer):
 
 
 class CatalogItemListSerializer(serializers.ModelSerializer):
+    florist = serializers.SerializerMethodField(read_only=True)
     florist_name = serializers.SerializerMethodField(read_only=True)
     florist_detail = serializers.SerializerMethodField(read_only=True)
+    decoration_florist = serializers.SerializerMethodField(read_only=True)
     decoration_florist_name = serializers.SerializerMethodField(read_only=True)
     decoration_florist_detail = serializers.SerializerMethodField(read_only=True)
     customer_detail = serializers.SerializerMethodField(read_only=True)
@@ -1740,6 +1742,12 @@ class CatalogItemListSerializer(serializers.ModelSerializer):
         return obj.branch.name if obj.branch_id else "Asosiy filial"
 
     @extend_schema_field(serializers.CharField())
+    def get_florist(self, obj):
+        if not obj.florist_id:
+            return ""
+        return str(obj.florist)
+
+    @extend_schema_field(serializers.CharField())
     def get_florist_name(self, obj):
         if not obj.florist_id:
             return ""
@@ -1748,6 +1756,12 @@ class CatalogItemListSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DictField(allow_null=True))
     def get_florist_detail(self, obj):
         return self._florist_payload(obj.florist) if obj.florist_id else None
+
+    @extend_schema_field(serializers.CharField())
+    def get_decoration_florist(self, obj):
+        if not obj.decoration_florist_id:
+            return ""
+        return str(obj.decoration_florist)
 
     @extend_schema_field(serializers.CharField())
     def get_decoration_florist_name(self, obj):
