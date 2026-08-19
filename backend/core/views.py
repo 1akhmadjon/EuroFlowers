@@ -3100,8 +3100,9 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
 
     def base_catalog_queryset(self):
         queryset = CatalogItem.objects.select_related("branch", "florist__user", "decoration_florist__user", "customer")
+        queryset = queryset.prefetch_related("composition__stock_batch__variant__flower", "materials__packaging")
         if getattr(self, "action", "") != "list":
-            queryset = queryset.select_related("social_post").prefetch_related("composition__stock_batch__variant__flower", "materials__packaging", "history__created_by")
+            queryset = queryset.select_related("social_post").prefetch_related("history__created_by")
         return scope_catalog_to_branch(queryset, self.request.user)
 
     def get_queryset(self):

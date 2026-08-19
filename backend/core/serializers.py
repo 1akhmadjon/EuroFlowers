@@ -1660,6 +1660,57 @@ class CatalogTransferRequestSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True)
 
 
+class CatalogListBatchSerializer(serializers.ModelSerializer):
+    flower_name = serializers.CharField(read_only=True)
+    title = serializers.CharField(read_only=True)
+    height_label = serializers.CharField(read_only=True)
+    variant_detail = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = StockBatch
+        fields = ["id", "batch_number", "variant", "variant_detail", "flower_name", "title", "height_label", "height_cm", "stems_per_bunch", "image_url"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_variant_detail(self, obj):
+        variant = obj.variant
+        return {
+            "id": variant.id,
+            "flower": variant.flower_id,
+            "name_uz": variant.name_uz,
+            "color_uz": variant.color_uz,
+            "flower_detail": {"id": variant.flower_id, "name_uz": variant.flower.name_uz, "image_url": variant.flower.image_url},
+        }
+
+
+class CatalogListCompositionSerializer(serializers.ModelSerializer):
+    batch_detail = CatalogListBatchSerializer(source="stock_batch", read_only=True)
+
+    class Meta:
+        model = CatalogComposition
+        fields = ["id", "stock_batch", "batch_detail", "quantity_stems", "quantity_bunches"]
+        list_serializer_class = CatalogCompositionListSerializer
+
+
+class CatalogListMaterialSerializer(serializers.ModelSerializer):
+    packaging_detail = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = CatalogMaterialUsage
+        fields = ["id", "packaging", "packaging_detail", "quantity"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_packaging_detail(self, obj):
+        packaging = obj.packaging
+        return {
+            "id": packaging.id,
+            "name_uz": packaging.name_uz,
+            "packaging_type": packaging.packaging_type,
+            "packaging_type_label": packaging.get_packaging_type_display(),
+            "size": packaging.size,
+            "image_url": packaging.image_url,
+        }
+
+
 class CatalogItemListSerializer(serializers.ModelSerializer):
     florist_name = serializers.SerializerMethodField(read_only=True)
     decoration_florist_name = serializers.SerializerMethodField(read_only=True)
@@ -1667,6 +1718,8 @@ class CatalogItemListSerializer(serializers.ModelSerializer):
     branch_name = serializers.SerializerMethodField(read_only=True)
     quantity_remaining = serializers.SerializerMethodField(read_only=True)
     profit = serializers.SerializerMethodField(read_only=True)
+    composition = CatalogListCompositionSerializer(many=True, read_only=True)
+    materials = CatalogListMaterialSerializer(many=True, read_only=True)
 
     class Meta:
         model = CatalogItem
@@ -1677,6 +1730,7 @@ class CatalogItemListSerializer(serializers.ModelSerializer):
             "discount_amount", "discount_percent", "status", "image_url", "instagram_story_url",
             "quantity_total", "quantity_sold", "quantity_wasted", "quantity_reworked",
             "quantity_remaining", "sold_at", "created_at", "updated_at", "profit",
+            "composition", "materials",
         ]
 
     @extend_schema_field(serializers.CharField())
