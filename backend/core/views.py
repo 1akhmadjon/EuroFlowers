@@ -1846,7 +1846,7 @@ class FloristStockBalanceViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet)
                     serializer.validated_data["batch"],
                     serializer.validated_data.get("return_stems") or 0,
                     request.user,
-                    serializer.validated_data.get("absorb_remainder", False),
+                    serializer.validated_data.get("absorb_remainder", True),
                 )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
