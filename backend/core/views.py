@@ -4644,7 +4644,7 @@ def catalog_history_sale_payment_amounts(history, sale_total):
         return {"other": sale_total}
     total_paid = cash + card
     if total_paid != sale_total:
-        cash = (sale_total * cash / total_paid).quantize(Decimal("0.01"))
+        cash = (sale_total * cash / total_paid).quantize(Decimal("1"))
         card = sale_total - cash
     return {"cash": cash, "card": card}
 
