@@ -11,7 +11,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .inventory_services import general_variant_for, merge_into_stock_batch, stock_merge_target
-from .models import AICatalogItem, AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment, UserProfile
+from .models import AICatalogItem, AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristPayment, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment, UserProfile
 from .permissions import FLORIST_ALLOWED_PAGES
 
 
@@ -650,6 +650,26 @@ class FloristSalaryEntrySerializer(serializers.ModelSerializer):
         if not obj.catalog_item_id:
             return None
         return {"id": obj.catalog_item_id, "name_uz": obj.catalog_item.name_uz, "catalog_kind": obj.catalog_item.catalog_kind, "arrangement_type": obj.catalog_item.arrangement_type}
+
+
+class FloristPaymentSerializer(serializers.ModelSerializer):
+    florist_detail = FloristProfileSerializer(source="florist", read_only=True)
+    method_label = serializers.SerializerMethodField(read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = FloristPayment
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.CharField())
+    def get_method_label(self, obj):
+        return dict(FloristPayment.METHOD_CHOICES).get(obj.method, obj.method)
+
+    def validate_amount(self, value):
+        if value is None or Decimal(value) <= 0:
+            raise serializers.ValidationError("To‘lov summasi noldan katta bo‘lishi kerak.")
+        return value
 
 
 class FloristDecorationSalarySerializer(serializers.Serializer):

@@ -31,10 +31,10 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment
+from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristPayment, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment
 from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
-from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristPaymentSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
 from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
@@ -460,6 +460,9 @@ def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_ma
         "standard_quantity": 0,
         "custom_quantity": 0,
         "total_sales": Decimal("0"),
+        "sales_cash_total": Decimal("0"),
+        "sales_card_total": Decimal("0"),
+        "sales_other_total": Decimal("0"),
         "cash_total": Decimal("0"),
         "card_total": Decimal("0"),
         "unknown_total": Decimal("0"),
@@ -532,6 +535,10 @@ def add_sale_to_bucket(bucket, payment, quantity, stems, sale_total, discount, c
     bucket["total_quantity"] += quantity
     bucket["flower_stems"] += stems
     bucket["total_sales"] += sale_total
+    sale_amounts = catalog_history_sale_payment_amounts(history, sale_total)
+    bucket["sales_cash_total"] += sale_amounts.get("cash", Decimal("0"))
+    bucket["sales_card_total"] += sale_amounts.get("card", Decimal("0"))
+    bucket["sales_other_total"] += sum((amount for key, amount in sale_amounts.items() if key not in ["cash", "card"]), Decimal("0"))
     amounts, primary, is_mixed = sale_payment_split(history, payment, sale_total)
     for key, amount in amounts.items():
         bucket[f"{key}_total"] += amount
@@ -764,10 +771,36 @@ def accounting_report_data(request):
             "payment_method_label": expense.get_payment_method_display(),
             "branch_name": expense.branch.name if expense.branch_id else MAIN_BRANCH_LABEL,
         })
-    # chiqitga chiqqan buket haqiqiy yo'qotish, shuning uchun foydadan ayriladi
+
+    supplier_rows = list(supplier_rollup_queryset(date_from, date_to))
+    supplier_purchase_total = sum((Decimal(getattr(row, "purchase_total", 0) or 0) for row in supplier_rows), Decimal("0"))
+    supplier_paid_total = sum((Decimal(getattr(row, "paid_total", 0) or 0) for row in supplier_rows), Decimal("0"))
+    supplier_debt_total = sum((Decimal(getattr(row, "debt_total", 0) or 0) for row in supplier_rows), Decimal("0"))
+    supplier_overpaid_total = sum((Decimal(getattr(row, "overpaid_total", 0) or 0) for row in supplier_rows), Decimal("0"))
+    salary_entries = FloristSalaryEntry.objects.all()
+    florist_payments = FloristPayment.objects.all()
+    if date_from:
+        salary_entries = salary_entries.filter(work_date__gte=date_from)
+        florist_payments = florist_payments.filter(paid_at__gte=date_from)
+    if date_to:
+        salary_entries = salary_entries.filter(work_date__lte=date_to)
+        florist_payments = florist_payments.filter(paid_at__lte=date_to)
+    florist_accrued_total = salary_entries.aggregate(value=money_sum(F("amount")))["value"] or Decimal("0")
+    florist_paid_total = florist_payments.aggregate(value=money_sum(F("amount")))["value"] or Decimal("0")
+    florist_balance_total = florist_accrued_total - florist_paid_total
     summary["net_profit"] = summary["total_sales"] - summary["cost_total"] - summary["catalog_waste_total"]
     summary["net_profit_after_expenses"] = summary["net_profit"] - summary["expense_total"]
     summary["received_total"] = summary["total_sales"] + summary["delivery_total"]
+    summary["supplier_purchase_total"] = supplier_purchase_total
+    summary["supplier_paid_total"] = supplier_paid_total
+    summary["supplier_debt_total"] = supplier_debt_total
+    summary["supplier_overpaid_total"] = supplier_overpaid_total
+    summary["florist_accrued_total"] = florist_accrued_total
+    summary["florist_paid_total"] = florist_paid_total
+    summary["florist_balance_total"] = florist_balance_total
+    summary["owner_take_home"] = summary["received_total"] - supplier_paid_total - florist_paid_total - summary["expense_total"]
+    summary["cashflow_balance"] = summary["owner_take_home"]
+    summary["accounting_note"] = "sof_foyda sotilgan mahsulot tannarxi bilan, egaga_qoladigan_pul esa real tushumdan to‘langan pullarni ayirib hisoblanadi"
     for bucket in branch_buckets.values():
         bucket["net_profit"] = bucket["total_sales"] - bucket["cost_total"] - bucket["catalog_waste_total"]
         bucket["net_profit_after_expenses"] = bucket["net_profit"] - bucket["expense_total"]
@@ -2160,6 +2193,39 @@ class FloristSalaryEntryViewSet(TotalsListMixin, ScopedViewSet):
         if before_changed or after_changed:
             write_audit(self.request.user, "florist_salary_updated", entry, before=before_changed, after=after_changed, request=self.request, summary=f"{entry.florist} ish haqi o‘zgartirildi")
             create_user_notification(entry.florist.user, "florist_salary", "Ish haqi o‘zgartirildi", f"{entry.work_date} uchun ish haqi {entry.amount} so‘m qilib yangilandi.", "florist_salary", entry.id)
+
+
+class FloristPaymentViewSet(TotalsListMixin, ScopedViewSet):
+    permission_page = "florists"
+    write_roles = ["admin", "supervisor"]
+    queryset = FloristPayment.objects.select_related("florist__user", "created_by").all()
+    serializer_class = FloristPaymentSerializer
+    filterset_fields = ["florist", "method", "paid_at"]
+    search_fields = ["note", "florist__user__first_name", "florist__user__last_name", "florist__user__username"]
+    ordering_fields = ["paid_at", "amount", "created_at"]
+    ordering = ["-paid_at", "-id"]
+
+    def perform_create(self, serializer):
+        payment = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        write_audit(self.request.user, "floristpayment_created", payment, before={}, after=instance_snapshot(payment), request=self.request)
+
+    def perform_update(self, serializer):
+        before = instance_snapshot(self.get_object())
+        payment = serializer.save()
+        write_audit(self.request.user, "floristpayment_updated", payment, before=before, after=instance_snapshot(payment), request=self.request)
+
+    def perform_destroy(self, instance):
+        before = instance_snapshot(instance)
+        write_audit(self.request.user, "floristpayment_deleted", instance, before=before, after={}, request=self.request)
+        instance.delete()
+
+    def get_list_totals(self, queryset):
+        base = queryset.order_by()
+        agg = base.aggregate(t_amount=money_sum(F("amount")))
+        by_method = {}
+        for row in base.values("method").annotate(t_rows=Count("id"), t_amount=money_sum(F("amount"))):
+            by_method[row["method"]] = {"count": row["t_rows"], "amount": money(row["t_amount"])}
+        return {"payments": base.count(), "amount_total": money(agg["t_amount"]), "by_method": by_method}
 
 
 def stock_batch_is_used(batch):

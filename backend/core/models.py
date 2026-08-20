@@ -496,6 +496,23 @@ class FloristSalaryEntry(TimeStampedModel):
         ordering = ["-work_date", "-id"]
 
 
+class FloristPayment(TimeStampedModel):
+    METHOD_CHOICES = [("cash", "Naqd"), ("card", "Karta"), ("transfer", "O‘tkazma")]
+    florist = models.ForeignKey(FloristProfile, on_delete=models.PROTECT, related_name="payments")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    paid_at = models.DateField(default=timezone.localdate)
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES, default="cash")
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="florist_payments")
+
+    class Meta:
+        ordering = ["-paid_at", "-id"]
+        indexes = [models.Index(fields=["florist", "-paid_at"])]
+
+    def __str__(self):
+        return f"{self.florist} · {self.amount}"
+
+
 class FloristVolumeRate(TimeStampedModel):
     ARRANGEMENT_CHOICES = [("bouquet", "Buket"), ("basket", "Savat")]
     florist = models.ForeignKey(FloristProfile, null=True, blank=True, on_delete=models.CASCADE, related_name="volume_rates")
