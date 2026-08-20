@@ -8,7 +8,7 @@ from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
 from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
-from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group
+from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group, telegram_send_media_group_with, telegram_send_with
 
 
 AI_REPLY_WAIT_SECONDS = 7
@@ -30,6 +30,7 @@ ARRANGEMENT_LABELS = [("bouquet", "buket"), ("basket", "savat"), ("stems", "dona
 
 MAX_LEAD_PHOTO_URLS = 5
 MAX_CONTEXT_ATTACHMENTS = 6
+MAX_OPERATOR_HANDOFF_MEDIA = 10
 
 
 def parse_lead_date(value):
@@ -676,6 +677,110 @@ def customer_photo_urls(values):
     return urls[:MAX_LEAD_PHOTO_URLS]
 
 
+def operator_chat_url(conversation):
+    template = settings.FRONTEND_CHAT_URL or "https://euroflowers.cognilabs.org/chat?conversation_id={conversation_id}"
+    if "{conversation_id}" in template:
+        return template.format(conversation_id=conversation.id)
+    separator = "&" if "?" in template else "?"
+    return f"{template}{separator}conversation_id={conversation.id}"
+
+
+def operator_handoff_media_type(url, kind=""):
+    text = f"{url} {kind}".lower()
+    if any(text.split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".webm"]) or "video" in text:
+        return "video"
+    if any(text.split("?")[0].endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]) or "photo" in text or "image" in text:
+        return "photo"
+    return ""
+
+
+def operator_handoff_attachment_payload(attachments):
+    media = []
+    links = []
+    for row in attachments:
+        url = row.get("url")
+        if not url:
+            continue
+        media_type = operator_handoff_media_type(url, row.get("kind") or row.get("type") or "")
+        if media_type and len(media) < MAX_OPERATOR_HANDOFF_MEDIA:
+            media.append({"type": media_type, "url": url})
+        else:
+            links.append(url)
+    return media, links
+
+
+def operator_handoff_message(conversation, summary, phone, attachments, links):
+    customer = conversation.customer
+    lines = [
+        "🌸 EuroFlowers media so‘rovi",
+        "",
+        f"👤 Mijoz: {customer.name or customer.instagram_username or customer.instagram_user_id}",
+        f"📞 Telefon: {phone or customer.phone or 'raqam berilmagan'}",
+        f"💬 Chat ID: {conversation.id}",
+        f"📍 Platforma: {'Telegram' if customer.instagram_user_id.startswith('telegram:') else 'Instagram'}",
+        "",
+        "🧠 AI xulosa",
+        (summary or "Mijoz yuborgan rasm/reels bo‘yicha operator aniq javob berishi kerak.")[:1500],
+    ]
+    all_links = [row.get("url") for row in attachments if row.get("url")]
+    if all_links:
+        lines.extend(["", "🔗 Media havolalar"])
+        lines.extend(f"{index}. {url}" for index, url in enumerate(all_links[:10], start=1))
+    if links and not all_links:
+        lines.extend(["", "🔗 Media havolalar"])
+        lines.extend(f"{index}. {url}" for index, url in enumerate(links[:10], start=1))
+    return "\n".join(lines)
+
+
+def handoff_media_to_operator(conversation, summary="", phone="", customer_refused_phone=False):
+    attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
+    if not attachments:
+        return {"ok": False, "detail": "no_customer_attachments"}
+    token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
+    chat_id = settings.AI_OPERATOR_HANDOFF_GROUP_ID
+    if not token or not chat_id:
+        return {"ok": False, "detail": "operator_group_not_configured"}
+    normalized_phone = normalize_phone(phone) or conversation.customer.phone
+    if normalized_phone and normalized_phone != conversation.customer.phone:
+        conversation.customer.phone = normalized_phone
+        conversation.customer.save(update_fields=["phone", "updated_at"])
+    media, links = operator_handoff_attachment_payload(attachments)
+    media_sent = False
+    media_error = ""
+    if media:
+        try:
+            media_payload = []
+            for index, row in enumerate(media[:MAX_OPERATOR_HANDOFF_MEDIA], start=1):
+                payload = dict(row)
+                payload["caption"] = f"{index}. Mijoz yuborgan media" if index == 1 else ""
+                media_payload.append(payload)
+            telegram_send_media_group_with(token, chat_id, media_payload, settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+            media_sent = True
+        except Exception as exc:
+            media_error = str(exc)
+            print(f"AI_OPERATOR_MEDIA_GROUP_FAILED conversation={conversation.id} error={exc}", flush=True)
+    text = operator_handoff_message(conversation, summary, normalized_phone, attachments, links)
+    reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
+    try:
+        sent = telegram_send_with(token, chat_id, text, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+    except Exception as exc:
+        print(f"AI_OPERATOR_HANDOFF_FAILED conversation={conversation.id} error={exc}", flush=True)
+        return {"ok": False, "detail": "telegram_send_failed", "error": str(exc), "media_sent": media_sent, "media_error": media_error}
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={
+        "operator_media_handoff": {
+            "summary": summary,
+            "phone": normalized_phone,
+            "customer_refused_phone": customer_refused_phone,
+            "attachments": attachments,
+            "media_sent": media_sent,
+            "media_error": media_error,
+            "chat_url": operator_chat_url(conversation),
+            "telegram_result": sent,
+        }
+    })
+    return {"ok": True, "media_sent": media_sent, "attachments_count": len(attachments), "chat_url": operator_chat_url(conversation)}
+
+
 def lead_summary_text(lead):
     """Operator suhbat ustida ko'radigan bir qatorlik xulosa."""
     details = lead.details or {}
@@ -792,6 +897,22 @@ def ai_tool_definitions():
                     **lead_request_properties,
                 },
                 "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "handoff_media_to_operator",
+            "description": "Mijoz yuborgan rasm, reels, post yoki media bo‘yicha AI aniq tushunmasa operator guruhiga yuborish. Avval telefon so‘ra; telefon berilsa phone bilan chaqir, telefon berishdan bosh tortsa customer_refused_phone=true qilib raqamsiz chaqir. Media linklari suhbat metadata sidan olinadi, argumentga media URL yozma.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Operator uchun aniq xulosa. Mijoz nimani so‘radi, rasm/reelsda nimani bilmoqchi, qanday javob kerak."},
+                    "phone": {"type": ["string", "null"], "description": "Mijoz bergan telefon raqami. Bermasa null."},
+                    "customer_refused_phone": {"type": "boolean", "description": "Mijoz telefon berishni rad etsa true."},
+                },
+                "required": ["summary", "phone", "customer_refused_phone"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -1066,6 +1187,13 @@ def execute_ai_tool(name, arguments, conversation):
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
+    if name == "handoff_media_to_operator":
+        return handoff_media_to_operator(
+            conversation,
+            summary=arguments.get("summary") or "",
+            phone=arguments.get("phone") or "",
+            customer_refused_phone=bool(arguments.get("customer_refused_phone")),
+        )
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}
     name_value = (arguments.get("customer_name") or "").strip()

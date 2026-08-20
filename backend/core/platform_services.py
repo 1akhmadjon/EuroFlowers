@@ -230,8 +230,25 @@ def telegram_api(method, payload):
     return response.json()
 
 
+def telegram_api_with_token(token, method, payload):
+    if not token:
+        return {"skipped": True, "reason": "token yo‘q"}
+    response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
 def telegram_send(chat_id, text):
     return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+
+
+def telegram_send_with(token, chat_id, text, reply_markup=None, message_thread_id=""):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    if message_thread_id:
+        payload["message_thread_id"] = message_thread_id
+    return telegram_api_with_token(token, "sendMessage", payload)
 
 
 def telegram_send_image(chat_id, image_url, caption=""):
@@ -255,6 +272,19 @@ def telegram_send_media_group(chat_id, media):
         ],
     }
     return telegram_api("sendMediaGroup", payload)
+
+
+def telegram_send_media_group_with(token, chat_id, media, message_thread_id=""):
+    payload = {
+        "chat_id": chat_id,
+        "media": [
+            {"type": row.get("type") or "photo", "media": row.get("url") or "", "caption": (row.get("caption") or "")[:1024]}
+            for row in media
+        ],
+    }
+    if message_thread_id:
+        payload["message_thread_id"] = message_thread_id
+    return telegram_api_with_token(token, "sendMediaGroup", payload)
 
 
 def telegram_send_photo_with(token, chat_id, photo, caption="", parse_mode="Markdown"):

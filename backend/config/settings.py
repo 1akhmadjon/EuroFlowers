@@ -101,6 +101,10 @@ BACKUP_BOT_TOKEN = os.getenv("BACKUP_BOT_TOKEN", "")
 BACKUP_TELEGRAM_GROUP_ID = os.getenv("BACKUP_TELEGRAM_GROUP_ID", "")
 BACKUP_TELEGRAM_THREAD_ID = os.getenv("BACKUP_TELEGRAM_THREAD_ID", "")
 BACKUP_TELEGRAM_COMMAND = os.getenv("BACKUP_TELEGRAM_COMMAND", "/eurodan_backup_tashachi")
+AI_OPERATOR_HANDOFF_BOT_TOKEN = os.getenv("AI_OPERATOR_HANDOFF_BOT_TOKEN", "8752325160:AAH4G3mm0ZlPgXI3nRqKhz9nvF5KuOYdixA")
+AI_OPERATOR_HANDOFF_GROUP_ID = os.getenv("AI_OPERATOR_HANDOFF_GROUP_ID", "-5195454751")
+AI_OPERATOR_HANDOFF_THREAD_ID = os.getenv("AI_OPERATOR_HANDOFF_THREAD_ID", "")
+FRONTEND_CHAT_URL = os.getenv("FRONTEND_CHAT_URL", "https://euroflowers.cognilabs.org/chat?conversation_id={conversation_id}")
 CELERY_BEAT_SCHEDULE = {
     "lead-recalls-every-minute": {
         "task": "core.tasks.process_due_lead_recalls",
