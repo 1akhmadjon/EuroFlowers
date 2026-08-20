@@ -4602,7 +4602,7 @@ def dashboard_daily_stats(leads, conversations, start, end, catalog_rows=None):
     return days
 
 
-SOVDA_HEADERS = ["№", "sana", "sovda", "naxt", "karta", "dostavka", "sotuv", "kotta savat", "sredni savat", "kickina savat", "kotta buket", "sred buket", "kich buket", "oyincho", "shokolad", "zapiska", "kitob", "banketka"]
+SOVDA_HEADERS = ["№", "sana", "sovda", "naxt", "karta", "boshqa", "dostavka", "jami tushum", "sotuv", "kotta savat", "sredni savat", "kickina savat", "kotta buket", "sred buket", "kich buket", "oyincho", "shokolad", "zapiska", "kitob", "banketka"]
 RASXOD_HEADERS = ["№", "SANA", "RASXOD", "OBED DEN", "OBED NOCH", "ABO", "BEGZOD", "ISO", "BAKIR", "FATXULLO", "ZAFAR", "SHOHAKBAR", "ABDULAZIZ", "AZIMJON", "IBROHIM", "ABROR", "MUAZZAM", "ZARINA", "RAYXONA", "JAVOXIR", "ABDU", "BEGZOD DOST", "SOBIR OKA", "SODIQ OKA", "DOSTAVKA", "LENTA", "target", "nalog", "svet", "musur", "POKE", "SKOCH"]
 YANDEX_HEADERS = ["№", "SANA", "DOV", "KIYM", "XAYRULLO", "LENTA", "GUL", "VODIY"]
 
@@ -4628,6 +4628,25 @@ def catalog_history_payment_key(history):
     if value == "Karta" or str(value).lower() == "card":
         return "card"
     return "other"
+
+
+def catalog_history_sale_payment_amounts(history, sale_total):
+    payment_key = catalog_history_payment_key(history)
+    payment_value = str(catalog_payment_type(history, history)).lower()
+    if payment_value != "mixed":
+        if payment_key in ["cash", "card"]:
+            return {payment_key: sale_total}
+        return {"other": sale_total}
+    snapshot = history.snapshot or {}
+    cash = Decimal(str(snapshot.get("payment_cash") or 0))
+    card = Decimal(str(snapshot.get("payment_card") or 0))
+    if cash + card <= 0:
+        return {"other": sale_total}
+    total_paid = cash + card
+    if total_paid != sale_total:
+        cash = (sale_total * cash / total_paid).quantize(Decimal("0.01"))
+        card = sale_total - cash
+    return {"cash": cash, "card": card}
 
 
 def accessory_key(name):
@@ -4711,12 +4730,13 @@ def dashboard_excel_stats(start, end, branch=None):
         sale_total = catalog_history_sale_total(history)
         row["sovda"] += sale_total
         row["sotuv"] += int(history.quantity or 0)
-        row["dostavka"] += sale_delivery_amount(history)
-        payment_key = catalog_history_payment_key(history)
-        if payment_key == "cash":
-            row["naxt"] += sale_total
-        elif payment_key == "card":
-            row["karta"] += sale_total
+        delivery_amount = sale_delivery_amount(history)
+        row["dostavka"] += delivery_amount
+        row["jami tushum"] += sale_total + delivery_amount
+        payment_amounts = catalog_history_sale_payment_amounts(history, sale_total)
+        row["naxt"] += payment_amounts.get("cash", Decimal("0"))
+        row["karta"] += payment_amounts.get("card", Decimal("0"))
+        row["boshqa"] += sum((amount for key, amount in payment_amounts.items() if key not in ["cash", "card"]), Decimal("0"))
         item = history.catalog_item
         volume = (item.volume or "").strip().lower()
         if item.arrangement_type == "basket":
@@ -4785,6 +4805,9 @@ def dashboard_excel_stats(start, end, branch=None):
             "sovda": sum((row["sovda"] for row in sovda.values()), Decimal("0")),
             "naxt": sum((row["naxt"] for row in sovda.values()), Decimal("0")),
             "karta": sum((row["karta"] for row in sovda.values()), Decimal("0")),
+            "boshqa": sum((row["boshqa"] for row in sovda.values()), Decimal("0")),
+            "dostavka": sum((row["dostavka"] for row in sovda.values()), Decimal("0")),
+            "jami_tushum": sum((row["jami tushum"] for row in sovda.values()), Decimal("0")),
             "rasxod": sum((row["RASXOD"] for row in rasxod.values()), Decimal("0")),
             "supplier_paid": sum((sum(row.values(), Decimal("0")) for row in yandex.values()), Decimal("0")),
         },
