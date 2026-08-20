@@ -3283,12 +3283,48 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         OpenApiParameter("status", str, description="Aniq status: draft, available, reserved, sold, archived"),
         OpenApiParameter("arrangement_type", str, description="bouquet, basket yoki box"),
         OpenApiParameter("catalog_kind", str, description="standard yoki custom"),
+        OpenApiParameter("separate_by_kind", OpenApiTypes.BOOL, description="true bo‘lsa results standard/custom guruhlangan obyekt bo‘lib qaytadi"),
         OpenApiParameter("florist", OpenApiTypes.INT, description="Florist ID"),
         OpenApiParameter("customer", OpenApiTypes.INT, description="Mijoz ID"),
         OpenApiParameter("search", str, description="Nomi, izoh yoki mijoz bo‘yicha qidirish"),
     ])
     def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+        queryset = self.filter_queryset(self.get_queryset())
+        totals = self.get_list_totals(queryset)
+        separate_by_kind = str(request.query_params.get("separate_by_kind") or "").strip().lower() in ["1", "true", "yes", "ha"]
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            data = self.get_serializer(page, many=True).data
+            grouped = self.group_catalog_rows_by_kind(data)
+            response = self.get_paginated_response(grouped if separate_by_kind else data)
+            response.data["grouped_results"] = grouped
+            response.data["totals"] = totals
+            return response
+        data = self.get_serializer(queryset, many=True).data
+        grouped = self.group_catalog_rows_by_kind(data)
+        return Response({
+            "count": len(data),
+            "page": 1,
+            "page_size": len(data),
+            "total_pages": 1,
+            "has_next": False,
+            "has_previous": False,
+            "next": None,
+            "previous": None,
+            "results": grouped if separate_by_kind else data,
+            "grouped_results": grouped,
+            "totals": totals,
+        })
+
+    def group_catalog_rows_by_kind(self, rows):
+        grouped = {"standard": [], "custom": []}
+        for row in rows:
+            kind = (row.get("catalog_kind") or "standard").strip().lower()
+            if kind == "custom":
+                grouped["custom"].append(row)
+            else:
+                grouped["standard"].append(row)
+        return grouped
 
     def get_list_totals(self, queryset):
         """Katalog sahifasi: nechta dona bor, qancha turadi, tannarxi qancha."""
