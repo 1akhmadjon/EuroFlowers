@@ -4604,7 +4604,7 @@ def dashboard_daily_stats(leads, conversations, start, end, catalog_rows=None):
 
 SOVDA_HEADERS = ["№", "sana", "sovda", "naxt", "karta", "boshqa", "dostavka", "jami tushum", "sotuv", "kotta savat", "sredni savat", "kickina savat", "kotta buket", "sred buket", "kich buket", "oyincho", "shokolad", "zapiska", "kitob", "banketka"]
 RASXOD_HEADERS = ["№", "SANA", "RASXOD", "OBED DEN", "OBED NOCH", "ABO", "BEGZOD", "ISO", "BAKIR", "FATXULLO", "ZAFAR", "SHOHAKBAR", "ABDULAZIZ", "AZIMJON", "IBROHIM", "ABROR", "MUAZZAM", "ZARINA", "RAYXONA", "JAVOXIR", "ABDU", "BEGZOD DOST", "SOBIR OKA", "SODIQ OKA", "DOSTAVKA", "LENTA", "target", "nalog", "svet", "musur", "POKE", "SKOCH"]
-YANDEX_HEADERS = ["№", "SANA", "DOV", "KIYM", "XAYRULLO", "LENTA", "GUL", "VODIY"]
+SUPPLIER_PAYMENT_HEADERS = ["№", "SANA", "DOV", "KIYM", "XAYRULLO", "LENTA", "GUL", "VODIY"]
 
 
 def normalized_text(value):
@@ -4703,7 +4703,7 @@ def expense_key(destination):
     return ""
 
 
-def yandex_supplier_key(name):
+def supplier_payment_bucket_key(name):
     text = normalized_text(name)
     checks = [
         ("DOV", ["dov", "dovron"]),
@@ -4781,11 +4781,11 @@ def dashboard_excel_stats(start, end, branch=None):
         if key and key in rasxod[salary.work_date]:
             rasxod[salary.work_date][key] += Decimal(salary.amount or 0)
 
-    yandex = date_bucket(start, end, lambda day: {key: Decimal("0") for key in YANDEX_HEADERS[2:]})
+    supplier_payments = date_bucket(start, end, lambda day: {key: Decimal("0") for key in SUPPLIER_PAYMENT_HEADERS[2:]})
     for payment in SupplierPayment.objects.select_related("supplier").filter(paid_at__gte=timezone.localtime(start).date(), paid_at__lte=timezone.localtime(end).date()):
-        key = yandex_supplier_key(payment.supplier.name)
-        if payment.paid_at in yandex and key:
-            yandex[payment.paid_at][key] += Decimal(payment.amount or 0)
+        key = supplier_payment_bucket_key(payment.supplier.name)
+        if payment.paid_at in supplier_payments and key:
+            supplier_payments[payment.paid_at][key] += Decimal(payment.amount or 0)
 
     def rows_from_bucket(headers, bucket):
         rows = []
@@ -4800,7 +4800,8 @@ def dashboard_excel_stats(start, end, branch=None):
     return {
         "sovda": rows_from_bucket(SOVDA_HEADERS, sovda),
         "rasxod": rows_from_bucket(RASXOD_HEADERS, rasxod),
-        "yandex": rows_from_bucket(YANDEX_HEADERS, yandex),
+        "supplier_payments": rows_from_bucket(SUPPLIER_PAYMENT_HEADERS, supplier_payments),
+        "yandex": rows_from_bucket(SUPPLIER_PAYMENT_HEADERS, supplier_payments),
         "totals": {
             "sovda": sum((row["sovda"] for row in sovda.values()), Decimal("0")),
             "naxt": sum((row["naxt"] for row in sovda.values()), Decimal("0")),
@@ -4809,7 +4810,7 @@ def dashboard_excel_stats(start, end, branch=None):
             "dostavka": sum((row["dostavka"] for row in sovda.values()), Decimal("0")),
             "jami_tushum": sum((row["jami tushum"] for row in sovda.values()), Decimal("0")),
             "rasxod": sum((row["RASXOD"] for row in rasxod.values()), Decimal("0")),
-            "supplier_paid": sum((sum(row.values(), Decimal("0")) for row in yandex.values()), Decimal("0")),
+            "supplier_paid": sum((sum(row.values(), Decimal("0")) for row in supplier_payments.values()), Decimal("0")),
         },
     }
 
@@ -4858,7 +4859,7 @@ def dashboard_excel_export(request):
     workbook.remove(workbook.active)
     append_excel_stats_sheet(workbook, "SOVDA", SOVDA_HEADERS, stats["sovda"])
     append_excel_stats_sheet(workbook, "RASXOD", RASXOD_HEADERS, stats["rasxod"])
-    append_excel_stats_sheet(workbook, "YANDEX", YANDEX_HEADERS, stats["yandex"])
+    append_excel_stats_sheet(workbook, "POSTAVSHIK TOLOVLARI", SUPPLIER_PAYMENT_HEADERS, stats["supplier_payments"])
     filename = f"euroflowers-dashboard-{timezone.localtime(period_start).date()}-{timezone.localtime(period_end).date()}.xlsx"
     return excel_response(workbook, filename)
 
