@@ -717,7 +717,6 @@ def operator_handoff_message(conversation, summary, phone, attachments, links):
         "",
         f"👤 Mijoz: {customer.name or customer.instagram_username or customer.instagram_user_id}",
         f"📞 Telefon: {phone or customer.phone or 'raqam berilmagan'}",
-        f"💬 Chat ID: {conversation.id}",
         f"📍 Platforma: {'Telegram' if customer.instagram_user_id.startswith('telegram:') else 'Instagram'}",
         "",
         "🧠 AI xulosa",
@@ -762,7 +761,6 @@ def operator_handoff_rich_message(conversation, summary, phone, attachments, med
         f"<p>👤 Mijoz<br/>{escape(customer_name)}</p>",
         f"<p>📞 Telefon<br/>{escape(phone or customer.phone or 'raqam berilmagan')}</p>",
         f"<p>📍 Platforma<br/>{escape(platform)}</p>",
-        f"<p>💬 Chat ID<br/>{escape(str(conversation.id))}</p>",
         f"<p>🧠 AI xulosa<br/>{escape(summary_text)}</p>",
     ])
     if display_links:
