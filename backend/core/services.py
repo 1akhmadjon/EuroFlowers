@@ -1,5 +1,6 @@
 import json
 import re
+from html import escape
 from datetime import date, timedelta
 from decimal import Decimal
 from django.conf import settings
@@ -8,7 +9,7 @@ from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
 from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
-from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group, telegram_send_media_group_with, telegram_send_with
+from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group, telegram_send_rich_message_with, telegram_send_with
 
 
 AI_REPLY_WAIT_SECONDS = 7
@@ -732,6 +733,48 @@ def operator_handoff_message(conversation, summary, phone, attachments, links):
     return "\n".join(lines)
 
 
+def operator_handoff_rich_message(conversation, summary, phone, attachments, media, links):
+    customer = conversation.customer
+    platform = "Telegram" if customer.instagram_user_id.startswith("telegram:") else "Instagram"
+    all_links = [row.get("url") for row in attachments if row.get("url")]
+    display_links = all_links or links
+    media_items = []
+    blocks = []
+    for index, row in enumerate(media[:MAX_OPERATOR_HANDOFF_MEDIA], start=1):
+        media_id = f"handoff_{index}"
+        media_type = row.get("type") or "photo"
+        if media_type == "video":
+            blocks.append(f'<video src="tg://video?id={media_id}"/>')
+            media_payload = {"type": "video", "media": row.get("url") or ""}
+        else:
+            blocks.append(f'<img src="tg://photo?id={media_id}"/>')
+            media_payload = {"type": "photo", "media": row.get("url") or ""}
+        media_items.append({"id": media_id, "media": media_payload})
+    summary_text = (summary or "Mijoz yuborgan media bo'yicha operator aniq javob berishi kerak.")[:1500]
+    html_parts = []
+    if blocks:
+        html_parts.append("<tg-slideshow>")
+        html_parts.extend(blocks)
+        html_parts.append("</tg-slideshow>")
+    customer_name = customer.name or customer.instagram_username or customer.instagram_user_id or "Nomalum"
+    html_parts.extend([
+        "<h3>🌸 EuroFlowers media so'rovi</h3>",
+        f"<p>👤 Mijoz<br/>{escape(customer_name)}</p>",
+        f"<p>📞 Telefon<br/>{escape(phone or customer.phone or 'raqam berilmagan')}</p>",
+        f"<p>📍 Platforma<br/>{escape(platform)}</p>",
+        f"<p>💬 Chat ID<br/>{escape(str(conversation.id))}</p>",
+        f"<p>🧠 AI xulosa<br/>{escape(summary_text)}</p>",
+    ])
+    if display_links:
+        html_parts.append("<p>🔗 Media havolalar</p>")
+        html_parts.append("<ul>")
+        for url in display_links[:10]:
+            safe_url = escape(url)
+            html_parts.append(f'<li><a href="{safe_url}">{safe_url}</a></li>')
+        html_parts.append("</ul>")
+    return {"html": "\n".join(html_parts), "media": media_items}
+
+
 def handoff_media_to_operator(conversation, summary="", phone="", customer_refused_phone=False):
     attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
     if not attachments:
@@ -747,25 +790,20 @@ def handoff_media_to_operator(conversation, summary="", phone="", customer_refus
     media, links = operator_handoff_attachment_payload(attachments)
     media_sent = False
     media_error = ""
-    if media:
-        try:
-            media_payload = []
-            for index, row in enumerate(media[:MAX_OPERATOR_HANDOFF_MEDIA], start=1):
-                payload = dict(row)
-                payload["caption"] = f"{index}. Mijoz yuborgan media" if index == 1 else ""
-                media_payload.append(payload)
-            telegram_send_media_group_with(token, chat_id, media_payload, settings.AI_OPERATOR_HANDOFF_THREAD_ID)
-            media_sent = True
-        except Exception as exc:
-            media_error = str(exc)
-            print(f"AI_OPERATOR_MEDIA_GROUP_FAILED conversation={conversation.id} error={exc}", flush=True)
-    text = operator_handoff_message(conversation, summary, normalized_phone, attachments, links)
     reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
+    rich_message = operator_handoff_rich_message(conversation, summary, normalized_phone, attachments, media, links)
     try:
-        sent = telegram_send_with(token, chat_id, text, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+        sent = telegram_send_rich_message_with(token, chat_id, rich_message, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+        media_sent = bool(media)
     except Exception as exc:
-        print(f"AI_OPERATOR_HANDOFF_FAILED conversation={conversation.id} error={exc}", flush=True)
-        return {"ok": False, "detail": "telegram_send_failed", "error": str(exc), "media_sent": media_sent, "media_error": media_error}
+        media_error = str(exc)
+        print(f"AI_OPERATOR_RICH_HANDOFF_FAILED conversation={conversation.id} error={exc}", flush=True)
+        try:
+            text = operator_handoff_message(conversation, summary, normalized_phone, attachments, links)
+            sent = telegram_send_with(token, chat_id, text, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+        except Exception as fallback_exc:
+            print(f"AI_OPERATOR_HANDOFF_FAILED conversation={conversation.id} error={fallback_exc}", flush=True)
+            return {"ok": False, "detail": "telegram_send_failed", "error": str(fallback_exc), "media_sent": media_sent, "media_error": media_error}
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={
         "operator_media_handoff": {
             "summary": summary,

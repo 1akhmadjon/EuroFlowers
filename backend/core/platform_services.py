@@ -287,6 +287,15 @@ def telegram_send_media_group_with(token, chat_id, media, message_thread_id=""):
     return telegram_api_with_token(token, "sendMediaGroup", payload)
 
 
+def telegram_send_rich_message_with(token, chat_id, rich_message, reply_markup=None, message_thread_id=""):
+    payload = {"chat_id": chat_id, "rich_message": rich_message}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    if message_thread_id:
+        payload["message_thread_id"] = message_thread_id
+    return telegram_api_with_token(token, "sendRichMessage", payload)
+
+
 def telegram_send_photo_with(token, chat_id, photo, caption="", parse_mode="Markdown"):
     """Alohida bot orqali rasm yuboradi.
 
