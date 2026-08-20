@@ -160,6 +160,21 @@ class SupplierPayment(TimeStampedModel):
         return f"{self.supplier} · {self.amount}"
 
 
+class SupplierDebtAdjustment(TimeStampedModel):
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name="debt_adjustments")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    adjusted_at = models.DateField(default=timezone.localdate)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="supplier_debt_adjustments")
+
+    class Meta:
+        ordering = ["-adjusted_at", "-id"]
+        indexes = [models.Index(fields=["supplier", "-adjusted_at"])]
+
+    def __str__(self):
+        return f"{self.supplier} · qarz {self.amount}"
+
+
 class StockDelivery(TimeStampedModel):
     """Partiya — bitta kelgan yuk. Ichiga turli gullar qo'shiladi.
 

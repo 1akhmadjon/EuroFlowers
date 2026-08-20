@@ -11,7 +11,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .inventory_services import general_variant_for, merge_into_stock_batch, stock_merge_target
-from .models import AICatalogItem, AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
+from .models import AICatalogItem, AISettings, AuditLog, Branch, Debt, Expense, MaterialDelivery, StockDelivery, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadPackagingUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment, UserProfile
 from .permissions import FLORIST_ALLOWED_PAGES
 
 
@@ -208,6 +208,11 @@ class SupplierSerializer(serializers.ModelSerializer):
     material_purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     purchase_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
     paid_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    manual_debt_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    debt_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    balance_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    overpaid_total = serializers.DecimalField(max_digits=16, decimal_places=2, read_only=True)
+    balance_status = serializers.SerializerMethodField(read_only=True)
     last_payment_at = serializers.DateField(read_only=True)
     material_deliveries = serializers.SerializerMethodField()
 
@@ -246,6 +251,15 @@ class SupplierSerializer(serializers.ModelSerializer):
             })
         return rows
 
+    @extend_schema_field(serializers.CharField())
+    def get_balance_status(self, obj):
+        balance = Decimal(getattr(obj, "balance_total", 0) or 0)
+        if balance > 0:
+            return "debt"
+        if balance < 0:
+            return "overpaid"
+        return "closed"
+
 
 class SupplierPaymentSerializer(serializers.ModelSerializer):
     supplier_detail = serializers.SerializerMethodField(read_only=True)
@@ -268,6 +282,25 @@ class SupplierPaymentSerializer(serializers.ModelSerializer):
     def validate_amount(self, value):
         if value is None or Decimal(value) <= 0:
             raise serializers.ValidationError("To‘lov summasi noldan katta bo‘lishi kerak.")
+        return value
+
+
+class SupplierDebtAdjustmentSerializer(serializers.ModelSerializer):
+    supplier_detail = serializers.SerializerMethodField(read_only=True)
+    created_by_detail = UserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = SupplierDebtAdjustment
+        fields = "__all__"
+        read_only_fields = ["created_by"]
+
+    @extend_schema_field(serializers.DictField())
+    def get_supplier_detail(self, obj):
+        return {"id": obj.supplier_id, "name": obj.supplier.name, "phone": obj.supplier.phone}
+
+    def validate_amount(self, value):
+        if value is None or Decimal(value) <= 0:
+            raise serializers.ValidationError("Qarz summasi noldan katta bo‘lishi kerak.")
         return value
 
 
@@ -1466,11 +1499,12 @@ class SocialPostSerializer(serializers.ModelSerializer):
         for item in catalog_items:
             quantity_total = item.get("quantity_total", 1)
             florist = item.get("florist")
+            stock_florist = florist if item.get("catalog_kind", "standard") != "custom" else None
             for row in item.get("composition") or []:
                 batch = row["stock_batch"]
                 needed = row["quantity_stems"] * quantity_total
-                if not catalog_stock_available(batch, needed, florist):
-                    detail = catalog_stock_error(batch, needed, florist)
+                if not catalog_stock_available(batch, needed, stock_florist):
+                    detail = catalog_stock_error(batch, needed, stock_florist)
                     raise DetailValidationError(detail)
             for row in item.get("materials") or []:
                 packaging = row["packaging"]
@@ -1915,10 +1949,9 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             materials = attrs["materials"]
         elif materials is not None:
             materials = normalize_catalog_material_rows(materials)
-        # Florist katalogida gul tanlanadi, lekin soni yozilmaydi — u chiqim
-        # yopilganda hajm bo'yicha hisoblanadi. Shuning uchun tur, hajm va
-        # kamida bitta gul majburiy.
         florist_value = attrs.get("florist", getattr(self.instance, "florist", None))
+        kind = attrs.get("catalog_kind") or getattr(self.instance, "catalog_kind", None) or "standard"
+        stock_florist = florist_value if kind != "custom" else None
         if florist_value and not self.instance:
             if not attrs.get("arrangement_type"):
                 raise serializers.ValidationError({"arrangement_type": "Florist katalogida turini tanlash kerak"})
@@ -1926,8 +1959,6 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"volume": "Florist katalogida hajmni tanlash kerak — gul shu bo‘yicha taqsimlanadi"})
             if not composition:
                 raise serializers.ValidationError({"composition": "Floristga chiqarilgan qaysi guldan yasalganini tanlang"})
-        # Standart katalogda florist haqi qo'lda berilmaydi, faqat hajm tarifidan olinadi.
-        kind = attrs.get("catalog_kind") or getattr(self.instance, "catalog_kind", None) or "standard"
         if kind == "standard" and florist_value:
             arrangement_type = attrs.get("arrangement_type") or getattr(self.instance, "arrangement_type", None)
             volume = attrs.get("volume") or getattr(self.instance, "volume", None)
@@ -1937,19 +1968,16 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "volume": f"{florist_value} uchun bu hajm tarifi belgilanmagan. Avval floristga hajm narxini kiriting.",
                 })
-        # Florist tanlanmagan katalogda gul skladdan darrov yechiladi,
-        # shuning uchun u yerda son majburiy.
-        if composition and not florist_value:
+        if composition and not stock_florist:
             for row in composition:
                 if int(row.get("quantity_stems") or 0) < 1:
                     raise serializers.ValidationError({"composition": "Gul sonini kiriting"})
         if composition and not self.instance:
-            florist = attrs.get("florist")
             for row in composition:
                 batch = row["stock_batch"]
                 needed = row["quantity_stems"] * quantity_total
-                if not catalog_stock_available(batch, needed, florist):
-                    detail = catalog_stock_error(batch, needed, florist)
+                if not catalog_stock_available(batch, needed, stock_florist):
+                    detail = catalog_stock_error(batch, needed, stock_florist)
                     raise DetailValidationError(detail)
         if materials and not self.instance:
             for row in materials:
@@ -2023,10 +2051,8 @@ class CatalogItemSerializer(serializers.ModelSerializer):
         old_florist_id = instance.florist_id
         edited_created_at = validated_data.pop("created_at", None)
         composition = validated_data.pop("composition", None)
-        # Florist katalogida gul soni chiqim yopilganda yoziladi. Keyin katalogga
-        # yana gul qo'shilsa, sonsiz kelgan qatorlar avvalgi sonini saqlab qolishi
-        # kerak — aks holda allaqachon taqsimlangan gul nolga tushib ketardi.
-        if composition is not None and (validated_data.get("florist") or instance.florist_id):
+        target_kind = validated_data.get("catalog_kind") or instance.catalog_kind
+        if composition is not None and target_kind != "custom" and (validated_data.get("florist") or instance.florist_id):
             existing = {row.stock_batch_id: row.quantity_stems for row in instance.composition.all()}
             for row in composition:
                 batch = row.get("stock_batch")

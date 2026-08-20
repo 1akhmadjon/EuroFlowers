@@ -31,10 +31,10 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierPayment
+from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment
 from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
-from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
 from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
@@ -1115,18 +1115,21 @@ def supplier_rollup_queryset(date_from=None, date_to=None):
     material_delivery_range = Q()
     material_movement_range = Q()
     payment_range = Q()
+    adjustment_range = Q()
     joined_range = Q()
     if date_from:
         batch_range &= Q(received_at__gte=date_from)
         material_delivery_range &= Q(received_at__gte=date_from)
         material_movement_range &= Q(delivery__received_at__gte=date_from)
         payment_range &= Q(paid_at__gte=date_from)
+        adjustment_range &= Q(adjusted_at__gte=date_from)
         joined_range &= Q(stock_batches__received_at__gte=date_from)
     if date_to:
         batch_range &= Q(received_at__lte=date_to)
         material_delivery_range &= Q(received_at__lte=date_to)
         material_movement_range &= Q(delivery__received_at__lte=date_to)
         payment_range &= Q(paid_at__lte=date_to)
+        adjustment_range &= Q(adjusted_at__lte=date_to)
         joined_range &= Q(stock_batches__received_at__lte=date_to)
     joined_filter = joined_range if (date_from or date_to) else None
     flower_purchase = Subquery(
@@ -1164,6 +1167,13 @@ def supplier_rollup_queryset(date_from=None, date_to=None):
         .values("total")[:1],
         output_field=money,
     )
+    manual_debt = Subquery(
+        SupplierDebtAdjustment.objects.filter(adjustment_range, supplier=OuterRef("pk"))
+        .values("supplier")
+        .annotate(total=Coalesce(Sum("amount", output_field=money), Value(Decimal("0"), output_field=money)))
+        .values("total")[:1],
+        output_field=money,
+    )
     last_paid = Subquery(SupplierPayment.objects.filter(supplier=OuterRef("pk")).order_by("-paid_at", "-id").values("paid_at")[:1])
     zero = Value(Decimal("0"), output_field=money)
     return Supplier.objects.annotate(
@@ -1175,6 +1185,10 @@ def supplier_rollup_queryset(date_from=None, date_to=None):
         material_purchase_total=Coalesce(material_purchase, zero),
         purchase_total=Coalesce(flower_purchase, zero) + Coalesce(material_purchase, zero),
         paid_total=Coalesce(paid, zero),
+        manual_debt_total=Coalesce(manual_debt, zero),
+        balance_total=Coalesce(flower_purchase, zero) + Coalesce(material_purchase, zero) + Coalesce(manual_debt, zero) - Coalesce(paid, zero),
+        debt_total=Greatest(Coalesce(flower_purchase, zero) + Coalesce(material_purchase, zero) + Coalesce(manual_debt, zero) - Coalesce(paid, zero), zero, output_field=money),
+        overpaid_total=Greatest(Coalesce(paid, zero) - Coalesce(flower_purchase, zero) - Coalesce(material_purchase, zero) - Coalesce(manual_debt, zero), zero, output_field=money),
         last_payment_at=last_paid,
     )
 
@@ -1192,7 +1206,7 @@ class SupplierViewSet(ScopedViewSet):
     serializer_class = SupplierSerializer
     filterset_fields = ["is_active", "supplier_type"]
     search_fields = ["name", "phone", "notes"]
-    ordering_fields = ["name", "purchase_total", "paid_total", "last_payment_at", "created_at"]
+    ordering_fields = ["name", "purchase_total", "paid_total", "manual_debt_total", "debt_total", "balance_total", "last_payment_at", "created_at"]
 
     @extend_schema(parameters=[
         OpenApiParameter("date_from", OpenApiTypes.DATE, description="Shu sanadan boshlab hisoblanadi"),
@@ -1231,6 +1245,39 @@ class SupplierPaymentViewSet(ScopedViewSet):
     def perform_create(self, serializer):
         payment = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
         write_audit(self.request.user, "supplierpayment_created", payment, before={}, after=instance_snapshot(payment), request=self.request)
+
+
+class SupplierDebtAdjustmentViewSet(ScopedViewSet):
+    permission_page = "suppliers"
+    write_roles = ["admin", "warehouse"]
+    queryset = SupplierDebtAdjustment.objects.select_related("supplier", "created_by").all()
+    serializer_class = SupplierDebtAdjustmentSerializer
+    filterset_fields = ["supplier", "adjusted_at"]
+    search_fields = ["note", "supplier__name"]
+    ordering_fields = ["adjusted_at", "amount", "created_at"]
+
+    def perform_create(self, serializer):
+        adjustment = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        write_audit(self.request.user, "supplierdebt_created", adjustment, before={}, after=instance_snapshot(adjustment), request=self.request)
+
+    def perform_update(self, serializer):
+        before = instance_snapshot(self.get_object())
+        adjustment = serializer.save()
+        write_audit(self.request.user, "supplierdebt_updated", adjustment, before=before, after=instance_snapshot(adjustment), request=self.request)
+
+    def perform_destroy(self, instance):
+        before = instance_snapshot(instance)
+        supplier_name = instance.supplier.name
+        instance_id = instance.id
+        instance.delete()
+        AuditLog.objects.create(
+            user=self.request.user if self.request.user.is_authenticated else None,
+            action="supplierdebt_deleted",
+            summary=f"{supplier_name} postavshik qarzi o‘chirildi",
+            entity_type="SupplierDebtAdjustment",
+            entity_id=str(instance_id),
+            before=before,
+        )
 
 
 class FloristVolumeRateViewSet(ScopedViewSet):
@@ -4305,6 +4352,17 @@ def dashboard(request):
     catalog_week = catalog_sales_totals(catalog_sales_queryset(week_start_dt, today_end, branch))
     catalog_period_rows = list(catalog_sales_queryset(period_start, period_end, branch))
     catalog_period = catalog_sales_totals(catalog_period_rows)
+    supplier_rows = list(supplier_rollup_queryset(timezone.localtime(period_start).date(), timezone.localtime(period_end).date()))
+    supplier_totals = {
+        "purchase_total": sum((Decimal(getattr(row, "purchase_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+        "flower_purchase_total": sum((Decimal(getattr(row, "flower_purchase_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+        "material_purchase_total": sum((Decimal(getattr(row, "material_purchase_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+        "paid_total": sum((Decimal(getattr(row, "paid_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+        "manual_debt_total": sum((Decimal(getattr(row, "manual_debt_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+        "debt_total": sum((Decimal(getattr(row, "debt_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+        "overpaid_total": sum((Decimal(getattr(row, "overpaid_total", 0) or 0) for row in supplier_rows), Decimal("0")),
+    }
+    excel_stats = dashboard_excel_stats(period_start, period_end, branch)
     lead_revenue_today = won_leads.filter(updated_at__date=today).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
     lead_revenue_7d = won_leads.filter(updated_at__date__gte=week_start).aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
     lead_revenue_period = period_won_leads.aggregate(value=Coalesce(Sum("estimated_price"), Decimal("0")))["value"]
@@ -4337,6 +4395,14 @@ def dashboard(request):
         "top_selling_flowers": top_selling_flowers(period_won_leads)[:5],
         "florist_revenue": period_won_leads.aggregate(value=Coalesce(Sum("florist_fee"), Decimal("0")))["value"],
         "florist_salary_total": apply_created_range(FloristSalaryEntry.objects.all(), period_start, period_end).aggregate(value=Coalesce(Sum("amount"), Decimal("0")))["value"],
+        "supplier_purchase_total": supplier_totals["purchase_total"],
+        "supplier_flower_purchase_total": supplier_totals["flower_purchase_total"],
+        "supplier_material_purchase_total": supplier_totals["material_purchase_total"],
+        "supplier_paid_total": supplier_totals["paid_total"],
+        "supplier_manual_debt_total": supplier_totals["manual_debt_total"],
+        "supplier_debt_total": supplier_totals["debt_total"],
+        "supplier_overpaid_total": supplier_totals["overpaid_total"],
+        "supplier_debtors_count": sum(1 for row in supplier_rows if Decimal(getattr(row, "debt_total", 0) or 0) > 0),
         "flowers_sold_stems": abs(int(flowers_sold)),
         "catalog_revenue": catalog_financials["revenue"],
         "catalog_cost": catalog_financials["cost"],
@@ -4347,6 +4413,7 @@ def dashboard(request):
         "net_profit": catalog_financials["profit"],
         "batch_inventory_stats": batch_inventory_stats(period_start, period_end)[:10],
         "florist_production_stats": florist_production_stats(period_start, period_end)[:10],
+        "excel_stats": excel_stats,
         "conversion_rate": round((won_leads.count() / conversion_base) * 100, 2) if conversion_base else 0,
         "available_catalog": catalog.filter(status="available").count(),
         "pending_deductions": catalog.filter(quantity_sold__gt=F("quantity_stock_deducted")).count(),
@@ -4533,6 +4600,244 @@ def dashboard_daily_stats(leads, conversations, start, end, catalog_rows=None):
         })
         current += timedelta(days=1)
     return days
+
+
+SOVDA_HEADERS = ["№", "sana", "sovda", "naxt", "karta", "dostavka", "sotuv", "kotta savat", "sredni savat", "kickina savat", "kotta buket", "sred buket", "kich buket", "oyincho", "shokolad", "zapiska", "kitob", "banketka"]
+RASXOD_HEADERS = ["№", "SANA", "RASXOD", "OBED DEN", "OBED NOCH", "ABO", "BEGZOD", "ISO", "BAKIR", "FATXULLO", "ZAFAR", "SHOHAKBAR", "ABDULAZIZ", "AZIMJON", "IBROHIM", "ABROR", "MUAZZAM", "ZARINA", "RAYXONA", "JAVOXIR", "ABDU", "BEGZOD DOST", "SOBIR OKA", "SODIQ OKA", "DOSTAVKA", "LENTA", "target", "nalog", "svet", "musur", "POKE", "SKOCH"]
+YANDEX_HEADERS = ["№", "SANA", "DOV", "KIYM", "XAYRULLO", "LENTA", "GUL", "VODIY"]
+
+
+def normalized_text(value):
+    return (value or "").strip().lower().replace("‘", "'").replace("`", "'")
+
+
+def date_bucket(start, end, factory):
+    rows = {}
+    current = timezone.localtime(start).date()
+    end_date = timezone.localtime(end).date()
+    while current <= end_date:
+        rows[current] = factory(current)
+        current += timedelta(days=1)
+    return rows
+
+
+def catalog_history_payment_key(history):
+    value = catalog_payment_type(history, history)
+    if value == "Naqd" or str(value).lower() == "cash":
+        return "cash"
+    if value == "Karta" or str(value).lower() == "card":
+        return "card"
+    return "other"
+
+
+def accessory_key(name):
+    text = normalized_text(name)
+    if "oyin" in text or "o'yin" in text or "igrush" in text:
+        return "oyincho"
+    if "shokol" in text or "choco" in text:
+        return "shokolad"
+    if "zapiska" in text or "otkrit" in text or "maktub" in text:
+        return "zapiska"
+    if "kitob" in text:
+        return "kitob"
+    if "banket" in text:
+        return "banketka"
+    return ""
+
+
+def expense_key(destination):
+    text = normalized_text(destination)
+    checks = [
+        ("OBED DEN", ["obed den", "obed kunduz", "tushlik den"]),
+        ("OBED NOCH", ["obed noch", "obed tun", "kechki obed"]),
+        ("ABO", ["abo"]),
+        ("BEGZOD", ["begzod", "bekzod"]),
+        ("ISO", ["iso", "isroil"]),
+        ("BAKIR", ["bakir", "abubakir"]),
+        ("FATXULLO", ["fatxullo", "fatkhullo"]),
+        ("ZAFAR", ["zafar"]),
+        ("SHOHAKBAR", ["shohakbar", "shoxakbar"]),
+        ("ABDULAZIZ", ["abdulaziz"]),
+        ("AZIMJON", ["azimjon"]),
+        ("IBROHIM", ["ibrohim"]),
+        ("ABROR", ["abror"]),
+        ("MUAZZAM", ["muazzam"]),
+        ("ZARINA", ["zarina"]),
+        ("RAYXONA", ["rayxona", "rayhona"]),
+        ("JAVOXIR", ["javoxir", "javohir"]),
+        ("ABDU", ["abdu"]),
+        ("BEGZOD DOST", ["begzod dost", "bekzod dost"]),
+        ("SOBIR OKA", ["sobir"]),
+        ("SODIQ OKA", ["sodiq"]),
+        ("DOSTAVKA", ["dostavka", "delivery", "kuryer"]),
+        ("LENTA", ["lenta"]),
+        ("target", ["target", "reklama"]),
+        ("nalog", ["nalog", "soliq"]),
+        ("svet", ["svet", "elektr"]),
+        ("musur", ["musur", "chiqindi"]),
+        ("POKE", ["poke"]),
+        ("SKOCH", ["skoch"]),
+    ]
+    for key, aliases in checks:
+        if any(alias in text for alias in aliases):
+            return key
+    return ""
+
+
+def yandex_supplier_key(name):
+    text = normalized_text(name)
+    checks = [
+        ("DOV", ["dov", "dovron"]),
+        ("KIYM", ["kiym"]),
+        ("XAYRULLO", ["xayrullo", "hayrullo"]),
+        ("LENTA", ["lenta"]),
+        ("GUL", ["gul", "flower"]),
+        ("VODIY", ["vodiy"]),
+    ]
+    for key, aliases in checks:
+        if any(alias in text for alias in aliases):
+            return key
+    return ""
+
+
+def dashboard_excel_stats(start, end, branch=None):
+    sovda = date_bucket(start, end, lambda day: {key: Decimal("0") for key in SOVDA_HEADERS[2:]})
+    catalog_rows = list(catalog_sales_queryset(start, end, branch))
+    for history in catalog_rows:
+        day = timezone.localtime(history.created_at).date()
+        if day not in sovda:
+            continue
+        row = sovda[day]
+        sale_total = catalog_history_sale_total(history)
+        row["sovda"] += sale_total
+        row["sotuv"] += int(history.quantity or 0)
+        row["dostavka"] += sale_delivery_amount(history)
+        payment_key = catalog_history_payment_key(history)
+        if payment_key == "cash":
+            row["naxt"] += sale_total
+        elif payment_key == "card":
+            row["karta"] += sale_total
+        item = history.catalog_item
+        volume = (item.volume or "").strip().lower()
+        if item.arrangement_type == "basket":
+            if volume in ["large", "l", "xl"]:
+                row["kotta savat"] += int(history.quantity or 0)
+            elif volume in ["medium", "m"]:
+                row["sredni savat"] += int(history.quantity or 0)
+            elif volume in ["small", "s", "xs"]:
+                row["kickina savat"] += int(history.quantity or 0)
+        elif item.arrangement_type == "bouquet":
+            if volume in ["large", "l", "xl"]:
+                row["kotta buket"] += int(history.quantity or 0)
+            elif volume in ["medium", "m"]:
+                row["sred buket"] += int(history.quantity or 0)
+            elif volume in ["small", "s", "xs"]:
+                row["kich buket"] += int(history.quantity or 0)
+    accessory_rows = apply_created_range(
+        PackagingMovement.objects.select_related("packaging").filter(movement_type="out", packaging__packaging_type="other"),
+        start,
+        end,
+    )
+    for movement in accessory_rows:
+        day = timezone.localtime(movement.created_at).date()
+        key = accessory_key(movement.packaging.name_uz)
+        if day in sovda and key:
+            sovda[day][key] += abs(int(movement.quantity or 0))
+
+    rasxod = date_bucket(start, end, lambda day: {key: Decimal("0") for key in RASXOD_HEADERS[2:]})
+    for expense in Expense.objects.filter(spent_at__gte=start, spent_at__lte=end):
+        day = timezone.localtime(expense.spent_at).date()
+        if day not in rasxod:
+            continue
+        rasxod[day]["RASXOD"] += Decimal(expense.amount or 0)
+        key = expense_key(expense.destination)
+        if key:
+            rasxod[day][key] += Decimal(expense.amount or 0)
+    salary_rows = FloristSalaryEntry.objects.select_related("florist__user").filter(work_date__gte=timezone.localtime(start).date(), work_date__lte=timezone.localtime(end).date())
+    for salary in salary_rows:
+        if salary.work_date not in rasxod:
+            continue
+        key = expense_key(str(salary.florist))
+        if key and key in rasxod[salary.work_date]:
+            rasxod[salary.work_date][key] += Decimal(salary.amount or 0)
+
+    yandex = date_bucket(start, end, lambda day: {key: Decimal("0") for key in YANDEX_HEADERS[2:]})
+    for payment in SupplierPayment.objects.select_related("supplier").filter(paid_at__gte=timezone.localtime(start).date(), paid_at__lte=timezone.localtime(end).date()):
+        key = yandex_supplier_key(payment.supplier.name)
+        if payment.paid_at in yandex and key:
+            yandex[payment.paid_at][key] += Decimal(payment.amount or 0)
+
+    def rows_from_bucket(headers, bucket):
+        rows = []
+        for index, day in enumerate(sorted(bucket), start=1):
+            values = bucket[day]
+            row = {"№": index, "sana" if "sana" in headers else "SANA": day.isoformat()}
+            for key in headers[2:]:
+                row[key] = values.get(key, Decimal("0"))
+            rows.append(row)
+        return rows
+
+    return {
+        "sovda": rows_from_bucket(SOVDA_HEADERS, sovda),
+        "rasxod": rows_from_bucket(RASXOD_HEADERS, rasxod),
+        "yandex": rows_from_bucket(YANDEX_HEADERS, yandex),
+        "totals": {
+            "sovda": sum((row["sovda"] for row in sovda.values()), Decimal("0")),
+            "naxt": sum((row["naxt"] for row in sovda.values()), Decimal("0")),
+            "karta": sum((row["karta"] for row in sovda.values()), Decimal("0")),
+            "rasxod": sum((row["RASXOD"] for row in rasxod.values()), Decimal("0")),
+            "supplier_paid": sum((sum(row.values(), Decimal("0")) for row in yandex.values()), Decimal("0")),
+        },
+    }
+
+
+def append_excel_stats_sheet(workbook, title, headers, rows):
+    sheet = workbook.create_sheet(title[:31])
+    sheet.append(headers)
+    header_fill = PatternFill("solid", fgColor="1F2937")
+    header_font = Font(color="FFFFFF", bold=True)
+    thin = Side(style="thin", color="D1D5DB")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    for row in rows:
+        sheet.append([row.get(header, "") for header in headers])
+    total_row = ["", "Jami"]
+    for header in headers[2:]:
+        total_row.append(sum((Decimal(row.get(header) or 0) for row in rows), Decimal("0")))
+    sheet.append(total_row)
+    total_index = sheet.max_row
+    for cell in sheet[total_index]:
+        cell.font = Font(bold=True, color="111827")
+        cell.fill = PatternFill("solid", fgColor="F3F4F6")
+        cell.border = border
+    for row_cells in sheet.iter_rows(min_row=2, max_row=sheet.max_row - 1):
+        for cell in row_cells:
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+    sheet.freeze_panes = "A2"
+    autosize_sheet(sheet)
+    return sheet
+
+
+@extend_schema(parameters=dashboard_date_parameters)
+@api_view(["GET"])
+def dashboard_excel_export(request):
+    if not has_page_permission(request.user, "dashboard", False):
+        return forbidden()
+    period_start, period_end = dashboard_period(request)
+    branch = user_branch(request.user)
+    stats = dashboard_excel_stats(period_start, period_end, branch)
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    append_excel_stats_sheet(workbook, "SOVDA", SOVDA_HEADERS, stats["sovda"])
+    append_excel_stats_sheet(workbook, "RASXOD", RASXOD_HEADERS, stats["rasxod"])
+    append_excel_stats_sheet(workbook, "YANDEX", YANDEX_HEADERS, stats["yandex"])
+    filename = f"euroflowers-dashboard-{timezone.localtime(period_start).date()}-{timezone.localtime(period_end).date()}.xlsx"
+    return excel_response(workbook, filename)
 
 
 def analytics_daily_stats(leads, conversations, won_leads, start, end, catalog_rows=None):

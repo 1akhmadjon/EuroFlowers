@@ -1423,8 +1423,7 @@ def deduct_catalog_inventory(item, user, quantity=None):
         material_shortages = [row for row in material_rows if row.packaging.quantity < row.quantity * quantity]
         if material_shortages:
             raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + ", ".join(row.packaging.name_uz for row in material_shortages))
-        # Florist tanlangan bo'lsa gul skladdan emas, floristning qo'lidagi qoldiqdan olinadi.
-        if item.florist_id and rows:
+        if item.florist_id and item.catalog_kind != "custom" and rows:
             consume_florist_stock(item.florist, rows, quantity, user=user)
             item.quantity_stock_deducted += quantity
             item.stock_deducted_at = timezone.now()
@@ -1491,7 +1490,7 @@ def restore_catalog_inventory(item, user, quantity=None):
             return item
         rows = list(item.composition.select_related("stock_batch").select_for_update())
         material_rows = list(item.materials.select_related("packaging").select_for_update())
-        if item.florist_id and rows:
+        if item.florist_id and item.catalog_kind != "custom" and rows:
             restore_florist_stock(item.florist, rows, quantity)
             rows = []
         for row in rows:
