@@ -8,7 +8,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .models import AICatalogItem, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Message, SocialPost
-from .platform_services import find_active_story_by_media_url, find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
+from .platform_services import find_active_story_by_media_url, find_media_by_id, instagram_account_token_pairs, instagram_credentials_for_account, media_id_from_url, normalize_instagram_permalink, telegram_file_url
 from .services import ingest_customer_message
 
 
@@ -40,14 +40,13 @@ def urls_from_value(value):
     return urls
 
 
-def instagram_customer_profile(external_customer_id):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+def instagram_customer_profile(external_customer_id, account_id=None):
+    _, access_token = instagram_credentials_for_account(account_id)
     if not access_token or not external_customer_id:
         return {}
     try:
         response = requests.get(
-            f"https://graph.facebook.com/{settings.INSTAGRAM_API_VERSION}/{external_customer_id}",
+            f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{external_customer_id}",
             params={"access_token": access_token, "fields": "username"},
             timeout=8,
         )
@@ -59,10 +58,10 @@ def instagram_customer_profile(external_customer_id):
     return {"instagram_username": (data.get("username") or "").strip().lstrip("@")}
 
 
-def update_customer_instagram_profile(customer, external_customer_id):
+def update_customer_instagram_profile(customer, external_customer_id, account_id=None):
     if customer.instagram_username:
         return
-    profile = instagram_customer_profile(external_customer_id)
+    profile = instagram_customer_profile(external_customer_id, account_id)
     username = profile.get("instagram_username") or ""
     if username:
         customer.instagram_username = username[:120]
@@ -463,15 +462,19 @@ def resolve_instagram_event(payload):
             recipient_id = str(event.get("recipient", {}).get("id") or "")
             integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
             own_ids = {str(value) for value in [integration.instagram_account_id, integration.instagram_business_id, settings.INSTAGRAM_ACCOUNT_ID, getattr(settings, "INSTAGRAM_BUSINESS_ID", "")] if value}
+            own_ids.update(instagram_account_token_pairs().keys())
             message = event.get("message", {})
             text = message.get("text")
             story_attachment = first_story_attachment(message)
             media_attachment = first_media_attachment(message)
             story_text = "Mijoz Instagram storyni directga yubordi." if story_attachment else ""
             media_text = "Mijoz Instagram post/reelni directga yubordi." if media_attachment else ""
-            message_metadata = instagram_message_metadata(event, webhook_event)
-            message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
             is_outbound = bool(message.get("is_echo") or sender_id in own_ids)
+            message_metadata = instagram_message_metadata(event, webhook_event)
+            message_metadata["instagram_sender_id"] = sender_id
+            message_metadata["instagram_recipient_id"] = recipient_id
+            message_metadata["instagram_account_id"] = sender_id if is_outbound else recipient_id
+            message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
             external_customer_id = recipient_id if is_outbound else sender_id
             if not external_customer_id or external_customer_id in own_ids or not message_text:
                 continue
@@ -506,10 +509,10 @@ def resolve_instagram_event(payload):
                 conversation.ai_pause_reason = "instagram_operator_message"
                 conversation.save(update_fields=["last_message_at", "status", "ai_paused_until", "ai_pause_reason", "updated_at"])
                 continue
-            update_customer_instagram_profile(customer, external_customer_id)
+            update_customer_instagram_profile(customer, external_customer_id, recipient_id)
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
             if saved_message:
-                results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": external_customer_id})
+                results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": external_customer_id, "account_id": recipient_id})
     return results
 
 

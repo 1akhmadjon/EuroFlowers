@@ -1340,13 +1340,17 @@ def ai_tool_definitions():
     ]
 
 
-def send_image_to_customer(customer, image_url):
-    """Rasmni mijoz platformasiga yuboradi. (delivered, detail) qaytaradi, hech qachon exception ko'tarmaydi."""
+def conversation_instagram_account_id(conversation):
+    message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    return (message.metadata or {}).get("instagram_account_id") if message else None
+
+
+def send_image_to_customer(customer, image_url, conversation=None):
     try:
         if customer.instagram_user_id.startswith("telegram:"):
             result = telegram_send_image(customer.instagram_user_id.split(":", 1)[1], image_url)
         elif customer.instagram_user_id:
-            result = instagram_send_image(customer.instagram_user_id, image_url)
+            result = instagram_send_image(customer.instagram_user_id, image_url, conversation_instagram_account_id(conversation) if conversation else None)
         else:
             return False, "no_platform_id", None
     except Exception as error:
@@ -1365,7 +1369,7 @@ def send_catalog_item_image(conversation, item):
     price_text = f"{money_uz(price_value)} so'm" if price_value != "" else ""
     if not image_url:
         return {"ok": False, "detail": "image_not_found", "catalog_id": item.id, "catalog_name": item_name}
-    delivered, detail, sent = send_image_to_customer(customer, image_url)
+    delivered, detail, sent = send_image_to_customer(customer, image_url, conversation)
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item_name, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
     if not delivered:
         return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item_name}
@@ -1537,7 +1541,7 @@ def send_stock_batch_image(conversation, batch):
     image_url = stock_image_url(batch)
     if not image_url:
         return {"ok": False, "detail": "image_not_found", "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}
-    delivered, detail, sent = send_image_to_customer(customer, image_url)
+    delivered, detail, sent = send_image_to_customer(customer, image_url, conversation)
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"stock_batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz"), "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
     if not delivered:
         return {"ok": False, "image_sent": False, "detail": detail, "batch_id": batch.id, "stock_name": flower_variant_display_name(batch.variant, "uz")}

@@ -22,6 +22,35 @@ def instagram_credentials():
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     return integration, integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
 
+
+def instagram_account_token_pairs():
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    pairs = {}
+    primary_account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+    primary_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+    if primary_account_id and primary_token:
+        pairs[str(primary_account_id)] = primary_token
+    for row in settings.INSTAGRAM_ACCOUNT_ACCESS_TOKENS:
+        if ":" not in row:
+            continue
+        account_id, token = row.split(":", 1)
+        account_id = account_id.strip()
+        token = token.strip()
+        if account_id and token:
+            pairs[account_id] = token
+    return pairs
+
+
+def instagram_credentials_for_account(account_id=None):
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    primary_account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+    if account_id:
+        account_id = str(account_id)
+        token = instagram_account_token_pairs().get(account_id, "")
+        return account_id, token
+    return primary_account_id, integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+
+
 def openai_api_key():
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     return (integration.extra or {}).get("openai_api_key") or settings.OPENAI_API_KEY
@@ -123,10 +152,8 @@ def find_media_by_id(media_id):
             return media
     return None
 
-def instagram_send(recipient_id, text):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+def instagram_send(recipient_id, text, account_id=None):
+    account_id, access_token = instagram_credentials_for_account(account_id)
     if not access_token or not account_id:
         return {"mocked": True}
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
@@ -135,10 +162,8 @@ def instagram_send(recipient_id, text):
     return response.json()
 
 
-def instagram_send_image(recipient_id, image_url):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+def instagram_send_image(recipient_id, image_url, account_id=None):
+    account_id, access_token = instagram_credentials_for_account(account_id)
     if not access_token or not account_id:
         return {"mocked": True}
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
@@ -156,15 +181,13 @@ def instagram_send_image(recipient_id, image_url):
     return response.json()
 
 
-def instagram_send_carousel(recipient_id, elements):
+def instagram_send_carousel(recipient_id, elements, account_id=None):
     """Bir nechta rasmni bitta xabarda karusel qilib yuboradi.
 
     elements: [{"title": ..., "subtitle": ..., "image_url": ...}]
     Instagram generic template bitta xabarda ko'pi bilan 10 ta element ko'taradi.
     """
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+    account_id, access_token = instagram_credentials_for_account(account_id)
     if not access_token or not account_id:
         return {"mocked": True}
     payload = {
@@ -192,10 +215,8 @@ def instagram_send_carousel(recipient_id, elements):
     return response.json()
 
 
-def instagram_sender_action(recipient_id, action):
-    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
-    account_id = integration.instagram_account_id or settings.INSTAGRAM_ACCOUNT_ID or integration.instagram_business_id
+def instagram_sender_action(recipient_id, action, account_id=None):
+    account_id, access_token = instagram_credentials_for_account(account_id)
     if not access_token or not account_id:
         return {"mocked": True}
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"

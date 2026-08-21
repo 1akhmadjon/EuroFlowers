@@ -4232,7 +4232,9 @@ class ConversationViewSet(ScopedViewSet):
                 chat_id = parts[1] if len(parts) >= 3 else external_id.removeprefix("telegram:")
                 telegram_send(chat_id, text)
             else:
-                response = instagram_send(external_id, text)
+                latest_customer_message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+                account_id = (latest_customer_message.metadata or {}).get("instagram_account_id") if latest_customer_message else None
+                response = instagram_send(external_id, text, account_id)
                 sent_message_id = (response or {}).get("message_id") or (response or {}).get("mid") or ""
         except requests.HTTPError as exc:
             response = getattr(exc, "response", None)

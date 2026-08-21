@@ -24,15 +24,15 @@ def process_instagram_webhook(payload):
     for job in jobs:
         if should_start_ai_reply(job["conversation_id"], job["message_id"]):
             try:
-                instagram_sender_action(job["recipient_id"], "typing_on")
+                instagram_sender_action(job["recipient_id"], "typing_on", job.get("account_id"))
             except Exception as exc:
                 print(f"INSTAGRAM_TYPING_ON_FAILED recipient={job['recipient_id']} error={exc}", flush=True)
-        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=INSTAGRAM_AI_REPLY_WAIT_SECONDS)
+        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"], job.get("account_id")], countdown=INSTAGRAM_AI_REPLY_WAIT_SECONDS)
     return jobs
 
 
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=4)
-def process_delayed_instagram_reply(conversation_id, expected_message_id, recipient_id):
+def process_delayed_instagram_reply(conversation_id, expected_message_id, recipient_id, account_id=None):
     if not should_start_ai_reply(conversation_id, expected_message_id):
         return None
     remaining = ai_reply_wait_seconds_remaining(conversation_id, expected_message_id, INSTAGRAM_AI_REPLY_WAIT_SECONDS)
@@ -42,13 +42,13 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         process_delayed_instagram_reply.apply_async(args=[conversation_id, expected_message_id, recipient_id], countdown=ceil(remaining))
         return None
     stop_typing = threading.Event()
-    typing_thread = threading.Thread(target=keep_typing, args=(lambda: instagram_sender_action(recipient_id, "typing_on"), stop_typing, f"INSTAGRAM_TYPING_ON_FAILED recipient={recipient_id}"), daemon=True)
+    typing_thread = threading.Thread(target=keep_typing, args=(lambda: instagram_sender_action(recipient_id, "typing_on", account_id), stop_typing, f"INSTAGRAM_TYPING_ON_FAILED recipient={recipient_id}"), daemon=True)
     typing_thread.start()
     try:
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        response = instagram_send(recipient_id, reply.text)
+        response = instagram_send(recipient_id, reply.text, account_id)
         message_id = (response or {}).get("message_id") or (response or {}).get("mid")
         if message_id:
             reply.instagram_message_id = message_id
@@ -59,7 +59,7 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         stop_typing.set()
         typing_thread.join(timeout=1)
         try:
-            instagram_sender_action(recipient_id, "typing_off")
+            instagram_sender_action(recipient_id, "typing_off", account_id)
         except Exception as exc:
             print(f"INSTAGRAM_TYPING_OFF_FAILED recipient={recipient_id} error={exc}", flush=True)
 
@@ -121,7 +121,9 @@ def process_conversation_follow_up(conversation_id, expected_ai_message_id):
     if customer.instagram_user_id.startswith("telegram:"):
         telegram_send(customer.instagram_user_id.split(":", 1)[1], follow_up.text)
     elif customer.instagram_user_id:
-        response = instagram_send(customer.instagram_user_id, follow_up.text)
+        latest_customer_message = follow_up.conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+        account_id = (latest_customer_message.metadata or {}).get("instagram_account_id") if latest_customer_message else None
+        response = instagram_send(customer.instagram_user_id, follow_up.text, account_id)
         message_id = (response or {}).get("message_id") or (response or {}).get("mid")
         if message_id:
             follow_up.instagram_message_id = message_id
