@@ -34,7 +34,7 @@ MAX_LEAD_PHOTO_URLS = 5
 MAX_CONTEXT_ATTACHMENTS = 6
 MAX_OPERATOR_HANDOFF_MEDIA = 10
 MAX_AI_CATALOG_MATCH_CANDIDATES = 40
-AI_CATALOG_MATCH_CONFIDENCE = Decimal("0.75")
+AI_CATALOG_MATCH_CONFIDENCE = Decimal("0.92")
 
 MEDIA_MATCHING_PRIORITY_INSTRUCTION = """
 MEDIA MATCHING FIRST:
@@ -1036,7 +1036,8 @@ def media_match_failed(tool_results):
         if row.get("name") != "match_ai_catalog_by_media":
             continue
         output = row.get("output") or {}
-        return not output.get("ok") or not output.get("matches")
+        matches = output.get("matches") or []
+        return not output.get("ok") or not any(match.get("is_confident") for match in matches)
     return False
 
 
@@ -1105,7 +1106,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
                 "task": "Find which AI catalog flower arrangement best matches the customer's media. Use customer text for pointing instructions like circled item, second from top, color, story/reel/post context. Return only candidates that visually match.",
                 "customer_text": text,
                 "source": {"kind": attachment.get("kind") or "media", "url": source_url},
-                "confidence_rule": "0.75 or higher only when the exact catalog item is very likely the same product. Lower confidence if only flower type/color is similar.",
+                "confidence_rule": "0.92 or higher only when the exact catalog item is almost certainly the same product. Return no confident match when only flower type, shape, color palette or arrangement style is similar.",
                 "candidates": [{key: value for key, value in row.items() if key != "image_url"} for row in candidates],
             }, ensure_ascii=False),
         },

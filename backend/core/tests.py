@@ -6792,7 +6792,7 @@ class OperatorHandoffTests(TestCase):
         payload = {
             "source_description": "Mijoz yuborgan rasmda savatdagi mix gortenziya bor",
             "target_description": "Savatdagi gortenziya mix",
-            "matches": [{"catalog_id": item.id, "confidence": 0.91, "reason": "rang va savat shakli mos"}],
+            "matches": [{"catalog_id": item.id, "confidence": 0.95, "reason": "aniq shu katalog rasmi bilan mos"}],
             "no_match_reason": "",
         }
         with patch("core.services.OpenAI") as openai_class:
@@ -6859,6 +6859,17 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(fixed["reply"], "Katalina Savat\nNarxi 800 000 so'm\nSizga qachonga kerak edi?")
         self.assertEqual(send_mock.call_count, 1)
         self.assertEqual(tool_results[-1]["name"], "send_catalog_image")
+
+    def test_media_match_safeguard_uses_operator_flow_for_low_confidence(self):
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        customer = Customer.objects.create(instagram_user_id="ig-media-low")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]})
+        result = {"reply": "Katalina Savat\nNarxi 800 000 so'm\nSizga qachonga kerak edi?"}
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm", "is_confident": False, "confidence": "0.85"}]}}]
+        fixed = apply_media_match_safeguard(conversation, result, tool_results)
+        self.assertIn("operatorlarimiz", fixed["reply"])
+        self.assertNotIn("Katalina Savat", fixed["reply"])
 
     def test_telegram_photo_is_labelled_as_a_customer_photo(self):
         from unittest.mock import patch
