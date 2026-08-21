@@ -1177,6 +1177,27 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(conversation.ai_pause_reason, "instagram_operator_message")
         self.assertGreater(conversation.ai_paused_until, timezone.now())
 
+    def test_instagram_echo_for_backend_sent_message_is_ignored(self):
+        IntegrationSettings.objects.update_or_create(pk=1, defaults={"instagram_account_id": "ig-business", "instagram_business_id": "ig-business"})
+        customer = Customer.objects.create(instagram_user_id="ig-user-backend-echo")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="ai", text="AI javobi", instagram_message_id="mid-backend-1")
+        payload = {
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig-business"},
+                    "recipient": {"id": "ig-user-backend-echo"},
+                    "message": {"mid": "mid-backend-1", "text": "AI javobi", "is_echo": True},
+                }],
+            }],
+        }
+        jobs = resolve_instagram_event(payload)
+        self.assertEqual(jobs, [])
+        self.assertEqual(conversation.messages.count(), 1)
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.status, "ai")
+        self.assertIsNone(conversation.ai_paused_until)
+
     def test_global_ai_inactive_blocks_delayed_reply(self):
         from core.services import should_start_ai_reply
         AISettings.objects.update_or_create(pk=1, defaults={"is_active": False})
@@ -3166,6 +3187,16 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         telegram_mock.assert_called_once_with("555", "Javob")
         instagram_mock.assert_not_called()
+
+    def test_operator_send_stores_instagram_message_id(self):
+        customer = Customer.objects.create(name="Instagram", phone="+998901234567", instagram_user_id="ig-source")
+        conversation = Conversation.objects.create(customer=customer)
+        from unittest.mock import patch
+        with patch("core.views.instagram_send", return_value={"message_id": "mid-crm-send-1"}):
+            response = self.client.post(f"/api/conversations/{conversation.id}/send/", {"text": "Javob"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        message = conversation.messages.get(sender="operator", text="Javob")
+        self.assertEqual(message.instagram_message_id, "mid-crm-send-1")
 
     def test_operator_send_records_failed_delivery_when_instagram_rejects(self):
         customer = Customer.objects.create(name="Instagram", phone="+998901234567", instagram_user_id="ig-source")

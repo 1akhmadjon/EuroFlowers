@@ -48,7 +48,11 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
         reply = process_pending_customer_reply(conversation_id, expected_message_id)
         if not reply:
             return None
-        instagram_send(recipient_id, reply.text)
+        response = instagram_send(recipient_id, reply.text)
+        message_id = (response or {}).get("message_id") or (response or {}).get("mid")
+        if message_id:
+            reply.instagram_message_id = message_id
+            reply.save(update_fields=["instagram_message_id", "updated_at"])
         process_conversation_follow_up.apply_async(args=[conversation_id, reply.id], countdown=AI_FOLLOW_UP_DELAY_SECONDS)
         return reply.id
     finally:
@@ -117,5 +121,9 @@ def process_conversation_follow_up(conversation_id, expected_ai_message_id):
     if customer.instagram_user_id.startswith("telegram:"):
         telegram_send(customer.instagram_user_id.split(":", 1)[1], follow_up.text)
     elif customer.instagram_user_id:
-        instagram_send(customer.instagram_user_id, follow_up.text)
+        response = instagram_send(customer.instagram_user_id, follow_up.text)
+        message_id = (response or {}).get("message_id") or (response or {}).get("mid")
+        if message_id:
+            follow_up.instagram_message_id = message_id
+            follow_up.save(update_fields=["instagram_message_id", "updated_at"])
     return follow_up.id
