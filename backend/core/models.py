@@ -633,6 +633,11 @@ class AICatalogItem(TimeStampedModel):
     image_url = models.URLField(blank=True)
     instagram_link = models.URLField(blank=True)
     is_active = models.BooleanField(default=True)
+    # Rasmning bir marta tahlil qilingan tavsifi. Mijoz rasm yuborganda katalogning
+    # hamma rasmini qaytadan modelga bermaslik uchun shu yerda turadi.
+    visual_fingerprint = models.JSONField(default=dict, blank=True)
+    fingerprint_source_url = models.URLField(blank=True)
+    fingerprint_updated_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="ai_catalog_items")
 
     class Meta:

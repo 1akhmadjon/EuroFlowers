@@ -20,6 +20,41 @@ from .services import available_catalog_queryset, catalog_composition_summary, A
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
+from . import vision_services
+
+
+def vision_fingerprint(**overrides):
+    """Test uchun tayyor fingerprint. Model qaytaradigan shakl bilan bir xil."""
+    row = {
+        "flower_form": "peony_rose",
+        "flower_variety_guess": "",
+        "dominant_colors": ["cream", "pink"],
+        "color_pattern": "two_tone",
+        "container": "basket",
+        "wrap_colors": [],
+        "size": "large",
+        "count_bucket": "50_to_100",
+        "distinctive_features": [],
+        "summary": "savatdagi kompozitsiya",
+    }
+    row.update(overrides)
+    return row
+
+
+def catalog_fingerprint_fields(image_url, **overrides):
+    """AICatalogItem.objects.create ga qo'shiladigan tayyor fingerprint maydonlari."""
+    return {
+        "visual_fingerprint": vision_services.clean_fingerprint(vision_fingerprint(**overrides)),
+        "fingerprint_source_url": image_url,
+        "fingerprint_updated_at": timezone.now(),
+    }
+
+
+def media_conversation(external_id, image_url="https://cdn.example.com/customer.jpg"):
+    customer = Customer.objects.create(instagram_user_id=external_id)
+    conversation = Conversation.objects.create(customer=customer)
+    conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": image_url}]})
+    return conversation
 
 
 class BusinessRulesTests(TestCase):
@@ -6787,40 +6822,8 @@ class OperatorHandoffTests(TestCase):
         conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertFalse(result["ok"])
+        self.assertFalse(result["allow_send"])
         self.assertEqual(result["detail"], "no_customer_media")
-
-    @override_settings(OPENAI_API_KEY="test-key", OPENAI_VISION_MODEL="vision-test", OPENAI_IMAGE_QUALITY="low")
-    def test_media_match_compares_customer_image_with_ai_catalog(self):
-        from unittest.mock import patch
-        item = AICatalogItem.objects.create(name="Gortenziya Mix Savat", arrangement_type="basket", price=900000, quantity=1, image_url="https://cdn.example.com/catalog.jpg", note="Katta savat")
-        customer = Customer.objects.create(instagram_user_id="ig-media-match")
-        conversation = Conversation.objects.create(customer=customer)
-        conversation.messages.create(
-            sender="customer",
-            text="shu nechpul\nMijoz yuborgan rasm: https://cdn.example.com/customer.jpg",
-            metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]},
-        )
-        payload = {
-            "source_description": "Mijoz yuborgan rasmda savatdagi mix gortenziya bor",
-            "target_description": "Savatdagi gortenziya mix",
-            "matches": [{"catalog_id": item.id, "confidence": 0.97, "exact_product_match": True, "flower_type_match": True, "color_match": True, "arrangement_match": True, "reason": "aniq shu katalog rasmi bilan mos", "major_differences": ""}],
-            "no_match_reason": "",
-        }
-        with patch("core.services.OpenAI") as openai_class:
-            client = openai_class.return_value
-            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload))
-            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "tepadan 2chisi nechpul"}, conversation)
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["matches"][0]["catalog_id"], item.id)
-        self.assertTrue(result["matches"][0]["is_confident"])
-        kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual(kwargs["model"], "vision-test")
-        content = kwargs["input"][0]["content"]
-        self.assertEqual(content[1]["image_url"], "https://cdn.example.com/customer.jpg")
-        self.assertEqual(content[1]["detail"], "low")
-        self.assertIn("tepadan 2chisi", content[0]["text"])
-        stored = conversation.messages.filter(sender="system").order_by("-id").first().metadata
-        self.assertIn("ai_catalog_media_match", stored)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_media_match_uses_ai_catalog_instagram_link_without_vision(self):
@@ -6833,11 +6836,11 @@ class OperatorHandoffTests(TestCase):
             text="shu nechpul\nReel link: https://www.instagram.com/reel/ABC123/?igsh=test",
             metadata={"attachments": [{"kind": "reel", "url": "https://www.instagram.com/reel/ABC123/?igsh=test"}]},
         )
-        with patch("core.services.OpenAI") as openai_class:
+        with patch("core.vision_services.OpenAI") as openai_class:
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertTrue(result["ok"])
+        self.assertTrue(result["allow_send"])
         self.assertEqual(result["matches"][0]["catalog_id"], item.id)
-        self.assertEqual(result["matches"][0]["confidence"], "1")
         openai_class.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -6851,36 +6854,203 @@ class OperatorHandoffTests(TestCase):
             text="shu nechpul\nReel link: https://www.instagram.com/reel/XYZ999/",
             metadata={"attachments": [{"kind": "reel", "url": "https://www.instagram.com/reel/XYZ999/"}]},
         )
-        with patch("core.services.OpenAI") as openai_class:
+        with patch("core.vision_services.OpenAI") as openai_class:
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertFalse(result["ok"])
+        self.assertFalse(result["allow_send"])
         self.assertEqual(result["detail"], "media_url_not_image")
         openai_class.assert_not_called()
 
-    def test_media_match_safeguard_replaces_generic_reply_and_sends_image(self):
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_VISION_MODEL="vision-test")
+    def test_media_match_analyses_one_image_then_verifies_the_shortlist(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(
+            name="Katalina Gulidan Savat Kompazitsia",
+            arrangement_type="basket",
+            price=800000,
+            quantity=1,
+            image_url="https://cdn.example.com/katalina.jpg",
+            note="pionavidniy katalina",
+            **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["pink", "cream"], container="basket"),
+        )
+        conversation = media_conversation("ig-two-stage")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "cream"], container="basket", region_requested=True, region_description="tepadan ikkinchisi"))),
+                SimpleNamespace(output_text=json.dumps({
+                    "source_summary": "savatdagi pushti-krem pionavidniy atirgullar",
+                    "candidates": [{"catalog_id": item.id, "verdict": "same_product", "flower_form_match": True, "color_match": True, "container_match": True, "differences": ""}],
+                    "best_catalog_id": item.id,
+                })),
+            ]
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "tepadan 2chisi nechpul"}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [item.id])
+        self.assertEqual(result["matches"][0]["price_text"], "800 000 so'm")
+        self.assertTrue(result["region_requested"])
+        self.assertEqual(client.responses.create.call_count, 2)
+        source_call = client.responses.create.call_args_list[0].kwargs
+        self.assertEqual(source_call["model"], "vision-test")
+        source_content = source_call["input"][0]["content"]
+        # Bitta rasm — mijozniki. Katalog rasmlari bu bosqichda umuman yuborilmaydi.
+        self.assertEqual([part["type"] for part in source_content], ["input_text", "input_image"])
+        self.assertEqual(source_content[1]["image_url"], "https://cdn.example.com/customer.jpg")
+        self.assertEqual(source_content[1]["detail"], "high")
+        self.assertIn("tepadan 2chisi", source_content[0]["text"])
+        verify_content = client.responses.create.call_args_list[1].kwargs["input"][0]["content"]
+        image_urls = [part["image_url"] for part in verify_content if part["type"] == "input_image"]
+        self.assertEqual(image_urls, ["https://cdn.example.com/customer.jpg", "https://cdn.example.com/katalina.jpg"])
+        self.assertIn(f"catalog_id={item.id}", "".join(part.get("text", "") for part in verify_content))
+        stored = conversation.messages.filter(sender="system").order_by("-id").first().metadata
+        self.assertIn("ai_catalog_media_match", stored)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_media_match_refuses_when_the_flowers_only_look_similar(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(
+            name="Katalina Gulidan Savat Kompazitsia",
+            arrangement_type="basket",
+            price=800000,
+            quantity=1,
+            image_url="https://cdn.example.com/katalina.jpg",
+            **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"),
+        )
+        conversation = media_conversation("ig-similar-only")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"))),
+                SimpleNamespace(output_text=json.dumps({
+                    "source_summary": "krem-pushti atirgul savati",
+                    "candidates": [{"catalog_id": item.id, "verdict": "similar_only", "flower_form_match": True, "color_match": False, "container_match": True, "differences": "katalogda sariq, mijozda krem-pushti"}],
+                    "best_catalog_id": 0,
+                })),
+            ]
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["allow_send"])
+        self.assertEqual(result["detail"], "not_confident")
+        self.assertEqual(result["matches"], [])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
+        self.assertIn("YUBORMA", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_media_match_refuses_same_product_when_a_check_failed(self):
+        """Model 'same_product' desa ham rang mos kelmasa backend rad etadi."""
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(
+            name="London Gulidan Kompazitsia Savat",
+            arrangement_type="basket",
+            price=1000000,
+            quantity=1,
+            image_url="https://cdn.example.com/london.jpg",
+            **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"),
+        )
+        conversation = media_conversation("ig-model-overconfident")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"))),
+                SimpleNamespace(output_text=json.dumps({
+                    "source_summary": "savat",
+                    "candidates": [{"catalog_id": item.id, "verdict": "same_product", "flower_form_match": True, "color_match": False, "container_match": True, "differences": "rangi boshqa"}],
+                    "best_catalog_id": item.id,
+                })),
+            ]
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_media_match_sends_nothing_when_two_items_look_like_the_same_product(self):
+        from unittest.mock import patch
+        first = AICatalogItem.objects.create(name="Savat Bir", arrangement_type="basket", price=900000, quantity=1, image_url="https://cdn.example.com/one.jpg", **catalog_fingerprint_fields("https://cdn.example.com/one.jpg", flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"))
+        second = AICatalogItem.objects.create(name="Savat Ikki", arrangement_type="basket", price=950000, quantity=1, image_url="https://cdn.example.com/two.jpg", **catalog_fingerprint_fields("https://cdn.example.com/two.jpg", flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"))
+        conversation = media_conversation("ig-two-confident")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"))),
+                SimpleNamespace(output_text=json.dumps({
+                    "source_summary": "savat",
+                    "candidates": [
+                        {"catalog_id": first.id, "verdict": "same_product", "flower_form_match": True, "color_match": True, "container_match": True, "differences": ""},
+                        {"catalog_id": second.id, "verdict": "same_product", "flower_form_match": True, "color_match": True, "container_match": True, "differences": ""},
+                    ],
+                    "best_catalog_id": first.id,
+                })),
+            ]
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        # best_catalog_id faqat bittasi, ikkinchisi baribir near_matches ga tushadi.
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [first.id])
+        self.assertTrue(result["allow_send"])
+
+    def test_send_catalog_image_is_blocked_after_a_failed_media_match(self):
+        """Production xatosi: mos kelmagan bo'lsa ham ikkita katalog rasmi yuborilgan edi."""
         from unittest.mock import patch
         item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
-        customer = Customer.objects.create(instagram_user_id="ig-media-safe")
-        conversation = Conversation.objects.create(customer=customer)
-        conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]})
-        result = {"reply": "Assalomu alaykum, sizga qanday gul kerak?"}
-        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm", "is_confident": True}]}}]
+        conversation = media_conversation("ig-blocked-image")
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": False, "allow_send": False, "matches": [], "near_matches": [{"catalog_id": item.id}]}}]
+        with patch("core.services.send_image_to_customer") as send_mock:
+            result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation, tool_results=tool_results)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "media_match_not_confident")
+        send_mock.assert_not_called()
+
+    def test_send_catalog_album_is_blocked_for_the_failed_candidates(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        conversation = media_conversation("ig-blocked-album")
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": False, "allow_send": False, "matches": [], "near_matches": [{"catalog_id": item.id}]}}]
+        with patch("core.services.send_catalog_album") as album_mock:
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": [item.id]}, conversation, tool_results=tool_results)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "media_match_not_confident")
+        album_mock.assert_not_called()
+
+    def test_whole_catalog_album_still_works_after_a_failed_media_match(self):
+        """Mijoz "boshqa nima bor" desa katalogni ko'rsatish taqiqlanmaydi."""
+        from unittest.mock import patch
+        matched = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        other = AICatalogItem.objects.create(name="London Buket", arrangement_type="bouquet", price=400000, quantity=1, image_url="https://cdn.example.com/london.jpg")
+        conversation = media_conversation("ig-album-allowed")
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": False, "allow_send": False, "matches": [], "near_matches": [{"catalog_id": matched.id}]}}]
+        with patch("core.services.send_catalog_album", return_value={"ok": True, "items": []}) as album_mock:
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": [other.id]}, conversation, tool_results=tool_results)
+        self.assertTrue(result["ok"])
+        album_mock.assert_called_once()
+
+    def test_catalog_image_is_allowed_when_no_media_match_ran(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        conversation = media_conversation("ig-no-match-tool")
+        with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {})):
+            result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation, tool_results=[])
+        self.assertTrue(result["ok"])
+
+    def test_media_match_safeguard_sends_the_image_without_rewriting_the_reply(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        conversation = media_conversation("ig-media-safe")
+        result = {"reply": "Katalina Savat, narxi 800 000 so'm. Qachonga kerak edi?"}
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "allow_send": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm"}]}}]
         with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {"mocked": True})) as send_mock:
             fixed = apply_media_match_safeguard(conversation, result, tool_results)
-        self.assertEqual(fixed["reply"], "Katalina Savat\nNarxi 800 000 so'm\nSizga qachonga kerak edi?")
+        self.assertEqual(fixed["reply"], "Katalina Savat, narxi 800 000 so'm. Qachonga kerak edi?")
         self.assertEqual(send_mock.call_count, 1)
         self.assertEqual(tool_results[-1]["name"], "send_catalog_image")
 
-    def test_media_match_safeguard_uses_operator_flow_for_low_confidence(self):
+    def test_media_match_safeguard_leaves_a_failed_match_alone(self):
         item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
-        customer = Customer.objects.create(instagram_user_id="ig-media-low")
-        conversation = Conversation.objects.create(customer=customer)
-        conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]})
-        result = {"reply": "Katalina Savat\nNarxi 800 000 so'm\nSizga qachonga kerak edi?"}
-        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm", "is_confident": False, "confidence": "0.85", "exact_product_match": False}]}}]
+        conversation = media_conversation("ig-media-low")
+        result = {"reply": "Telefon raqamingizni yozib yuboraolasizmi?"}
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": False, "allow_send": False, "matches": [], "near_matches": [{"catalog_id": item.id}]}}]
         fixed = apply_media_match_safeguard(conversation, result, tool_results)
-        self.assertIn("operatorlarimiz", fixed["reply"])
-        self.assertNotIn("Katalina Savat", fixed["reply"])
+        self.assertEqual(fixed["reply"], "Telefon raqamingizni yozib yuboraolasizmi?")
+        self.assertEqual(len(tool_results), 1)
+
 
     def test_telegram_photo_is_labelled_as_a_customer_photo(self):
         from unittest.mock import patch
@@ -6969,3 +7139,67 @@ class NoStockPromptTests(TestCase):
         """flowers_text ga butun jumla emas, faqat gul nomi tushsin."""
         self.assertIn("Butun jumlani yoki so'rovni bu yerga ko'chirma", self.prompt)
         self.assertIn('flowers_text ga "Jumila pushti atirgul", size_text ga "51 dona, katta"', self.prompt)
+
+
+class VisionFingerprintTests(TestCase):
+    def test_score_prefers_the_same_flower_over_a_similar_basket(self):
+        """Production xatosi: krem-pushti atirgul savati sariq savat bilan mos deb topilgan."""
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], color_pattern="two_tone", container="basket", size="extra_large", count_bucket="over_100")
+        right = vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], color_pattern="two_tone", container="basket", size="extra_large", count_bucket="over_100")
+        wrong = vision_fingerprint(flower_form="peony_rose", dominant_colors=["yellow"], color_pattern="solid", container="basket", size="extra_large", count_bucket="over_100")
+        right_score = vision_services.fingerprint_score(source, right)
+        wrong_score = vision_services.fingerprint_score(source, wrong)
+        self.assertGreater(right_score, wrong_score)
+        self.assertGreaterEqual(right_score, vision_services.min_match_score())
+        self.assertLess(wrong_score, vision_services.min_match_score())
+
+    def test_score_separates_a_basket_from_a_bouquet(self):
+        source = vision_fingerprint(container="basket")
+        bouquet = vision_fingerprint(container="wrapped_bouquet")
+        self.assertLess(vision_services.fingerprint_score(source, bouquet), vision_services.fingerprint_score(source, vision_fingerprint(container="basket")))
+
+    def test_near_colours_score_higher_than_opposite_colours(self):
+        source = vision_fingerprint(dominant_colors=["cream"])
+        near = vision_services.fingerprint_score(source, vision_fingerprint(dominant_colors=["white"]))
+        far = vision_services.fingerprint_score(source, vision_fingerprint(dominant_colors=["burgundy"]))
+        self.assertGreater(near, far)
+
+    def test_model_answers_outside_the_allowed_values_are_dropped(self):
+        cleaned = vision_services.clean_fingerprint({
+            "flower_form": "beautiful pink roses",
+            "dominant_colors": ["magenta", "pink", "pink", "white"],
+            "container": "Basket",
+            "size": "huge",
+            "count_bucket": "over_100",
+            "summary": "x",
+        })
+        self.assertEqual(cleaned["flower_form"], "")
+        self.assertEqual(cleaned["dominant_colors"], ["pink", "white"])
+        self.assertEqual(cleaned["container"], "basket")
+        self.assertEqual(cleaned["size"], "")
+        self.assertEqual(cleaned["count_bucket"], "over_100")
+
+    def test_fingerprint_is_rebuilt_only_when_the_image_changes(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/a.jpg")
+        with patch("core.vision_services.build_catalog_fingerprint", return_value=vision_services.clean_fingerprint(vision_fingerprint())) as build:
+            vision_services.ensure_catalog_fingerprint(item)
+            vision_services.ensure_catalog_fingerprint(item)
+        self.assertEqual(build.call_count, 1)
+        item.refresh_from_db()
+        self.assertEqual(item.fingerprint_source_url, "https://cdn.example.com/a.jpg")
+        self.assertIsNotNone(item.fingerprint_updated_at)
+        item.image_url = "https://cdn.example.com/b.jpg"
+        item.save(update_fields=["image_url"])
+        self.assertTrue(vision_services.fingerprint_is_stale(item))
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_catalog_fingerprint_gets_the_name_and_note_as_context(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Katalina Gulidan Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/k.jpg", note="pionavidniy katalina ranglari tiniq sariq")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            openai_class.return_value.responses.create.return_value = SimpleNamespace(output_text=json.dumps(vision_fingerprint()))
+            vision_services.build_catalog_fingerprint(item)
+        text = openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"][0]["text"]
+        self.assertIn("Katalina Gulidan Savat", text)
+        self.assertIn("pionavidniy katalina", text)

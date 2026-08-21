@@ -6,6 +6,8 @@ from .platform_services import instagram_send, instagram_sender_action, send_due
 from .services import AI_FOLLOW_UP_DELAY_SECONDS, INSTAGRAM_AI_REPLY_WAIT_SECONDS, ai_reply_wait_seconds_remaining, process_pending_customer_reply, process_stalled_conversation_follow_up, should_start_ai_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import send_backup_to_telegram
+from .models import AICatalogItem
+from .vision_services import ensure_catalog_fingerprint, refresh_stale_fingerprints
 
 
 
@@ -129,3 +131,25 @@ def process_conversation_follow_up(conversation_id, expected_ai_message_id):
             follow_up.instagram_message_id = message_id
             follow_up.save(update_fields=["instagram_message_id", "updated_at"])
     return follow_up.id
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def build_ai_catalog_fingerprint(catalog_item_id):
+    """Bitta katalog rasmi tahlil qilinib bazaga yoziladi.
+
+    Admin katalog qo'shganda yoki rasmini almashtirganda chaqiriladi. Shu ish bir marta
+    qilingani uchun mijoz rasm yuborganda katalogning hamma rasmini qayta tahlil qilish
+    kerak bo'lmaydi.
+    """
+    item = AICatalogItem.objects.filter(id=catalog_item_id).first()
+    if not item:
+        return {"ok": False, "detail": "not_found"}
+    fingerprint = ensure_catalog_fingerprint(item)
+    return {"ok": bool(fingerprint), "catalog_id": catalog_item_id}
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def refresh_ai_catalog_fingerprints(limit=50):
+    """Fingerprinti yo'q yoki eskirgan katalog mahsulotlarini yangilaydi."""
+    updated = refresh_stale_fingerprints(AICatalogItem.objects.filter(is_active=True), limit=limit)
+    return {"ok": True, "updated": updated}
