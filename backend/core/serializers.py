@@ -1,4 +1,5 @@
 from decimal import Decimal, ROUND_HALF_UP
+import re
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
 from django.db import transaction
@@ -1265,6 +1266,18 @@ class AICatalogItemSerializer(serializers.ModelSerializer):
         model = AICatalogItem
         fields = "__all__"
         read_only_fields = ["created_by", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        value = re.sub(r"\s+", " ", (value or "").strip())
+        if not value:
+            raise serializers.ValidationError("Nomini kiriting")
+        parts = []
+        for word in value.split(" "):
+            if word.isupper() and len(word) > 1:
+                parts.append(word)
+            else:
+                parts.append(re.sub(r"(^|[-'‘’`])([a-zа-яё])", lambda match: match.group(1) + match.group(2).upper(), word.lower()))
+        return " ".join(parts)
 
 
 def catalog_stock_error(batch, needed, florist=None):
