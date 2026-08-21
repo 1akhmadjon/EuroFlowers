@@ -2,6 +2,7 @@ import json
 import re
 from datetime import timedelta
 
+import requests
 from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
@@ -37,6 +38,35 @@ def urls_from_value(value):
         for child in value:
             urls.extend(urls_from_value(child))
     return urls
+
+
+def instagram_customer_profile(external_customer_id):
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    access_token = integration.instagram_access_token or settings.INSTAGRAM_ACCESS_TOKEN
+    if not access_token or not external_customer_id:
+        return {}
+    try:
+        response = requests.get(
+            f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{external_customer_id}",
+            params={"access_token": access_token, "fields": "username"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        print(f"INSTAGRAM_CUSTOMER_PROFILE_FAILED user_id={external_customer_id} error={exc}", flush=True)
+        return {}
+    return {"instagram_username": (data.get("username") or "").strip().lstrip("@")}
+
+
+def update_customer_instagram_profile(customer, external_customer_id):
+    if customer.instagram_username:
+        return
+    profile = instagram_customer_profile(external_customer_id)
+    username = profile.get("instagram_username") or ""
+    if username:
+        customer.instagram_username = username[:120]
+        customer.save(update_fields=["instagram_username", "updated_at"])
 
 
 def attachment_kind(source, attachment_type, url):
@@ -476,6 +506,7 @@ def resolve_instagram_event(payload):
                 conversation.ai_pause_reason = "instagram_operator_message"
                 conversation.save(update_fields=["last_message_at", "status", "ai_paused_until", "ai_pause_reason", "updated_at"])
                 continue
+            update_customer_instagram_profile(customer, external_customer_id)
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
             if saved_message:
                 results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": external_customer_id})

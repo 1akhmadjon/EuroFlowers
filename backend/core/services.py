@@ -49,6 +49,17 @@ def ai_globally_active():
     return AISettings.objects.get_or_create(pk=1)[0].is_active
 
 
+def ai_allowed_for_conversation(conversation):
+    if ai_globally_active():
+        return True
+    customer = conversation.customer
+    username = (customer.instagram_username or "").lower().lstrip("@")
+    if username and username in settings.AI_TEST_INSTAGRAM_USERNAMES:
+        return True
+    external_id = str(customer.instagram_user_id or "")
+    return bool(external_id and external_id in settings.AI_TEST_INSTAGRAM_USER_IDS)
+
+
 def parse_lead_date(value):
     text = (value or "").strip()
     if not text:
@@ -2022,7 +2033,7 @@ def money_uz(value):
 
 
 def create_ai_reply_for_conversation(conversation):
-    if not ai_globally_active():
+    if not ai_allowed_for_conversation(conversation):
         return None
     if conversation.status == "closed":
         return None
@@ -2066,10 +2077,10 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
 
 
 def should_start_ai_reply(conversation_id, expected_message_id):
-    if not ai_globally_active():
-        return False
     conversation = Conversation.objects.filter(id=conversation_id).first()
     if not conversation:
+        return False
+    if not ai_allowed_for_conversation(conversation):
         return False
     if conversation.status == "closed":
         return False

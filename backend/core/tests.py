@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from .models import AICatalogItem, AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
-from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, apply_media_match_safeguard, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, recent_customer_orders, send_stock_batch_image, stock_batch_ai_row
+from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_allowed_for_conversation, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, apply_media_match_safeguard, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, recent_customer_orders, send_stock_batch_image, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -30,6 +30,26 @@ class BusinessRulesTests(TestCase):
         self.batch = StockBatch.objects.create(variant=variant, batch_number="T-1", height_cm=60, stems_per_bunch=20, received_stems=100, remaining_stems=100, cost_per_stem=20000, sale_price_per_stem=30000, sale_price_per_bunch=580000)
         self.item = CatalogItem.objects.create(name_uz="Oq buket", arrangement_type="bouquet", price=500000)
         CatalogComposition.objects.create(catalog_item=self.item, stock_batch=self.batch, quantity_stems=15)
+
+    @override_settings(AI_TEST_INSTAGRAM_USERNAMES=["extra_teest"], AI_TEST_INSTAGRAM_USER_IDS=[])
+    def test_global_ai_off_allows_only_configured_test_instagram_user(self):
+        AISettings.objects.update_or_create(pk=1, defaults={"is_active": False})
+        test_customer = Customer.objects.create(instagram_user_id="ig-extra", instagram_username="extra_teest")
+        regular_customer = Customer.objects.create(instagram_user_id="ig-real", instagram_username="real_user")
+        self.assertTrue(ai_allowed_for_conversation(Conversation.objects.create(customer=test_customer)))
+        self.assertFalse(ai_allowed_for_conversation(Conversation.objects.create(customer=regular_customer)))
+
+    def test_instagram_webhook_saves_username_without_display_name(self):
+        from unittest.mock import patch
+
+        IntegrationSettings.objects.update_or_create(pk=1, defaults={"instagram_access_token": "token", "instagram_account_id": "biz-account"})
+        response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"username": "@extra_teest"})
+        payload = {"entry": [{"messaging": [{"sender": {"id": "ig-extra-id"}, "recipient": {"id": "biz-account"}, "message": {"mid": "mid-profile-1", "text": "salom"}}]}]}
+        with patch("core.webhook_services.requests.get", return_value=response):
+            resolve_instagram_event(payload)
+        customer = Customer.objects.get(instagram_user_id="ig-extra-id")
+        self.assertEqual(customer.instagram_username, "extra_teest")
+        self.assertEqual(str(customer), "extra_teest")
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_context_exposes_already_known_lead_fields(self):
