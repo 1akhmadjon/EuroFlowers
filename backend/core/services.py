@@ -391,8 +391,9 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
             "type": row.arrangement_type,
             "quantity": row.quantity,
             "volume": row.volume,
-            "description_uz": row.note,
-            "description_ru": "",
+            # Operator izohi. Mahsulot tafsiloti ham, kelishilgan narx ham shu yerda
+            # bo'ladi — AI o'zi o'qib, qaysi biri mijozga aytilishini hal qiladi.
+            "note_uz": row.note,
             "price": str(row.price),
             "has_image": bool(row.image_url),
             "image_url": row.image_url,
@@ -541,8 +542,7 @@ def ai_post_context(conversation):
         "catalog": [{
             "name_uz": row.name,
             "type": row.arrangement_type,
-            "description_uz": row.note,
-            "description_ru": "",
+            "note_uz": row.note,
             "height_cm": None,
             "diameter_cm": None,
             "quantity": row.quantity,
@@ -985,7 +985,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish.",
+            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1015,7 +1015,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "send_catalog_album",
-            "description": "AI katalogni mijozga rasm albomi qilib yuborish. Mijoz katalogni, vitrinani, tayyor buketlarni yoki nima borligini so'rasa shu tool chaqiriladi va katalog matn ro'yxati qilib yozilmaydi. catalog_ids bo'sh bo'lsa AI katalogdagi faol mahsulotlar yuboriladi. Rasmlar bitta xabarda albom bo'lib boradi, har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz ko'rgan raqam bilan bir xil, mijoz keyin birinchisi, 2-chisi desa o'sha position dagi catalog_id olinadi.",
+            "description": "AI katalogni mijozga rasm albomi qilib yuborish. Mijoz katalogni, vitrinani, tayyor buketlarni yoki nima borligini so'rasa shu tool chaqiriladi va katalog matn ro'yxati qilib yozilmaydi. catalog_ids bo'sh bo'lsa AI katalogdagi faol mahsulotlar yuboriladi. Rasmlar bitta xabarda albom bo'lib boradi, har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz ko'rgan raqam bilan bir xil, mijoz keyin birinchisi, 2-chisi desa o'sha position dagi catalog_id olinadi. Har qatorda note_uz — o'sha mahsulotning operator izohi ham keladi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1056,7 +1056,7 @@ def send_catalog_item_image(conversation, item):
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item_name, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
     if not delivered:
         return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item_name}
-    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "image_url": image_url}
+    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "note_uz": getattr(item, "note", ""), "image_url": image_url}
 
 
 CATALOG_ALBUM_MAX_PER_MESSAGE = 10
@@ -1153,6 +1153,9 @@ def catalog_album_row(row, delivered, detail):
         "name": item.name,
         "price": str(item.price),
         "type": item.arrangement_type,
+        # Albom ketgach mijoz raqam bilan tanlaydi va shu mahsulot haqida so'raydi.
+        # Izoh shu yerda tursa AI get_catalog ni qaytadan chaqirmasdan javob bera oladi.
+        "note_uz": getattr(item, "note", ""),
         "image_url": row["image_url"],
         "delivered": delivered,
         "detail": detail,

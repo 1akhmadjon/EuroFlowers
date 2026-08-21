@@ -205,6 +205,32 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["image_sent"])
 
+    def test_catalog_image_result_carries_operator_note(self):
+        """Bitta mahsulot rasmi ketgach AI izohdan javob bera olsin."""
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Izohli buket", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://example.com/note.jpg", note="100 ta guldan yasalgan, bo'yi 60 sm\n\nnarxi:1000000 kelishtirilgan narxi 800000")
+        customer = Customer.objects.create(instagram_user_id="telegram:5010")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_image", return_value={"ok": True}):
+            result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["note_uz"], item.note)
+
+    def test_catalog_album_items_carry_operator_note(self):
+        """Albomdan keyin mijoz raqam bilan tanlaydi — izoh o'sha natijada turishi kerak."""
+        from unittest.mock import patch
+        self.item.status = "archived"
+        self.item.save(update_fields=["status", "updated_at"])
+        items = self.make_album_catalog(1)
+        items[0].note = "50 ta guli bor, bo'yi 45 sm\n\nnarxi:100000 kelishtirilgan narxi 80000"
+        items[0].save(update_fields=["note", "updated_at"])
+        customer = Customer.objects.create(instagram_user_id="telegram:5011")
+        conversation = Conversation.objects.create(customer=customer)
+        with patch("core.services.telegram_send_image", return_value={"ok": True}):
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"][0]["note_uz"], items[0].note)
+
     def make_album_catalog(self, count):
         items = []
         for index in range(count):
@@ -440,6 +466,16 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(rows[0]["name_uz"], item.name)
         self.assertEqual(rows[0]["quantity"], 2)
         self.assertEqual(rows[0]["volume"], "M")
+
+    def test_ai_catalog_rows_carry_operator_note(self):
+        """Izoh AI ga note_uz bo'lib boradi. Ichida mahsulot tafsiloti ham, kelishilgan narx ham bo'ladi."""
+        item = AICatalogItem.objects.create(name="Izohli kompozitsiya", arrangement_type="bouquet", price=1000000, quantity=1, note="100 ta guldan yasalgan, bo'yi 60 sm\n\nnarxi:1000000 kelishtirilgan narxi 800000")
+        row = [candidate for candidate in ai_catalog_rows(" ", limit=20) if candidate["catalog_id"] == item.id][0]
+        self.assertEqual(row["note_uz"], item.note)
+        self.assertEqual(row["price"], "1000000.00")
+        # Izoh mijozga tayyor matn emas, shuning uchun description nomi bilan berilmaydi.
+        self.assertNotIn("description_uz", row)
+        self.assertNotIn("description_ru", row)
 
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")
