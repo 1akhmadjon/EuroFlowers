@@ -1149,33 +1149,38 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     except (TypeError, ValueError):
         best_id = 0
 
-    matches = []
+    passed = []
     near_matches = []
     for row in shortlist:
         item = row["item"]
         judgement = verdicts.get(item.id) or {}
         verdict = judgement.get("verdict") or "different"
         # Yakuniy shart backendda: model "same_product" desa ham gul shakli, rangi va
-        # idishi mos kelmasa va fingerprint bali past bo'lsa, mos deb hisoblanmaydi.
-        confident = (
+        # idishi mos kelmasa yoki fingerprint bali chegaradan past bo'lsa o'tmaydi.
+        # Model ba'zan bir xil izohni ikkita nomzodga ko'chirib qo'yadi, ball esa
+        # buni ushlab qoladi.
+        ok = (
             verdict == "same_product"
-            and item.id == best_id
             and bool(judgement.get("flower_form_match"))
             and bool(judgement.get("color_match"))
             and bool(judgement.get("container_match"))
             and row["score"] >= vision_services.min_match_score()
         )
         catalog_row = catalog_match_row(item, score=row["score"], fingerprint=row["fingerprint"], verdict=verdict, differences=judgement.get("differences") or "")
-        if confident:
-            matches.append(catalog_row)
+        if ok:
+            passed.append(catalog_row)
         elif verdict in {"same_product", "similar_only"}:
             near_matches.append(catalog_row)
 
-    # Ikkita mahsulot bir vaqtda "aynan shu" bo'lolmaydi. Bunday holatda hech biri
-    # yuborilmaydi — noto'g'ri gul yuborgandan ko'ra so'rab aniqlagan yaxshi.
-    if len(matches) > 1:
-        near_matches = matches + near_matches
-        matches = []
+    # Bitta mahsulot o'tsa — o'sha. Bir nechtasi o'tsa modelning tanlovi hal qiladi;
+    # u ham tanlamagan bo'lsa hech biri yuborilmaydi. Noto'g'ri gul yuborgandan ko'ra
+    # so'rab aniqlagan yaxshi.
+    if len(passed) == 1:
+        matches = passed
+    else:
+        chosen = [row for row in passed if row["catalog_id"] == best_id]
+        matches = chosen if len(chosen) == 1 else []
+        near_matches = [row for row in passed if row not in matches] + near_matches
     payload = {
         "ok": bool(matches),
         "allow_send": bool(matches),

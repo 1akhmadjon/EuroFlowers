@@ -49,8 +49,9 @@ COLOR_NEIGHBOURS = {
     # Krem bilan sariq gulda ayri tushuncha: "tiniq sariq" katalog "krem-pushti" emas.
     "cream": {"white", "peach"},
     "pink": {"hot_pink", "peach"},
-    "hot_pink": {"pink", "purple", "red"},
-    "red": {"burgundy", "hot_pink"},
+    # Qizil atirgul bilan pushti Alfalob do'konda ayri mahsulot, qo'shni deb hisoblanmaydi.
+    "hot_pink": {"pink", "purple"},
+    "red": {"burgundy"},
     "burgundy": {"red", "purple"},
     "peach": {"cream", "pink", "orange"},
     "orange": {"peach", "yellow"},
@@ -63,13 +64,32 @@ CONTAINERS = [
     "basket", "hat_box", "box", "wrapped_bouquet", "unwrapped_bouquet", "vase",
     "single_stems", "other",
 ]
-# Savat bilan buketni chalkashtirib bo'lmaydi, lekin o'ralgan va o'ralmagan buket yaqin.
-CONTAINER_NEIGHBOURS = {
-    "wrapped_bouquet": {"unwrapped_bouquet"},
-    "unwrapped_bouquet": {"wrapped_bouquet"},
-    "hat_box": {"box"},
-    "box": {"hat_box"},
+# Model bitta rasmni bir safar "hat_box", boshqa safar "wrapped_bouquet" deb ataydi —
+# o'ralgan buket bilan qutini rasmdan ajratish chindan ham noaniq. Shuning uchun ball
+# aniq idish emas, idish oilasi bo'yicha beriladi. Savat esa alohida oila.
+CONTAINER_FAMILIES = {
+    "basket": "basket",
+    "hat_box": "box",
+    "box": "box",
+    "wrapped_bouquet": "bouquet",
+    "unwrapped_bouquet": "bouquet",
+    "vase": "vase",
+    "single_stems": "stems",
 }
+# Katalog tomonida idishni taxmin qilish shart emas: operator uni bazaga o'zi yozgan.
+ARRANGEMENT_FAMILIES = {"bouquet": "bouquet", "basket": "basket", "box": "box"}
+CONTAINER_FAMILY_NEIGHBOURS = {
+    "bouquet": {"box"},
+    "box": {"bouquet"},
+}
+
+
+def container_family(fingerprint, arrangement_type=""):
+    """Mahsulot qaysi oilaga kiradi. Katalogda operator yozgani ustun turadi."""
+    family = ARRANGEMENT_FAMILIES.get((arrangement_type or "").lower(), "")
+    if family:
+        return family
+    return CONTAINER_FAMILIES.get((fingerprint or {}).get("container") or "", "")
 
 COLOR_PATTERNS = ["solid", "two_tone", "multi_color", "gradient"]
 SIZES = ["small", "medium", "large", "extra_large"]
@@ -96,7 +116,7 @@ def vision_reasoning():
 
 
 def shortlist_size():
-    return max(2, min(int(getattr(settings, "AI_CATALOG_MATCH_SHORTLIST", 4) or 4), 6))
+    return max(2, min(int(getattr(settings, "AI_CATALOG_MATCH_SHORTLIST", 5) or 5), 8))
 
 
 def min_match_score():
@@ -222,7 +242,7 @@ def variety_bonus(source, item_text):
 DIFFERENT_COLOUR_CEILING = 45
 
 
-def fingerprint_score(source, target, item_text=""):
+def fingerprint_score(source, target, item_text="", target_arrangement_type=""):
     """0-100 oralig'idagi ball. Bu qisqa ro'yxat uchun tartiblash, yakuniy qaror emas."""
     if not source or not target:
         return 0
@@ -237,11 +257,11 @@ def fingerprint_score(source, target, item_text=""):
     score += 35 * colours
     if source.get("color_pattern") and source.get("color_pattern") == target.get("color_pattern"):
         score += 8
-    source_container = source.get("container")
-    target_container = target.get("container")
-    if source_container and source_container == target_container:
+    source_family = container_family(source)
+    target_family = container_family(target, target_arrangement_type)
+    if source_family and source_family == target_family:
         score += 17
-    elif source_container and target_container in CONTAINER_NEIGHBOURS.get(source_container, set()):
+    elif source_family and target_family in CONTAINER_FAMILY_NEIGHBOURS.get(source_family, set()):
         score += 7
     size_gap = ordered_gap(SIZES, source.get("size"), target.get("size"))
     if size_gap == 0:
@@ -402,7 +422,7 @@ def shortlist_candidates(source, items, api_key="", lazy_limit=6):
             lazily_built += 1
         if not fingerprint:
             continue
-        score = fingerprint_score(source, fingerprint, catalog_item_context(item))
+        score = fingerprint_score(source, fingerprint, catalog_item_context(item), target_arrangement_type=item.arrangement_type)
         scored.append({"item": item, "score": score, "fingerprint": fingerprint})
     scored.sort(key=lambda row: row["score"], reverse=True)
     return scored
@@ -433,7 +453,7 @@ def verify_candidates(source_url, source, rows, customer_text="", api_key=""):
     content.append({"type": "input_image", "image_url": source_url, "detail": vision_detail()})
     for row in rows:
         item = row["item"]
-        content.append({"type": "input_text", "text": f"CATALOG PHOTO catalog_id={item.id} name={item.name}"})
+        content.append({"type": "input_text", "text": f"CATALOG PHOTO catalog_id={item.id} name={item.name} type={item.get_arrangement_type_display()}"})
         content.append({"type": "input_image", "image_url": item.image_url, "detail": vision_detail()})
     return vision_json(
         OpenAI(api_key=api_key),

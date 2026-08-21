@@ -6987,6 +6987,31 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual([row["catalog_id"] for row in result["matches"]], [first.id])
         self.assertTrue(result["allow_send"])
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_copy_pasted_second_verdict_does_not_block_the_real_match(self):
+        """Model bir xil izohni ikkinchi nomzodga ko'chirib qo'ysa ball uni to'xtatadi."""
+        from unittest.mock import patch
+        right = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], color_pattern="solid", container="basket"))
+        wrong = AICatalogItem.objects.create(name="Bables Savat", arrangement_type="basket", price=1500000, quantity=1, image_url="https://cdn.example.com/bables.jpg", **catalog_fingerprint_fields("https://cdn.example.com/bables.jpg", flower_form="peony_rose", dominant_colors=["hot_pink"], color_pattern="solid", container="basket"))
+        conversation = media_conversation("ig-copy-paste")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.side_effect = [
+                SimpleNamespace(output_text=json.dumps(vision_fingerprint(flower_form="peony_rose", dominant_colors=["yellow"], color_pattern="solid", container="basket")), status="completed"),
+                SimpleNamespace(output_text=json.dumps({
+                    "source_summary": "sariq pionavidniy savat",
+                    "candidates": [
+                        {"catalog_id": right.id, "verdict": "same_product", "flower_form_match": True, "color_match": True, "container_match": True, "differences": ""},
+                        {"catalog_id": wrong.id, "verdict": "same_product", "flower_form_match": True, "color_match": True, "container_match": True, "differences": ""},
+                    ],
+                    "best_catalog_id": 0,
+                }), status="completed"),
+            ]
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shundan bormi"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [right.id])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [wrong.id])
+
     def test_send_catalog_image_is_blocked_after_a_failed_media_match(self):
         """Production xatosi: mos kelmagan bo'lsa ham ikkita katalog rasmi yuborilgan edi."""
         from unittest.mock import patch
@@ -7157,6 +7182,27 @@ class VisionFingerprintTests(TestCase):
         source = vision_fingerprint(container="basket")
         bouquet = vision_fingerprint(container="wrapped_bouquet")
         self.assertLess(vision_services.fingerprint_score(source, bouquet), vision_services.fingerprint_score(source, vision_fingerprint(container="basket")))
+
+    def test_a_wrapped_bouquet_and_a_hat_box_are_not_punished_against_each_other(self):
+        """Model bitta rasmni goh hat_box, goh wrapped_bouquet deydi — bu jazolanmasin."""
+        source = vision_fingerprint(container="wrapped_bouquet")
+        same_family = vision_services.fingerprint_score(source, vision_fingerprint(container="unwrapped_bouquet"))
+        exact = vision_services.fingerprint_score(source, vision_fingerprint(container="wrapped_bouquet"))
+        basket = vision_services.fingerprint_score(source, vision_fingerprint(container="basket"))
+        self.assertEqual(same_family, exact)
+        self.assertLess(basket, exact)
+
+    def test_the_operator_arrangement_type_beats_the_model_guess(self):
+        source = vision_fingerprint(container="basket")
+        guessed_bouquet = vision_fingerprint(container="wrapped_bouquet")
+        with_db_truth = vision_services.fingerprint_score(source, guessed_bouquet, target_arrangement_type="basket")
+        without = vision_services.fingerprint_score(source, guessed_bouquet)
+        self.assertGreater(with_db_truth, without)
+
+    def test_red_is_not_treated_as_a_shade_of_hot_pink(self):
+        red = vision_fingerprint(dominant_colors=["red"], color_pattern="solid")
+        hot_pink = vision_fingerprint(dominant_colors=["hot_pink"], color_pattern="solid")
+        self.assertLess(vision_services.fingerprint_score(red, hot_pink), vision_services.min_match_score())
 
     def test_near_colours_score_higher_than_opposite_colours(self):
         source = vision_fingerprint(dominant_colors=["cream"])
