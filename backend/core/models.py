@@ -5,19 +5,6 @@ from django.db import models
 from django.utils import timezone
 
 
-def normalize_display_name(value):
-    """Har bir so'zning bosh harfi katta, qolgani kichik bo'ladi.
-
-    Katalogni admin xohlaganicha yozadi — kimdir hammasini katta harfda, kimdir
-    kichkinada. Nom mijozga ham, AI ga ham shu yerdan boradi, shuning uchun bir
-    ko'rinishga saqlashda keltiriladi.
-
-    `str.title()` ishlatilmaydi: u apostrofdan keyin ham harfni ko'taradi va
-    "o'zbek" ni "O'Zbek" qilib qo'yadi.
-    """
-    return " ".join(word[:1].upper() + word[1:].lower() for word in (value or "").split())
-
-
 class TimeStampedModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -650,11 +637,6 @@ class AICatalogItem(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at", "-id"]
-
-    def save(self, *args, **kwargs):
-        # Nom qaysi yo'l bilan kelishidan qat'i nazar bir xil ko'rinishda yoziladi.
-        self.name = normalize_display_name(self.name)
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name

@@ -478,19 +478,6 @@ class BusinessRulesTests(TestCase):
         AICatalogItem.objects.create(name="Oq atirgul buketi", arrangement_type="bouquet", price=400000, quantity=1)
         self.assertEqual(ai_catalog_rows("kaktus kerak edi", limit=20), [])
 
-    def test_ai_catalog_name_is_saved_in_one_shape(self):
-        """Admin xohlaganicha yozadi, tizim har bir so'zning bosh harfini katta qilib saqlaydi."""
-        item = AICatalogItem.objects.create(name="QIZIL ATIR GULDAN KOMPAZITSIA 100 TALI", arrangement_type="bouquet", price=1000000, quantity=1)
-        self.assertEqual(item.name, "Qizil Atir Guldan Kompazitsia 100 Tali")
-        item.name = "  buket   kotta  shoxli   bambastic  "
-        item.save(update_fields=["name", "updated_at"])
-        item.refresh_from_db()
-        self.assertEqual(item.name, "Buket Kotta Shoxli Bambastic")
-
-    def test_ai_catalog_name_keeps_letters_after_apostrophe_small(self):
-        item = AICatalogItem.objects.create(name="o'ZBEK gulidan QO'SHIMCHA", arrangement_type="bouquet", price=400000, quantity=1)
-        self.assertEqual(item.name, "O'zbek Gulidan Qo'shimcha")
-
     def test_ai_catalog_rows_carry_operator_note(self):
         """Izoh AI ga note_uz bo'lib boradi. Ichida mahsulot tafsiloti ham, kelishilgan narx ham bo'ladi."""
         item = AICatalogItem.objects.create(name="Izohli kompozitsiya", arrangement_type="bouquet", price=1000000, quantity=1, note="100 ta guldan yasalgan, bo'yi 60 sm\n\nnarxi:1000000 kelishtirilgan narxi 800000")
@@ -647,8 +634,7 @@ class BusinessRulesTests(TestCase):
         for query in ["vitrina", "vitrinada qanaqa gulla bor", "katalogdagi tayyor mahsulotlar"]:
             rows = ai_catalog_rows(query)
             self.assertEqual(len(rows), 1)
-            # Nom saqlanganda bir ko'rinishga keltiriladi.
-            self.assertEqual(rows[0]["name_uz"], "Ai Oq Buket")
+            self.assertEqual(rows[0]["name_uz"], "AI oq buket")
 
     @override_settings(BACKUP_TELEGRAM_GROUP_ID="-1003718639311", BACKUP_TELEGRAM_THREAD_ID="1542", BACKUP_TELEGRAM_COMMAND="/eurodan_backup_tashachi")
     def test_backup_command_matches_only_configured_group_thread(self):
@@ -829,10 +815,10 @@ class BusinessRulesTests(TestCase):
         _, result = self._ai_catalog_lead()
         lead = Lead.objects.get(id=result["lead_id"])
         row = lead.details["catalog_items"][0]
-        self.assertEqual(row["catalog_name"], "Oq Buket")
+        self.assertEqual(row["catalog_name"], "Oq buket")
         self.assertEqual(row["quantity"], 1)
         self.assertEqual(row["price"], "500000.00")
-        self.assertEqual(row["ai_catalog_item"], AICatalogItem.objects.get(name="Oq Buket").id)
+        self.assertEqual(row["ai_catalog_item"], AICatalogItem.objects.get(name="Oq buket").id)
         # AI katalogi sklad katalogi emas — bog'lanish ochilmaydi, operator o'zi tanlaydi
         self.assertFalse(LeadCatalogUsage.objects.filter(lead=lead).exists())
 
@@ -846,7 +832,7 @@ class BusinessRulesTests(TestCase):
     def test_recent_orders_show_ai_catalog_choice(self):
         customer, result = self._ai_catalog_lead()
         orders = recent_customer_orders(customer)
-        self.assertEqual(orders[0]["catalog_items"][0]["name_uz"], "Oq Buket")
+        self.assertEqual(orders[0]["catalog_items"][0]["name_uz"], "Oq buket")
         self.assertEqual(orders[0]["catalog_items"][0]["quantity"], 1)
 
     def test_ai_stock_rows_matches_long_price_query(self):
