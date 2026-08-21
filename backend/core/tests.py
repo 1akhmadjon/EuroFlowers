@@ -1741,6 +1741,32 @@ class ApiTests(TestCase):
         FloristAttendance.objects.create(florist=profile, work_date="2026-07-20")
         return profile
 
+    def _catalog_with_composition(self, stems=15):
+        response = self.client.post("/api/catalog/", {"name_uz": "Tarkibli buket", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available", "composition": [{"stock_batch": self.batch.id, "quantity_stems": stems}]}, format="json")
+        self.assertEqual(response.status_code, 201)
+        listed = self.client.get("/api/catalog/")
+        return [row for row in listed.data["results"] if row["id"] == response.data["id"]][0]
+
+    def test_catalog_list_shows_flower_composition(self):
+        row = self._catalog_with_composition()
+        self.assertEqual(len(row["composition"]), 1)
+        composition = row["composition"][0]
+        self.assertEqual(composition["quantity_stems"], 15)
+        self.assertEqual(composition["batch_detail"]["flower_name"], "Atirgul API")
+        self.assertEqual(composition["batch_detail"]["variant_detail"]["color_uz"], "Qizil")
+
+    def test_catalog_list_composition_stays_light(self):
+        batch_detail = self._catalog_with_composition()["composition"][0]["batch_detail"]
+        for key in ["supplier_detail", "delivery_detail", "cost_per_stem", "sale_price_per_stem", "remaining_stems"]:
+            self.assertNotIn(key, batch_detail)
+
+    def test_catalog_list_hides_composition_row_without_stems(self):
+        item = CatalogItem.objects.create(name_uz="Soni yozilmagan", arrangement_type="bouquet", price=Decimal("100000"), quantity_total=1, status="available")
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=0)
+        listed = self.client.get("/api/catalog/")
+        row = [r for r in listed.data["results"] if r["id"] == item.id][0]
+        self.assertEqual(row["composition"], [])
+
     def test_catalog_item_can_be_created_without_customer(self):
         response = self.client.post("/api/catalog/", {"name_uz": "Mijozsiz buket", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available"}, format="json")
         self.assertEqual(response.status_code, 201)
