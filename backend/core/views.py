@@ -3931,7 +3931,7 @@ class CustomerViewSet(ScopedViewSet):
 
 
 class AICatalogItemViewSet(TotalsListMixin, ScopedViewSet):
-    permission_page = "catalog"
+    permission_page = "ai_catalog"
     write_roles = ["admin", "operator", "content"]
     queryset = AICatalogItem.objects.all()
     serializer_class = AICatalogItemSerializer

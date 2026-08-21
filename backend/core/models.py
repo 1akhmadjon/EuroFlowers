@@ -55,6 +55,7 @@ class PagePermission(TimeStampedModel):
         ("dashboard", "Dashboard"),
         ("inventory", "Sklad"),
         ("catalog", "Katalog"),
+        ("ai_catalog", "AI katalog"),
         ("crm", "CRM"),
         ("customers", "Mijozlar"),
         ("conversations", "Instagram inbox"),
