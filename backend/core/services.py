@@ -34,7 +34,7 @@ MAX_LEAD_PHOTO_URLS = 5
 MAX_CONTEXT_ATTACHMENTS = 6
 MAX_OPERATOR_HANDOFF_MEDIA = 10
 MAX_AI_CATALOG_MATCH_CANDIDATES = 40
-AI_CATALOG_MATCH_CONFIDENCE = Decimal("0.92")
+AI_CATALOG_MATCH_CONFIDENCE = Decimal("0.95")
 
 MEDIA_MATCHING_PRIORITY_INSTRUCTION = """
 MEDIA MATCHING FIRST:
@@ -953,7 +953,12 @@ def direct_ai_catalog_link_matches(candidates, source_url):
             rows.append({
                 "catalog_id": row["catalog_id"],
                 "confidence": 1,
+                "exact_product_match": True,
+                "flower_type_match": True,
+                "color_match": True,
+                "arrangement_match": True,
                 "reason": "instagram_link matched",
+                "major_differences": "",
             })
     return rows
 
@@ -971,9 +976,14 @@ def ai_catalog_match_result_schema():
                     "properties": {
                         "catalog_id": {"type": "integer"},
                         "confidence": {"type": "number"},
+                        "exact_product_match": {"type": "boolean"},
+                        "flower_type_match": {"type": "boolean"},
+                        "color_match": {"type": "boolean"},
+                        "arrangement_match": {"type": "boolean"},
                         "reason": {"type": "string"},
+                        "major_differences": {"type": "string"},
                     },
-                    "required": ["catalog_id", "confidence", "reason"],
+                    "required": ["catalog_id", "confidence", "exact_product_match", "flower_type_match", "color_match", "arrangement_match", "reason", "major_differences"],
                     "additionalProperties": False,
                 },
             },
@@ -1004,6 +1014,11 @@ def normalize_catalog_match_rows(rows, candidates_by_id):
             confidence = Decimal("0")
         if confidence > 1:
             confidence = Decimal("1")
+        exact_product_match = bool(row.get("exact_product_match"))
+        flower_type_match = bool(row.get("flower_type_match"))
+        color_match = bool(row.get("color_match"))
+        arrangement_match = bool(row.get("arrangement_match"))
+        is_confident = confidence >= AI_CATALOG_MATCH_CONFIDENCE and exact_product_match and flower_type_match and color_match and arrangement_match
         normalized.append({
             "catalog_id": catalog_id,
             "name": item["name"],
@@ -1014,8 +1029,13 @@ def normalize_catalog_match_rows(rows, candidates_by_id):
             "price_text": item["price_text"],
             "has_image": True,
             "confidence": str(confidence),
-            "is_confident": confidence >= AI_CATALOG_MATCH_CONFIDENCE,
+            "is_confident": is_confident,
+            "exact_product_match": exact_product_match,
+            "flower_type_match": flower_type_match,
+            "color_match": color_match,
+            "arrangement_match": arrangement_match,
             "reason": (row.get("reason") or "")[:500],
+            "major_differences": (row.get("major_differences") or "")[:500],
             "note_uz": item["note"],
         })
     return sorted(normalized, key=lambda row: Decimal(row["confidence"]), reverse=True)
@@ -1106,7 +1126,13 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
                 "task": "Find which AI catalog flower arrangement best matches the customer's media. Use customer text for pointing instructions like circled item, second from top, color, story/reel/post context. Return only candidates that visually match.",
                 "customer_text": text,
                 "source": {"kind": attachment.get("kind") or "media", "url": source_url},
-                "confidence_rule": "0.92 or higher only when the exact catalog item is almost certainly the same product. Return no confident match when only flower type, shape, color palette or arrangement style is similar.",
+                "confidence_rule": "Use 0.95 or higher only when it is almost certainly the exact same product. Analyze the flowers first, not the basket or overall composition first. exact_product_match can be true only when flower variety/type, dominant colors, arrangement container/type, approximate size/volume and distinctive details all match. If only color, basket shape, density, pose, size or general style is similar, set exact_product_match=false and confidence below 0.80.",
+                "matching_steps": [
+                    "Describe the customer's visible flower species/variety, petal shape, dominant colors, count/volume, container and wrapping.",
+                    "For each candidate, compare flower species/variety first, then color, then container, then size/volume.",
+                    "Reject candidates with different flower variety or different dominant color even if the basket/composition shape is similar.",
+                    "Prefer no confident match over a wrong catalog item.",
+                ],
                 "candidates": [{key: value for key, value in row.items() if key != "image_url"} for row in candidates],
             }, ensure_ascii=False),
         },
@@ -1118,7 +1144,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     try:
         response = OpenAI(api_key=api_key).responses.create(
             model=settings.OPENAI_VISION_MODEL or settings.OPENAI_MODEL,
-            instructions="You are a strict visual matcher for a flower shop catalog. Compare the customer image/video preview with catalog images. Do not guess prices or products. Return JSON only.",
+            instructions="You are a strict flower-identification visual matcher for a flower shop catalog. First identify the actual flowers and dominant colors in the customer's image, then compare catalog images. Do not match by overall basket shape, pose, volume or general style alone. If the flower type or dominant colors differ, it is not an exact product match. Prefer no match over a wrong catalog item. Return JSON only.",
             input=[{"role": "user", "content": content}],
             max_output_tokens=1200,
             reasoning={"effort": "minimal"},

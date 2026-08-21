@@ -6803,7 +6803,7 @@ class OperatorHandoffTests(TestCase):
         payload = {
             "source_description": "Mijoz yuborgan rasmda savatdagi mix gortenziya bor",
             "target_description": "Savatdagi gortenziya mix",
-            "matches": [{"catalog_id": item.id, "confidence": 0.95, "reason": "aniq shu katalog rasmi bilan mos"}],
+            "matches": [{"catalog_id": item.id, "confidence": 0.97, "exact_product_match": True, "flower_type_match": True, "color_match": True, "arrangement_match": True, "reason": "aniq shu katalog rasmi bilan mos", "major_differences": ""}],
             "no_match_reason": "",
         }
         with patch("core.services.OpenAI") as openai_class:
@@ -6877,7 +6877,7 @@ class OperatorHandoffTests(TestCase):
         conversation = Conversation.objects.create(customer=customer)
         conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]})
         result = {"reply": "Katalina Savat\nNarxi 800 000 so'm\nSizga qachonga kerak edi?"}
-        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm", "is_confident": False, "confidence": "0.85"}]}}]
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm", "is_confident": False, "confidence": "0.85", "exact_product_match": False}]}}]
         fixed = apply_media_match_safeguard(conversation, result, tool_results)
         self.assertIn("operatorlarimiz", fixed["reply"])
         self.assertNotIn("Katalina Savat", fixed["reply"])
