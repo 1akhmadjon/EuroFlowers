@@ -371,6 +371,28 @@ def recent_customer_orders(customer):
     return orders
 
 
+def ai_catalog_ranked_matches(queryset, query):
+    """Katalogni so'rovdagi so'zlar bo'yicha saralaydi va eng mos qatorlarni qaytaradi.
+
+    Nom qisqa, mijozning jumlasi uzun bo'ladi. Shuning uchun har bir so'zni alohida
+    tekshirib, eng ko'p so'zi mos kelgan mahsulotlarni olamiz. Hech biri mos kelmasa
+    bo'sh qaytadi — AI shunda buni yasatma buyurtma deb hisoblaydi.
+    """
+    terms = ai_search_terms(query)
+    if not terms:
+        return queryset.none()
+    ranked = []
+    for item in queryset:
+        haystack = compact_match_text(" ".join([item.name, item.volume, item.note]))
+        score = sum(1 for term in terms if haystack_has_term(haystack, term))
+        if score:
+            ranked.append((score, item.id))
+    if not ranked:
+        return queryset.none()
+    best = max(score for score, _ in ranked)
+    return queryset.filter(id__in=[item_id for score, item_id in ranked if score == best])
+
+
 def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=None):
     query = (query or "").strip()
     queryset = available_ai_catalog_queryset().order_by("-created_at", "-id")
@@ -382,7 +404,10 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
     normalized_query = compact_match_text(query)
     is_generic_query = bool(normalized_query) and any(term in normalized_query for term in generic_query_terms)
     if query and not is_generic_query:
-        queryset = queryset.filter(Q(name__icontains=query) | Q(volume__icontains=query) | Q(note__icontains=query) | Q(instagram_link__icontains=query))
+        matched = queryset.filter(Q(name__icontains=query) | Q(volume__icontains=query) | Q(note__icontains=query) | Q(instagram_link__icontains=query))
+        # `icontains` butun jumlani qidiradi. Mijoz esa "kotta shoxli bambastik gulidan
+        # bormi" deb yozadi va hech narsa topilmaydi — o'shanda so'zlar bo'yicha izlaymiz.
+        queryset = matched if matched.exists() else ai_catalog_ranked_matches(queryset, query)
     rows = []
     for row in queryset[:limit]:
         rows.append({

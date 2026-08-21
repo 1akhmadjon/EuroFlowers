@@ -467,6 +467,17 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(rows[0]["quantity"], 2)
         self.assertEqual(rows[0]["volume"], "M")
 
+    def test_ai_catalog_rows_match_words_from_a_whole_sentence(self):
+        """Mijoz butun jumla yozadi — nom bo'yicha so'zma-so'z moslik ishlashi kerak."""
+        item = AICatalogItem.objects.create(name="Shoxli bambastik gulidan kompozitsiya", arrangement_type="bouquet", price=900000, quantity=1)
+        AICatalogItem.objects.create(name="Oq atirgul buketi", arrangement_type="bouquet", price=400000, quantity=1)
+        rows = ai_catalog_rows("buket kotta shoxli bambastik gulidan yasalgan qancha turadi", limit=20)
+        self.assertEqual([row["catalog_id"] for row in rows], [item.id])
+
+    def test_ai_catalog_rows_stay_empty_when_nothing_matches(self):
+        AICatalogItem.objects.create(name="Oq atirgul buketi", arrangement_type="bouquet", price=400000, quantity=1)
+        self.assertEqual(ai_catalog_rows("kaktus kerak edi", limit=20), [])
+
     def test_ai_catalog_rows_carry_operator_note(self):
         """Izoh AI ga note_uz bo'lib boradi. Ichida mahsulot tafsiloti ham, kelishilgan narx ham bo'ladi."""
         item = AICatalogItem.objects.create(name="Izohli kompozitsiya", arrangement_type="bouquet", price=1000000, quantity=1, note="100 ta guldan yasalgan, bo'yi 60 sm\n\nnarxi:1000000 kelishtirilgan narxi 800000")
