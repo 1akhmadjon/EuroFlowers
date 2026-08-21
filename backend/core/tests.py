@@ -51,6 +51,17 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(customer.instagram_username, "extra_teest")
         self.assertEqual(str(customer), "extra_teest")
 
+    def test_instagram_webhook_ignores_ai_sent_image_echo(self):
+        IntegrationSettings.objects.update_or_create(pk=1, defaults={"instagram_access_token": "token", "instagram_account_id": "biz-account"})
+        customer = Customer.objects.create(instagram_user_id="ig-customer", instagram_username="extra_teest")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="system", text="", metadata={"image_tool_result": {"sent": {"message_id": "image-echo-mid"}}})
+        payload = {"entry": [{"messaging": [{"sender": {"id": "biz-account"}, "recipient": {"id": "ig-customer"}, "message": {"mid": "image-echo-mid", "attachments": [{"type": "image", "payload": {"url": "https://cdn.example.com/sent.jpg"}}]}}]}]}
+        self.assertEqual(resolve_instagram_event(payload), [])
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.status, "ai")
+        self.assertFalse(conversation.messages.filter(sender="operator").exists())
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_context_exposes_already_known_lead_fields(self):
         from unittest.mock import patch

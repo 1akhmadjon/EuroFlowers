@@ -68,6 +68,14 @@ def update_customer_instagram_profile(customer, external_customer_id, account_id
         customer.save(update_fields=["instagram_username", "updated_at"])
 
 
+def instagram_sent_message_exists(conversation, instagram_message_id):
+    if not instagram_message_id:
+        return False
+    if Message.objects.filter(conversation=conversation, instagram_message_id=instagram_message_id).exists():
+        return True
+    return Message.objects.filter(conversation=conversation, sender="system", metadata__image_tool_result__sent__message_id=instagram_message_id).exists()
+
+
 def attachment_kind(source, attachment_type, url):
     text = f"{source} {attachment_type} {url}".lower()
     if "voice" in text or "audio" in text:
@@ -499,7 +507,7 @@ def resolve_instagram_event(payload):
                 message_text = append_attachment_links(f"{message_text}\nTizim izohi: yuborilgan Instagram media bazadagi story/post/reel katalogiga bog‘lanmagan.", [])
             if is_outbound:
                 instagram_message_id = message.get("mid", "")
-                if instagram_message_id and Message.objects.filter(conversation=conversation, instagram_message_id=instagram_message_id).exists():
+                if instagram_sent_message_exists(conversation, instagram_message_id):
                     continue
                 Message.objects.create(conversation=conversation, sender="operator", text=message_text, instagram_message_id=instagram_message_id, metadata=message_metadata)
                 now = timezone.now()
