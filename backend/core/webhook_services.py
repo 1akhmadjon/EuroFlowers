@@ -47,7 +47,7 @@ def instagram_customer_profile(external_customer_id):
         return {}
     try:
         response = requests.get(
-            f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{external_customer_id}",
+            f"https://graph.facebook.com/{settings.INSTAGRAM_API_VERSION}/{external_customer_id}",
             params={"access_token": access_token, "fields": "username"},
             timeout=8,
         )
