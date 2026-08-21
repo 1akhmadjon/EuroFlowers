@@ -1273,10 +1273,7 @@ class AICatalogItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Nomini kiriting")
         parts = []
         for word in value.split(" "):
-            if word.isupper() and len(word) > 1:
-                parts.append(word)
-            else:
-                parts.append(re.sub(r"(^|[-'‘’`])([a-zа-яё])", lambda match: match.group(1) + match.group(2).upper(), word.lower()))
+            parts.append(re.sub(r"(^|[-'‘’`])([a-zа-яё])", lambda match: match.group(1) + match.group(2).upper(), word.lower()))
         return " ".join(parts)
 
 
