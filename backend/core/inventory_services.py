@@ -1774,6 +1774,71 @@ def apply_stock_movement(batch, movement_type, quantity_stems=None, reason="", u
     return movement
 
 
+def sell_stock_batch(batch, quantity_stems, sale_amount, payment_type="", reason="", user=None, sold_at=None, cash_amount=None, card_amount=None):
+    with transaction.atomic():
+        batch = StockBatch.objects.select_for_update().get(pk=batch.pk)
+        quantity = int(quantity_stems or 0)
+        if quantity < 1:
+            raise ValueError("Sotiladigan dona soni 1 dan kam bo‘lmasligi kerak")
+        if batch.remaining_stems < quantity:
+            raise ValueError(f"Skladda yetarli gul yo‘q. Kerak: {quantity}, bor: {batch.remaining_stems}")
+        total = Decimal(str(sale_amount or 0)).quantize(Decimal("0.01"))
+        if total < 0:
+            raise ValueError("Sotuv summasi 0 dan kam bo‘lishi mumkin emas")
+        cash = Decimal(str(cash_amount or 0)).quantize(Decimal("0.01"))
+        card = Decimal(str(card_amount or 0)).quantize(Decimal("0.01"))
+        if payment_type == "mixed":
+            if cash <= 0 or card <= 0:
+                raise ValueError("Aralash to‘lovda naqd va karta summasi noldan katta bo‘lishi kerak")
+            if cash + card != total:
+                raise ValueError(f"Naqd va karta yig‘indisi sotuv summasiga teng emas. Sotuv: {total}, kiritilgan: {cash + card}")
+        else:
+            cash = Decimal("0.00")
+            card = Decimal("0.00")
+        before = batch.remaining_stems
+        batch.remaining_stems -= quantity
+        batch.save(update_fields=["remaining_stems", "updated_at"])
+        quantity_bunches = -(Decimal(quantity) / Decimal(batch.stems_per_bunch or 1)).quantize(Decimal("0.01"))
+        unit_price = (total / Decimal(quantity)).quantize(Decimal("0.01")) if quantity else Decimal("0.00")
+        movement = StockMovement.objects.create(
+            batch=batch,
+            movement_type="out",
+            quantity_stems=-quantity,
+            quantity_bunches=quantity_bunches,
+            unit_price=unit_price,
+            sale_amount=total,
+            payment_type=payment_type or "",
+            cash_amount=cash,
+            card_amount=card,
+            reference_type="stock_sale",
+            reason=reason or f"{batch.title} alohida sotildi",
+            performed_by=user if getattr(user, "is_authenticated", False) else None,
+        )
+        if sold_at:
+            StockMovement.objects.filter(pk=movement.pk).update(created_at=sold_at)
+            movement.created_at = sold_at
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="stock_sold",
+            summary=f"{batch.batch_number} partiyadan gul alohida sotildi",
+            entity_type="StockBatch",
+            entity_id=str(batch.id),
+            before={"remaining_stems": before},
+            after={"batch": batch.batch_number, "flower": str(batch.variant), "sold_quantity": quantity, "sale_amount": str(total), "unit_price": str(unit_price), "payment_type": payment_type or "", "cash_amount": str(cash), "card_amount": str(card), "remaining_stems": batch.remaining_stems, "movement": movement.id, "reason": reason or ""},
+        )
+        if batch.remaining_stems <= batch.minimum_sale_stems:
+            Notification.objects.create(
+                notification_type="low_stock",
+                title_uz=f"{batch.variant.flower.name_uz} qoldig‘i kamaydi",
+                title_ru=f"{batch.variant.flower.name_uz} qoldig‘i kamaydi",
+                body_uz=f"{batch.batch_number} partiyada {batch.remaining_stems} dona qoldi.",
+                body_ru=f"В партии {batch.batch_number} осталось {batch.remaining_stems} шт.",
+                reference_type="stock_batch",
+                reference_id=batch.id,
+            )
+    return movement
+
+
 def receive_material_into_delivery(delivery, packaging, quantity, cost_price=None, reason="", user=None):
     """Material partiyasiga material kiritadi.
 

@@ -34,9 +34,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristPayment, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment
 from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
-from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristPaymentSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, StockBatchSellRequestSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristPaymentSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
+from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, sell_stock_batch, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .renderers import to_local
 from .services import flower_variant_display_name, mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -188,7 +188,7 @@ class StockMovementFilter(CreatedAtRangeFilter):
 
     class Meta:
         model = StockMovement
-        fields = ["batch", "supplier", "movement_type", "created_at"]
+        fields = ["batch", "supplier", "movement_type", "reference_type", "payment_type", "created_at"]
 
 
 class PackagingMovementFilter(CreatedAtRangeFilter):
@@ -2496,6 +2496,28 @@ class StockBatchViewSet(TotalsListMixin, ScopedViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(StockMovementSerializer(movement).data)
 
+    @extend_schema(request=StockBatchSellRequestSerializer, responses=StockMovementSerializer)
+    @action(detail=True, methods=["post"], url_path="sell")
+    def sell(self, request, pk=None):
+        batch = self.get_object()
+        serializer = StockBatchSellRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            movement = sell_stock_batch(
+                batch,
+                quantity_stems=serializer.validated_data["quantity_stems"],
+                sale_amount=serializer.validated_data["sale_amount"],
+                payment_type=serializer.validated_data.get("payment_type", ""),
+                reason=serializer.validated_data.get("reason", ""),
+                user=request.user,
+                sold_at=serializer.validated_data.get("sold_at"),
+                cash_amount=serializer.validated_data.get("cash_amount"),
+                card_amount=serializer.validated_data.get("card_amount"),
+            )
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
+
 
 class StockMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [RolePermission]
@@ -2515,6 +2537,9 @@ class StockMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
             t_out=int_sum(Case(When(movement_type="out", then=F("quantity_stems")), default=Value(0), output_field=IntegerField())),
             t_waste=int_sum(Case(When(movement_type="waste", then=F("quantity_stems")), default=Value(0), output_field=IntegerField())),
             t_net=int_sum("quantity_stems"),
+            t_stock_sale=money_sum(Case(When(reference_type="stock_sale", then=F("sale_amount")), default=Value(Decimal("0"), output_field=MONEY_FIELD), output_field=MONEY_FIELD)),
+            t_stock_sale_cash=money_sum(Case(When(reference_type="stock_sale", payment_type="mixed", then=F("cash_amount")), When(reference_type="stock_sale", payment_type="cash", then=F("sale_amount")), default=Value(Decimal("0"), output_field=MONEY_FIELD), output_field=MONEY_FIELD)),
+            t_stock_sale_card=money_sum(Case(When(reference_type="stock_sale", payment_type="mixed", then=F("card_amount")), When(reference_type="stock_sale", payment_type="card", then=F("sale_amount")), default=Value(Decimal("0"), output_field=MONEY_FIELD), output_field=MONEY_FIELD)),
         )
         return {
             "rows": base.count(),
@@ -2524,6 +2549,9 @@ class StockMovementViewSet(TotalsListMixin, viewsets.ReadOnlyModelViewSet):
             "waste_stems": abs(agg["t_waste"]),
             # sof o'zgarish: kirim − chiqim − chiqit
             "net_stems": agg["t_net"],
+            "stock_sale_total": money(agg["t_stock_sale"]),
+            "stock_sale_cash_total": money(agg["t_stock_sale_cash"]),
+            "stock_sale_card_total": money(agg["t_stock_sale_card"]),
             "by_type": count_by(base, "movement_type"),
         }
 

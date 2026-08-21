@@ -1015,6 +1015,8 @@ class StockMovementSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DecimalField(max_digits=16, decimal_places=2))
     def get_sale_value(self, obj):
+        if Decimal(obj.sale_amount or 0) > 0:
+            return str(Decimal(obj.sale_amount or 0).quantize(Decimal("0.01")))
         stems = abs(int(obj.quantity_stems or 0))
         return str((Decimal(stems) * Decimal(obj.batch.sale_price_per_stem or 0)).quantize(Decimal("0.01")))
 
@@ -3040,6 +3042,37 @@ class MovementRequestSerializer(serializers.Serializer):
     def validate(self, attrs):
         if not attrs.get("quantity_stems") and not attrs.get("quantity_bunches"):
             raise serializers.ValidationError({"quantity": "quantity_stems yoki quantity_bunches yuboring"})
+        return attrs
+
+
+class StockBatchSellRequestSerializer(serializers.Serializer):
+    quantity_stems = serializers.IntegerField(min_value=1)
+    sale_amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
+    payment_type = serializers.ChoiceField(choices=["cash", "card", "debt", "mixed"], required=False, allow_blank=True)
+    cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
+    card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
+    reason = serializers.CharField(required=False, allow_blank=True)
+    sold_at = serializers.DateTimeField(required=False)
+
+    def validate(self, attrs):
+        payment_type = attrs.get("payment_type") or ""
+        sale_amount = Decimal(attrs.get("sale_amount") or 0).quantize(Decimal("0.01"))
+        if payment_type != "mixed":
+            attrs.pop("cash_amount", None)
+            attrs.pop("card_amount", None)
+            return attrs
+        cash = attrs.get("cash_amount")
+        card = attrs.get("card_amount")
+        if cash is None or card is None:
+            raise serializers.ValidationError({
+                "cash_amount": "Aralash to‘lovda naqd va karta summasini kiriting",
+                "card_amount": "Aralash to‘lovda naqd va karta summasini kiriting",
+            })
+        if cash <= 0 or card <= 0:
+            raise serializers.ValidationError({"cash_amount": "Aralash to‘lovda ikkala summa ham noldan katta bo‘lishi kerak"})
+        given = (Decimal(cash) + Decimal(card)).quantize(Decimal("0.01"))
+        if given != sale_amount:
+            raise serializers.ValidationError({"detail": f"Naqd va karta yig‘indisi sotuv summasiga teng emas. Sotuv: {sale_amount}, kiritilgan: {given}"})
         return attrs
 
 
