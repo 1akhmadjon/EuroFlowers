@@ -1154,6 +1154,37 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(message.metadata["attachments"][0]["kind"], "story")
         self.assertEqual(message.metadata["attachments"][0]["url"], "https://lookaside.fbsbx.com/ig_messaging_cdn/story.jpg")
 
+    def test_instagram_echo_message_is_saved_as_operator_message(self):
+        IntegrationSettings.objects.update_or_create(pk=1, defaults={"instagram_account_id": "ig-business", "instagram_business_id": "ig-business"})
+        customer = Customer.objects.create(instagram_user_id="ig-user-echo")
+        Conversation.objects.create(customer=customer)
+        payload = {
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig-business"},
+                    "recipient": {"id": "ig-user-echo"},
+                    "message": {"mid": "mid-echo-1", "text": "Operator javobi", "is_echo": True},
+                }],
+            }],
+        }
+        jobs = resolve_instagram_event(payload)
+        self.assertEqual(jobs, [])
+        conversation = Conversation.objects.get(customer=customer)
+        message = Message.objects.get(instagram_message_id="mid-echo-1")
+        self.assertEqual(message.sender, "operator")
+        self.assertEqual(message.text, "Operator javobi")
+        self.assertEqual(conversation.status, "operator")
+        self.assertEqual(conversation.ai_pause_reason, "instagram_operator_message")
+        self.assertGreater(conversation.ai_paused_until, timezone.now())
+
+    def test_global_ai_inactive_blocks_delayed_reply(self):
+        from core.services import should_start_ai_reply
+        AISettings.objects.update_or_create(pk=1, defaults={"is_active": False})
+        customer = Customer.objects.create(instagram_user_id="ig-global-off")
+        conversation = Conversation.objects.create(customer=customer)
+        message = conversation.messages.create(sender="customer", text="salom")
+        self.assertFalse(should_start_ai_reply(conversation.id, message.id))
+
     def test_instagram_story_reply_links_catalog_by_active_story_asset_url(self):
         post = SocialPost.objects.create(
             post_type="story",

@@ -35,6 +35,10 @@ MAX_CONTEXT_ATTACHMENTS = 6
 MAX_OPERATOR_HANDOFF_MEDIA = 10
 
 
+def ai_globally_active():
+    return AISettings.objects.get_or_create(pk=1)[0].is_active
+
+
 def parse_lead_date(value):
     text = (value or "").strip()
     if not text:
@@ -1738,6 +1742,8 @@ def money_uz(value):
 
 
 def create_ai_reply_for_conversation(conversation):
+    if not ai_globally_active():
+        return None
     if conversation.status == "closed":
         return None
     if conversation.ai_paused_until and conversation.ai_paused_until > timezone.now():
@@ -1780,6 +1786,8 @@ def process_customer_message(conversation, message_text, instagram_message_id=""
 
 
 def should_start_ai_reply(conversation_id, expected_message_id):
+    if not ai_globally_active():
+        return False
     conversation = Conversation.objects.filter(id=conversation_id).first()
     if not conversation:
         return False
@@ -1825,6 +1833,8 @@ def process_pending_customer_reply(conversation_id, expected_message_id):
 
 
 def process_stalled_conversation_follow_up(conversation_id, expected_ai_message_id):
+    if not ai_globally_active():
+        return None
     conversation = Conversation.objects.select_related("customer").filter(id=conversation_id).first()
     if not conversation or conversation.status != "ai":
         return None

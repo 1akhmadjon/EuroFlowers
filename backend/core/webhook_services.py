@@ -1,10 +1,12 @@
 import json
 import re
+from datetime import timedelta
 
 from django.conf import settings
 from django.db.models import Q
+from django.utils import timezone
 
-from .models import AICatalogItem, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, SocialPost
+from .models import AICatalogItem, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Message, SocialPost
 from .platform_services import find_active_story_by_media_url, find_media_by_id, media_id_from_url, normalize_instagram_permalink, telegram_file_url
 from .services import ingest_customer_message
 
@@ -427,9 +429,10 @@ def resolve_instagram_event(payload):
     for entry in entries:
         for event in entry.get("messaging", []):
             webhook_event = save_instagram_webhook_event(payload, entry, event)
-            sender_id = event.get("sender", {}).get("id")
+            sender_id = str(event.get("sender", {}).get("id") or "")
+            recipient_id = str(event.get("recipient", {}).get("id") or "")
             integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
-            own_ids = {value for value in [integration.instagram_account_id, integration.instagram_business_id, settings.INSTAGRAM_ACCOUNT_ID] if value}
+            own_ids = {str(value) for value in [integration.instagram_account_id, integration.instagram_business_id, settings.INSTAGRAM_ACCOUNT_ID, getattr(settings, "INSTAGRAM_BUSINESS_ID", "")] if value}
             message = event.get("message", {})
             text = message.get("text")
             story_attachment = first_story_attachment(message)
@@ -438,7 +441,9 @@ def resolve_instagram_event(payload):
             media_text = "Mijoz Instagram post/reelni directga yubordi." if media_attachment else ""
             message_metadata = instagram_message_metadata(event, webhook_event)
             message_text = append_attachment_links(text or story_text or media_text, message_metadata.get("attachments", []))
-            if not sender_id or sender_id in own_ids or not message_text or message.get("is_echo"):
+            is_outbound = bool(message.get("is_echo") or sender_id in own_ids)
+            external_customer_id = recipient_id if is_outbound else sender_id
+            if not external_customer_id or external_customer_id in own_ids or not message_text:
                 continue
             referral = event.get("referral") or message.get("referral") or {}
             media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
@@ -447,7 +452,7 @@ def resolve_instagram_event(payload):
                 post = link_story_post_from_event(webhook_event)
             if not post:
                 post = link_media_post_from_event(webhook_event)
-            customer, _ = Customer.objects.get_or_create(instagram_user_id=sender_id)
+            customer, _ = Customer.objects.get_or_create(instagram_user_id=external_customer_id)
             conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
             if not conversation:
                 conversation = Conversation.objects.create(customer=customer, social_post=post)
@@ -459,9 +464,21 @@ def resolve_instagram_event(payload):
                 conversation.save(update_fields=["social_post", "updated_at"])
             if (story_attachment or media_attachment or message_metadata.get("attachments")) and not post:
                 message_text = append_attachment_links(f"{message_text}\nTizim izohi: yuborilgan Instagram media bazadagi story/post/reel katalogiga bog‘lanmagan.", [])
+            if is_outbound:
+                instagram_message_id = message.get("mid", "")
+                if instagram_message_id and Message.objects.filter(conversation=conversation, instagram_message_id=instagram_message_id).exists():
+                    continue
+                Message.objects.create(conversation=conversation, sender="operator", text=message_text, instagram_message_id=instagram_message_id, metadata=message_metadata)
+                now = timezone.now()
+                conversation.last_message_at = now
+                conversation.status = "operator"
+                conversation.ai_paused_until = now + timedelta(minutes=15)
+                conversation.ai_pause_reason = "instagram_operator_message"
+                conversation.save(update_fields=["last_message_at", "status", "ai_paused_until", "ai_pause_reason", "updated_at"])
+                continue
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
             if saved_message:
-                results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": sender_id})
+                results.append({"conversation_id": conversation.id, "message_id": saved_message.id, "recipient_id": external_customer_id})
     return results
 
 
