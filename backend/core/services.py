@@ -33,6 +33,8 @@ ARRANGEMENT_LABELS = [("bouquet", "buket"), ("basket", "savat"), ("stems", "dona
 MAX_LEAD_PHOTO_URLS = 5
 MAX_CONTEXT_ATTACHMENTS = 6
 MAX_OPERATOR_HANDOFF_MEDIA = 10
+MAX_AI_CATALOG_MATCH_CANDIDATES = 40
+AI_CATALOG_MATCH_CONFIDENCE = Decimal("0.75")
 
 
 def ai_globally_active():
@@ -876,6 +878,207 @@ def handoff_media_to_operator(conversation, summary="", phone="", customer_refus
     return {"ok": True, "media_sent": media_sent, "attachments_count": len(attachments), "chat_url": operator_chat_url(conversation)}
 
 
+def latest_customer_media_attachment(conversation, source_url=""):
+    attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
+    if source_url:
+        for row in reversed(attachments):
+            if row.get("url") == source_url:
+                return row
+        return {"kind": "media", "url": source_url}
+    return attachments[-1] if attachments else None
+
+
+def ai_catalog_match_candidate_rows(limit=MAX_AI_CATALOG_MATCH_CANDIDATES):
+    rows = []
+    for item in available_ai_catalog_queryset().exclude(image_url="").order_by("-created_at", "-id")[:limit]:
+        rows.append({
+            "catalog_id": item.id,
+            "name": item.name,
+            "arrangement_type": item.arrangement_type,
+            "quantity": item.quantity,
+            "volume": item.volume,
+            "price": str(item.price),
+            "price_text": f"{money_uz(item.price)} so'm",
+            "note": item.note[:700],
+            "instagram_link": item.instagram_link,
+            "image_url": item.image_url,
+        })
+    return rows
+
+
+def media_url_match_key(url):
+    text = (url or "").strip()
+    if not text:
+        return ""
+    text = text.split("?", 1)[0].rstrip("/")
+    return text.lower()
+
+
+def vision_compatible_media_url(url, kind=""):
+    text = f"{url or ''} {kind or ''}".lower()
+    direct_extensions = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+    clean_url = (url or "").split("?", 1)[0].lower()
+    return clean_url.endswith(direct_extensions) or "facebook.com/ads/image" in text or "lookaside.fbsbx.com/ig_messaging_cdn" in text or "photo" in text or "image" in text or "story" in text
+
+
+def direct_ai_catalog_link_matches(candidates, source_url):
+    source_key = media_url_match_key(source_url)
+    if not source_key:
+        return []
+    rows = []
+    for row in candidates:
+        catalog_key = media_url_match_key(row.get("instagram_link"))
+        if not catalog_key:
+            continue
+        if catalog_key == source_key or catalog_key in source_key or source_key in catalog_key:
+            rows.append({
+                "catalog_id": row["catalog_id"],
+                "confidence": 1,
+                "reason": "instagram_link matched",
+            })
+    return rows
+
+
+def ai_catalog_match_result_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "source_description": {"type": "string"},
+            "target_description": {"type": "string"},
+            "matches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "catalog_id": {"type": "integer"},
+                        "confidence": {"type": "number"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["catalog_id", "confidence", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+            "no_match_reason": {"type": "string"},
+        },
+        "required": ["source_description", "target_description", "matches", "no_match_reason"],
+        "additionalProperties": False,
+    }
+
+
+def normalize_catalog_match_rows(rows, candidates_by_id):
+    normalized = []
+    seen = set()
+    for row in rows or []:
+        try:
+            catalog_id = int(row.get("catalog_id"))
+        except (TypeError, ValueError):
+            continue
+        item = candidates_by_id.get(catalog_id)
+        if not item or catalog_id in seen:
+            continue
+        seen.add(catalog_id)
+        try:
+            confidence = Decimal(str(row.get("confidence") or 0))
+        except Exception:
+            confidence = Decimal("0")
+        if confidence < 0:
+            confidence = Decimal("0")
+        if confidence > 1:
+            confidence = Decimal("1")
+        normalized.append({
+            "catalog_id": catalog_id,
+            "name": item["name"],
+            "type": item["arrangement_type"],
+            "quantity": item["quantity"],
+            "volume": item["volume"],
+            "price": item["price"],
+            "price_text": item["price_text"],
+            "has_image": True,
+            "confidence": str(confidence),
+            "is_confident": confidence >= AI_CATALOG_MATCH_CONFIDENCE,
+            "reason": (row.get("reason") or "")[:500],
+            "note_uz": item["note"],
+        })
+    return sorted(normalized, key=lambda row: Decimal(row["confidence"]), reverse=True)
+
+
+def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=MAX_AI_CATALOG_MATCH_CANDIDATES):
+    attachment = latest_customer_media_attachment(conversation, source_url)
+    if not attachment or not attachment.get("url"):
+        return {"ok": False, "detail": "no_customer_media", "matches": []}
+    candidates = ai_catalog_match_candidate_rows(max(1, min(int(limit or MAX_AI_CATALOG_MATCH_CANDIDATES), MAX_AI_CATALOG_MATCH_CANDIDATES)))
+    if not candidates:
+        return {"ok": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": []}
+    direct_matches = normalize_catalog_match_rows(direct_ai_catalog_link_matches(candidates, attachment["url"]), {row["catalog_id"]: row for row in candidates})
+    if direct_matches:
+        result = {
+            "ok": True,
+            "source": attachment,
+            "source_description": "Instagram link AI katalog bilan mos keldi.",
+            "target_description": direct_matches[0]["name"],
+            "no_match_reason": "",
+            "confidence_threshold": str(AI_CATALOG_MATCH_CONFIDENCE),
+            "matches": direct_matches[:5],
+        }
+        Message.objects.create(conversation=conversation, sender="system", text="", metadata={"ai_catalog_media_match": result})
+        return result
+    if not vision_compatible_media_url(attachment["url"], attachment.get("kind")):
+        return {"ok": False, "detail": "media_url_not_image", "source": attachment, "matches": []}
+    api_key = openai_api_key()
+    if not api_key:
+        return {"ok": False, "detail": "openai_api_key_missing", "source": attachment, "matches": []}
+    image_detail = (settings.OPENAI_IMAGE_QUALITY or "low").lower()
+    if image_detail not in {"low", "high", "auto"}:
+        image_detail = "low"
+    source_url = attachment["url"]
+    text = (user_text or "").strip()
+    if not text:
+        latest_customer = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+        text = latest_customer.text if latest_customer else ""
+    content = [
+        {
+            "type": "input_text",
+            "text": json.dumps({
+                "task": "Find which AI catalog flower arrangement best matches the customer's media. Use customer text for pointing instructions like circled item, second from top, color, story/reel/post context. Return only candidates that visually match.",
+                "customer_text": text,
+                "source": {"kind": attachment.get("kind") or "media", "url": source_url},
+                "confidence_rule": "0.75 or higher only when the exact catalog item is very likely the same product. Lower confidence if only flower type/color is similar.",
+                "candidates": [{key: value for key, value in row.items() if key != "image_url"} for row in candidates],
+            }, ensure_ascii=False),
+        },
+        {"type": "input_image", "image_url": source_url, "detail": image_detail},
+    ]
+    for row in candidates:
+        content.append({"type": "input_text", "text": f"CATALOG_ID {row['catalog_id']} | {row['name']} | {row['price_text']} | {row['volume']} | {row['note'][:300]}"})
+        content.append({"type": "input_image", "image_url": row["image_url"], "detail": image_detail})
+    try:
+        response = OpenAI(api_key=api_key).responses.create(
+            model=settings.OPENAI_VISION_MODEL or settings.OPENAI_MODEL,
+            instructions="You are a strict visual matcher for a flower shop catalog. Compare the customer image/video preview with catalog images. Do not guess prices or products. Return JSON only.",
+            input=[{"role": "user", "content": content}],
+            max_output_tokens=1200,
+            reasoning={"effort": "minimal"},
+            text={"format": {"type": "json_schema", "name": "ai_catalog_media_match", "strict": True, "schema": ai_catalog_match_result_schema()}},
+        )
+        raw = json.loads(response.output_text)
+    except Exception as error:
+        print(f"AI_CATALOG_MEDIA_MATCH_FAILED conversation={conversation.id} error={error}", flush=True)
+        return {"ok": False, "detail": "vision_match_failed", "source": attachment, "error": str(error)[:500], "matches": []}
+    candidates_by_id = {row["catalog_id"]: row for row in candidates}
+    matches = normalize_catalog_match_rows(raw.get("matches"), candidates_by_id)
+    result = {
+        "ok": bool(matches),
+        "source": attachment,
+        "source_description": raw.get("source_description") or "",
+        "target_description": raw.get("target_description") or "",
+        "no_match_reason": raw.get("no_match_reason") or "",
+        "confidence_threshold": str(AI_CATALOG_MATCH_CONFIDENCE),
+        "matches": matches[:5],
+    }
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"ai_catalog_media_match": result})
+    return result
+
+
 def lead_summary_text(lead):
     """Operator suhbat ustida ko'radigan bir qatorlik xulosa."""
     details = lead.details or {}
@@ -1008,6 +1211,21 @@ def ai_tool_definitions():
                     "customer_refused_phone": {"type": "boolean", "description": "Mijoz telefon berishni rad etsa true."},
                 },
                 "required": ["summary", "phone", "customer_refused_phone"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "match_ai_catalog_by_media",
+            "description": "Mijoz yuborgan rasm, story, post yoki reel screenshotini AI katalog rasmlari bilan solishtirish. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu toolni chaqir. source_url bo'sh bo'lsa oxirgi media olinadi.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_url": {"type": ["string", "null"], "description": "Suhbatdagi aniq media URL. Bo'sh yoki null bo'lsa oxirgi customer media olinadi."},
+                    "user_text": {"type": "string", "description": "Mijozning media bilan bog'liq oxirgi savoli yoki ko'rsatmasi."},
+                },
+                "required": ["source_url", "user_text"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -1291,6 +1509,12 @@ def execute_ai_tool(name, arguments, conversation):
             summary=arguments.get("summary") or "",
             phone=arguments.get("phone") or "",
             customer_refused_phone=bool(arguments.get("customer_refused_phone")),
+        )
+    if name == "match_ai_catalog_by_media":
+        return match_ai_catalog_by_media(
+            conversation,
+            source_url=arguments.get("source_url") or "",
+            user_text=arguments.get("user_text") or "",
         )
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}

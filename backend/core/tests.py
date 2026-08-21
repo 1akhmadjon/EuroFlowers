@@ -686,7 +686,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "send_catalog_image", "send_catalog_album"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertEqual(kwargs["instructions"], AISettings.objects.get(pk=1).system_prompt)
@@ -716,7 +716,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "get_catalog", "send_catalog_image", "send_catalog_album"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
@@ -6747,6 +6747,81 @@ class OperatorHandoffTests(TestCase):
         self.conversation.messages.create(sender="ai", text="Operatorlarimiz aniq javob berishadi", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/ours.jpg"}]})
         rows = customer_attachment_rows(list(self.conversation.messages.order_by("created_at", "id")))
         self.assertEqual(rows, [{"kind": "photo", "url": "https://cdn.example.com/a.jpg"}])
+
+    def test_media_match_requires_customer_media(self):
+        customer = Customer.objects.create(instagram_user_id="ig-media-empty")
+        conversation = Conversation.objects.create(customer=customer)
+        result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "no_customer_media")
+
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_VISION_MODEL="vision-test", OPENAI_IMAGE_QUALITY="low")
+    def test_media_match_compares_customer_image_with_ai_catalog(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Gortenziya Mix Savat", arrangement_type="basket", price=900000, quantity=1, image_url="https://cdn.example.com/catalog.jpg", note="Katta savat")
+        customer = Customer.objects.create(instagram_user_id="ig-media-match")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(
+            sender="customer",
+            text="shu nechpul\nMijoz yuborgan rasm: https://cdn.example.com/customer.jpg",
+            metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]},
+        )
+        payload = {
+            "source_description": "Mijoz yuborgan rasmda savatdagi mix gortenziya bor",
+            "target_description": "Savatdagi gortenziya mix",
+            "matches": [{"catalog_id": item.id, "confidence": 0.91, "reason": "rang va savat shakli mos"}],
+            "no_match_reason": "",
+        }
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload))
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "tepadan 2chisi nechpul"}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["matches"][0]["catalog_id"], item.id)
+        self.assertTrue(result["matches"][0]["is_confident"])
+        kwargs = client.responses.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "vision-test")
+        content = kwargs["input"][0]["content"]
+        self.assertEqual(content[1]["image_url"], "https://cdn.example.com/customer.jpg")
+        self.assertEqual(content[1]["detail"], "low")
+        self.assertIn("tepadan 2chisi", content[0]["text"])
+        stored = conversation.messages.filter(sender="system").order_by("-id").first().metadata
+        self.assertIn("ai_catalog_media_match", stored)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_media_match_uses_ai_catalog_instagram_link_without_vision(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Pion Story", arrangement_type="bouquet", price=800000, quantity=1, image_url="https://cdn.example.com/pion.jpg", instagram_link="https://www.instagram.com/reel/ABC123/")
+        customer = Customer.objects.create(instagram_user_id="ig-link-match")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(
+            sender="customer",
+            text="shu nechpul\nReel link: https://www.instagram.com/reel/ABC123/?igsh=test",
+            metadata={"attachments": [{"kind": "reel", "url": "https://www.instagram.com/reel/ABC123/?igsh=test"}]},
+        )
+        with patch("core.services.OpenAI") as openai_class:
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["matches"][0]["catalog_id"], item.id)
+        self.assertEqual(result["matches"][0]["confidence"], "1")
+        openai_class.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_media_match_does_not_send_plain_reel_permalink_to_vision(self):
+        from unittest.mock import patch
+        AICatalogItem.objects.create(name="Pion Story", arrangement_type="bouquet", price=800000, quantity=1, image_url="https://cdn.example.com/pion.jpg")
+        customer = Customer.objects.create(instagram_user_id="ig-reel-no-image")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(
+            sender="customer",
+            text="shu nechpul\nReel link: https://www.instagram.com/reel/XYZ999/",
+            metadata={"attachments": [{"kind": "reel", "url": "https://www.instagram.com/reel/XYZ999/"}]},
+        )
+        with patch("core.services.OpenAI") as openai_class:
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "media_url_not_image")
+        openai_class.assert_not_called()
 
     def test_telegram_photo_is_labelled_as_a_customer_photo(self):
         from unittest.mock import patch
