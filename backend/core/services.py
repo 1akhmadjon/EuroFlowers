@@ -36,6 +36,14 @@ MAX_OPERATOR_HANDOFF_MEDIA = 10
 MAX_AI_CATALOG_MATCH_CANDIDATES = 40
 AI_CATALOG_MATCH_CONFIDENCE = Decimal("0.75")
 
+MEDIA_MATCHING_PRIORITY_INSTRUCTION = """
+MEDIA MATCHING FIRST:
+If REAL_CONTEXT_JSON.conversation.customer_attachments has any customer image, story, post or reel media and the customer asks about that media, call match_ai_catalog_by_media before asking for phone or handing off to an operator.
+If match_ai_catalog_by_media returns a confident match, call send_catalog_image with that catalog_id and answer with the item name, price and one next question.
+Only if match_ai_catalog_by_media fails or returns no matches, ask for phone and use handoff_media_to_operator.
+Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
+"""
+
 
 def ai_globally_active():
     return AISettings.objects.get_or_create(pk=1)[0].is_active
@@ -1751,9 +1759,10 @@ def ai_reply(conversation):
     client = OpenAI(api_key=api_key)
     model_input = [{"role": "user", "content": "REAL_CONTEXT_JSON:\n" + json.dumps(context, ensure_ascii=False)}]
     model_input += history
+    effective_instructions = MEDIA_MATCHING_PRIORITY_INSTRUCTION.strip() + "\n\n" + (ai_settings.system_prompt or "")
     response_kwargs = {
         "model": ai_settings.openai_model or settings.OPENAI_MODEL,
-        "instructions": ai_settings.system_prompt,
+        "instructions": effective_instructions,
         "input": model_input,
         "max_output_tokens": 8000,
         "reasoning": {"effort": ai_settings.reasoning_effort or "low"},
@@ -1785,7 +1794,7 @@ def ai_reply(conversation):
             })
         response = client.responses.create(
             model=ai_settings.openai_model or settings.OPENAI_MODEL,
-            instructions=ai_settings.system_prompt,
+            instructions=effective_instructions,
             previous_response_id=response.id,
             input=tool_outputs,
             max_output_tokens=8000,
