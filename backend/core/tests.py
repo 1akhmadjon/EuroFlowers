@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from .models import AICatalogItem, AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
-from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, recent_customer_orders, send_stock_batch_image, stock_batch_ai_row
+from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, apply_media_match_safeguard, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, recent_customer_orders, send_stock_batch_image, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -6825,6 +6825,20 @@ class OperatorHandoffTests(TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["detail"], "media_url_not_image")
         openai_class.assert_not_called()
+
+    def test_media_match_safeguard_replaces_generic_reply_and_sends_image(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        customer = Customer.objects.create(instagram_user_id="ig-media-safe")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/customer.jpg"}]})
+        result = {"reply": "Assalomu alaykum, sizga qanday gul kerak?"}
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "matches": [{"catalog_id": item.id, "name": item.name, "price_text": "800 000 so'm", "is_confident": True}]}}]
+        with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {"mocked": True})) as send_mock:
+            fixed = apply_media_match_safeguard(conversation, result, tool_results)
+        self.assertEqual(fixed["reply"], "Katalina Savat\nNarxi 800 000 so'm\nSizga qachonga kerak edi?")
+        self.assertEqual(send_mock.call_count, 1)
+        self.assertEqual(tool_results[-1]["name"], "send_catalog_image")
 
     def test_telegram_photo_is_labelled_as_a_customer_photo(self):
         from unittest.mock import patch

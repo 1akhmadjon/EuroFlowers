@@ -1010,6 +1010,50 @@ def normalize_catalog_match_rows(rows, candidates_by_id):
     return sorted(normalized, key=lambda row: Decimal(row["confidence"]), reverse=True)
 
 
+def first_confident_media_match(tool_results):
+    for row in reversed(tool_results or []):
+        if row.get("name") != "match_ai_catalog_by_media":
+            continue
+        for match in (row.get("output") or {}).get("matches") or []:
+            if match.get("is_confident"):
+                return match
+    return None
+
+
+def media_match_failed(tool_results):
+    for row in reversed(tool_results or []):
+        if row.get("name") != "match_ai_catalog_by_media":
+            continue
+        output = row.get("output") or {}
+        return not output.get("ok") or not output.get("matches")
+    return False
+
+
+def tool_results_sent_catalog(tool_results, catalog_id):
+    for row in tool_results or []:
+        if row.get("name") == "send_catalog_image" and (row.get("output") or {}).get("catalog_id") == catalog_id and (row.get("output") or {}).get("ok"):
+            return True
+    return False
+
+
+def apply_media_match_safeguard(conversation, result, tool_results):
+    match = first_confident_media_match(tool_results)
+    if match:
+        catalog_id = match.get("catalog_id")
+        item = catalog_album_queryset().filter(id=catalog_id).first()
+        if item and not tool_results_sent_catalog(tool_results, item.id):
+            output = send_catalog_item_image(conversation, item)
+            tool_results.append({"name": "send_catalog_image", "arguments": {"query": "", "catalog_id": item.id, "safeguard": True}, "output": output})
+        price_text = match.get("price_text") or (f"{money_uz(item.price)} so'm" if item else "")
+        name = match.get("name") or (item.name if item else "")
+        if name and price_text:
+            result["reply"] = f"{name}\nNarxi {price_text}\nSizga qachonga kerak edi?"
+        return result
+    if media_match_failed(tool_results) and customer_attachment_rows(conversation.messages.order_by("created_at", "id")):
+        result["reply"] = "Yuborgan rasmingiz yoki reelsingiz bo'yicha operatorlarimiz sizga aniq javob berishadi. Telefon raqamingizni yozib yuboraolasizmi?"
+    return result
+
+
 def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=MAX_AI_CATALOG_MATCH_CANDIDATES):
     attachment = latest_customer_media_attachment(conversation, source_url)
     if not attachment or not attachment.get("url"):
@@ -1823,6 +1867,7 @@ def ai_reply(conversation):
     result.setdefault("stock_items", [])
     if tool_results:
         result["tool_results"] = tool_results
+        result = apply_media_match_safeguard(conversation, result, tool_results)
     if cyrillic_mode and result.get("reply"):
         result["reply_latin"] = result["reply"]
         result["reply"] = latin_to_cyrillic(result["reply"])
