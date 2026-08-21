@@ -2599,6 +2599,8 @@ class PackagingViewSet(TotalsListMixin, ScopedViewSet):
                 reason=serializer.validated_data.get("reason", ""),
                 user=request.user,
                 sold_at=serializer.validated_data.get("sold_at"),
+                cash_amount=serializer.validated_data.get("cash_amount"),
+                card_amount=serializer.validated_data.get("card_amount"),
             )
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

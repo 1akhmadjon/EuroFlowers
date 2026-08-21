@@ -279,7 +279,7 @@ def deduct_catalog_sale_materials(item, materials, quantity, history, user, paym
     return snapshot_rows
 
 
-def sell_packaging_item(packaging, quantity=1, sale_price=None, payment_type="", reason="", user=None, sold_at=None):
+def sell_packaging_item(packaging, quantity=1, sale_price=None, payment_type="", reason="", user=None, sold_at=None, cash_amount=None, card_amount=None):
     with transaction.atomic():
         packaging = Packaging.objects.select_for_update().get(pk=packaging.pk)
         quantity = int(quantity or 1)
@@ -291,6 +291,17 @@ def sell_packaging_item(packaging, quantity=1, sale_price=None, payment_type="",
         sold_price = Decimal(str(sale_price)) if sale_price not in [None, ""] else listed_price
         if sold_price < 0:
             raise ValueError("Sotuv narxi 0 dan kam bo‘lishi mumkin emas")
+        cash = Decimal(str(cash_amount or 0)).quantize(Decimal("0.01"))
+        card = Decimal(str(card_amount or 0)).quantize(Decimal("0.01"))
+        if payment_type == "mixed":
+            total = (sold_price * Decimal(quantity)).quantize(Decimal("0.01"))
+            if cash <= 0 or card <= 0:
+                raise ValueError("Aralash to‘lovda naqd va karta summasi noldan katta bo‘lishi kerak")
+            if cash + card != total:
+                raise ValueError(f"Naqd va karta yig‘indisi sotuv summasiga teng emas. Sotuv: {total}, kiritilgan: {cash + card}")
+        else:
+            cash = Decimal("0.00")
+            card = Decimal("0.00")
         before = packaging.quantity
         packaging.quantity -= quantity
         packaging.save(update_fields=["quantity", "updated_at"])
@@ -301,6 +312,8 @@ def sell_packaging_item(packaging, quantity=1, sale_price=None, payment_type="",
             unit_cost=packaging.cost_price,
             unit_price=sold_price,
             payment_type=payment_type or "",
+            cash_amount=cash,
+            card_amount=card,
             reference_type="packaging_sale",
             reason=reason or f"{packaging.name_uz} alohida sotildi",
             performed_by=user if getattr(user, "is_authenticated", False) else None,
@@ -315,7 +328,7 @@ def sell_packaging_item(packaging, quantity=1, sale_price=None, payment_type="",
             entity_type="Packaging",
             entity_id=str(packaging.id),
             before={"quantity": before},
-            after={"quantity": packaging.quantity, "sold_quantity": quantity, "unit_price": str(sold_price), "payment_type": payment_type or "", "movement": movement.id, "reason": reason or ""},
+            after={"quantity": packaging.quantity, "sold_quantity": quantity, "unit_price": str(sold_price), "payment_type": payment_type or "", "cash_amount": str(cash), "card_amount": str(card), "movement": movement.id, "reason": reason or ""},
         )
     return movement
 
