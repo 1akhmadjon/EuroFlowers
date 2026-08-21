@@ -339,6 +339,8 @@ class BusinessRulesTests(TestCase):
             result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
         self.assertTrue(result["ok"])
         self.assertEqual(result["catalog_id"], item.id)
+        self.assertEqual(result["price_text"], "100 000 so'm")
+        self.assertIn("Narxi 100 000 so'm", result["reply_instruction"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_context_exposes_operator_contact(self):

@@ -1306,13 +1306,15 @@ def send_catalog_item_image(conversation, item):
     customer = conversation.customer
     item_name = getattr(item, "name", getattr(item, "name_uz", ""))
     image_url = catalog_item_image_url(item)
+    price_value = getattr(item, "price", "")
+    price_text = f"{money_uz(price_value)} so'm" if price_value != "" else ""
     if not image_url:
         return {"ok": False, "detail": "image_not_found", "catalog_id": item.id, "catalog_name": item_name}
     delivered, detail, sent = send_image_to_customer(customer, image_url)
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item_name, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
     if not delivered:
         return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item_name}
-    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "note_uz": getattr(item, "note", ""), "image_url": image_url}
+    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "price": str(price_value), "price_text": price_text, "note_uz": getattr(item, "note", ""), "image_url": image_url, "reply_instruction": f"{item_name}\nNarxi {price_text}\nSizga qachonga kerak edi?"}
 
 
 CATALOG_ALBUM_MAX_PER_MESSAGE = 10
