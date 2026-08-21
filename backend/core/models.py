@@ -675,7 +675,7 @@ class CatalogMaterialUsage(TimeStampedModel):
 
 
 class CatalogHistory(TimeStampedModel):
-    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("wasted", "Chiqitga chiqarildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi"), ("reworked", "Restavratsiya qilindi")]
+    ACTION_CHOICES = [("created", "Qo‘shildi"), ("updated", "O‘zgartirildi"), ("sold", "Sotildi"), ("sale_restored", "Sotuv qaytarildi"), ("wasted", "Chiqitga chiqarildi"), ("inventory_deducted", "Sklad kamaytirildi"), ("inventory_restored", "Sklad qaytarildi"), ("reworked", "Restavratsiya qilindi")]
     catalog_item = models.ForeignKey(CatalogItem, on_delete=models.CASCADE, related_name="history")
     reservation = models.ForeignKey("Reservation", null=True, blank=True, on_delete=models.SET_NULL, related_name="catalog_history")
     action = models.CharField(max_length=30, choices=ACTION_CHOICES)

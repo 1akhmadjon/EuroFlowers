@@ -2892,6 +2892,12 @@ class CatalogSellRequestSerializer(serializers.Serializer):
         return attrs
 
 
+class CatalogSaleRestoreRequestSerializer(serializers.Serializer):
+    sale_history = serializers.PrimaryKeyRelatedField(queryset=CatalogHistory.objects.filter(action="sold", quantity__gt=0), required=False)
+    quantity = serializers.IntegerField(min_value=1, required=False)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
 class CatalogRestoreFlowersSerializer(serializers.Serializer):
     florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
     old_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())

@@ -2,7 +2,7 @@ import re
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import AuditLog, Branch, FlowerVariant, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
+from .models import AuditLog, Branch, Debt, FlowerVariant, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
 
 
 def money(value):
@@ -1612,6 +1612,117 @@ def mark_catalog_sold(item, user, quantity=1, sale_price=None, discount_reason="
             CatalogHistory.objects.filter(pk=history.pk).update(created_at=sold_at)
             history.created_at = sold_at
         AuditLog.objects.create(user=user, action="catalog_sold", summary=f"{item.name_uz} katalogdan sotildi", entity_type="CatalogItem", entity_id=str(item.id), after={"catalog": item.name_uz, "status": item.status, "quantity": quantity, "quantity_sold": item.quantity_sold, "sold_unit_price": str(sold_price), "payment_type": payment_type or "", "discount_amount": str(history.discount_amount), "discount_percent": str(history.discount_percent), "discount_reason": discount_reason, "reservation": reservation.id if reservation else None})
+    return item
+
+
+def restore_catalog_sale(item, user, quantity=None, sale_history=None, reason=""):
+    with transaction.atomic():
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        history_filter = CatalogHistory.objects.select_for_update().filter(catalog_item=item, action="sold", quantity__gt=0)
+        if sale_history:
+            history_filter = history_filter.filter(pk=getattr(sale_history, "pk", sale_history))
+        history = history_filter.order_by("-created_at", "-id").first()
+        if not history:
+            raise ValueError("Qaytariladigan sotuv topilmadi")
+        original_quantity = int(history.quantity or 0)
+        if original_quantity < 1:
+            raise ValueError("Qaytariladigan sotuv miqdori topilmadi")
+        restore_quantity = int(quantity or original_quantity)
+        if restore_quantity < 1:
+            raise ValueError("Qaytariladigan son 1 dan kam bo‘lmasligi kerak")
+        if restore_quantity > original_quantity:
+            raise ValueError(f"Bu sotuvda atigi {original_quantity} ta bor")
+        if restore_quantity > int(item.quantity_sold or 0):
+            raise ValueError(f"Katalogda sotilgan miqdor {item.quantity_sold} ta")
+        before = {
+            "status": item.status,
+            "quantity_sold": item.quantity_sold,
+            "sold_at": item.sold_at.isoformat() if item.sold_at else None,
+            "history_id": history.id,
+            "history_quantity": history.quantity,
+        }
+        item.quantity_sold = max(int(item.quantity_sold or 0) - restore_quantity, 0)
+        if catalog_remaining(item) > 0 and item.status == "sold":
+            item.status = "available"
+        latest_left = CatalogHistory.objects.filter(catalog_item=item, action="sold", quantity__gt=0).exclude(pk=history.pk).order_by("-created_at", "-id").first()
+        if item.quantity_sold:
+            item.sold_at = history.created_at if restore_quantity < original_quantity else (latest_left.created_at if latest_left else None)
+        else:
+            item.sold_at = None
+        item.save(update_fields=["quantity_sold", "status", "sold_at", "updated_at"])
+        restore_snapshot = dict(history.snapshot or {})
+        restore_snapshot["restored_sale_history_id"] = history.id
+        restore_snapshot["restored_quantity"] = restore_quantity
+        restore_snapshot["restore_reason"] = reason
+        restore_history = create_catalog_history(
+            item, "sale_restored", user=user, quantity=restore_quantity,
+            listed_unit_price=history.listed_unit_price,
+            sold_unit_price=history.sold_unit_price,
+            discount_reason=reason,
+            note=reason or "Sotuv qaytarildi",
+            snapshot=restore_snapshot,
+            reservation=history.reservation,
+        )
+        movements = list(PackagingMovement.objects.select_related("packaging").filter(reference_type="catalog_sale", reference_id=history.id, quantity__lt=0))
+        for movement in movements:
+            amount = int((Decimal(abs(movement.quantity)) * Decimal(restore_quantity) / Decimal(original_quantity)).to_integral_value())
+            if amount < 1:
+                continue
+            packaging = Packaging.objects.select_for_update().get(pk=movement.packaging_id)
+            packaging.quantity += amount
+            packaging.save(update_fields=["quantity", "updated_at"])
+            PackagingMovement.objects.create(
+                packaging=packaging,
+                movement_type="in",
+                quantity=amount,
+                unit_cost=movement.unit_cost,
+                unit_price=movement.unit_price,
+                payment_type=movement.payment_type,
+                reference_type="catalog_sale_restore",
+                reference_id=restore_history.id,
+                reason=reason or f"{item.name_uz} sotuv qaytarildi",
+                performed_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+        sale_decoration = (history.snapshot or {}).get("sale_decoration") or {}
+        entry_id = sale_decoration.get("salary_entry_id")
+        if entry_id:
+            entry = FloristSalaryEntry.objects.select_for_update().filter(pk=entry_id).first()
+            if entry:
+                amount = Decimal(str(sale_decoration.get("amount") or 0)) * Decimal(restore_quantity) / Decimal(original_quantity)
+                entry.amount = Decimal(entry.amount or 0) - amount
+                if entry.amount <= 0:
+                    entry.delete()
+                else:
+                    entry.save(update_fields=["amount", "updated_at"])
+        for debt in list(Debt.objects.select_for_update().filter(catalog_history=history)):
+            if restore_quantity >= int(debt.quantity or 0):
+                debt.delete()
+            else:
+                debt.quantity = int(debt.quantity or 0) - restore_quantity
+                debt.amount = Decimal(history.sold_unit_price or 0) * Decimal(debt.quantity)
+                debt.save(update_fields=["quantity", "amount", "updated_at"])
+        if history.reservation_id and restore_quantity >= original_quantity:
+            reservation = Reservation.objects.select_for_update().filter(pk=history.reservation_id).first()
+            if reservation and reservation.status == "fulfilled":
+                reservation.status = "active"
+                reservation.save(update_fields=["status", "updated_at"])
+        if restore_quantity >= original_quantity:
+            history.delete()
+        else:
+            left_quantity = original_quantity - restore_quantity
+            history.quantity = left_quantity
+            history.discount_amount = max((Decimal(history.listed_unit_price or 0) - Decimal(history.sold_unit_price or 0)) * Decimal(left_quantity), Decimal("0"))
+            history.discount_percent = discount_percent(history.discount_amount, Decimal(history.listed_unit_price or 0) * Decimal(left_quantity))
+            snapshot = dict(history.snapshot or {})
+            for key in ["payment_cash", "payment_card", "delivery_amount"]:
+                if snapshot.get(key) not in [None, ""]:
+                    snapshot[key] = str((Decimal(str(snapshot.get(key) or 0)) * Decimal(left_quantity) / Decimal(original_quantity)).quantize(Decimal("0.01")))
+            for row in snapshot.get("sale_materials", []) or []:
+                if row.get("quantity") is not None:
+                    row["quantity"] = int((Decimal(row["quantity"]) * Decimal(left_quantity) / Decimal(original_quantity)).to_integral_value())
+            history.snapshot = snapshot
+            history.save(update_fields=["quantity", "discount_amount", "discount_percent", "snapshot", "updated_at"])
+        AuditLog.objects.create(user=user if getattr(user, "is_authenticated", False) else None, action="catalog_sale_restored", summary=f"{item.name_uz} katalog sotuvdan qaytarildi", entity_type="CatalogItem", entity_id=str(item.id), before=before, after={"status": item.status, "quantity": restore_quantity, "quantity_sold": item.quantity_sold, "restored_history": restore_history.id, "reason": reason})
     return item
 
 

@@ -3088,6 +3088,47 @@ class ApiTests(TestCase):
         self.assertTrue(PackagingMovement.objects.filter(packaging=material, reference_type="catalog_sale", reference_id=history.id, quantity=-4).exists())
         self.assertTrue(FloristSalaryEntry.objects.filter(florist=decorator, catalog_item=item, source="sale_decoration", amount=Decimal("80000.00")).exists())
 
+    def test_catalog_restore_sale_returns_item_to_available_and_removes_accounting_sale(self):
+        item = CatalogItem.objects.create(name_uz="Qaytariladigan buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=1, status="available")
+        self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
+        response = self.client.post(f"/api/catalog/{item.id}/restore-sale/", {"reason": "Xato sotildi qilingan"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 0)
+        self.assertEqual(item.status, "available")
+        self.assertFalse(CatalogHistory.objects.filter(catalog_item=item, action="sold").exists())
+        self.assertTrue(CatalogHistory.objects.filter(catalog_item=item, action="sale_restored").exists())
+        report = self.client.get("/api/accounting/")
+        self.assertEqual(Decimal(report.data["summary"]["total_sales"]), Decimal("0"))
+
+    def test_catalog_restore_sale_partially_restores_material_and_decoration_salary(self):
+        material = Packaging.objects.create(packaging_type="wrap", name_uz="Qaytariladigan qogoz", quantity=10, sale_price=50000)
+        decorator_user = User.objects.create_user("restore-decorator", password="password")
+        decorator = FloristProfile.objects.create(user=decorator_user, staff_type="florist", decoration_fee=Decimal("40000"))
+        item = CatalogItem.objects.create(name_uz="Partial qaytarish buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=3, status="available")
+        sell = self.client.post(f"/api/catalog/{item.id}/sell/", {
+            "quantity": 2,
+            "payment_type": "cash",
+            "materials": [{"packaging": material.id, "quantity": 2}],
+            "decoration_florist": decorator.id,
+        }, format="json")
+        self.assertEqual(sell.status_code, 200, sell.data)
+        history = CatalogHistory.objects.get(catalog_item=item, action="sold")
+        response = self.client.post(f"/api/catalog/{item.id}/restore-sale/", {
+            "sale_history": history.id,
+            "quantity": 1,
+            "reason": "Bitta dona xato sotildi",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        item.refresh_from_db()
+        material.refresh_from_db()
+        history.refresh_from_db()
+        self.assertEqual(item.quantity_sold, 1)
+        self.assertEqual(history.quantity, 1)
+        self.assertEqual(material.quantity, 8)
+        self.assertTrue(PackagingMovement.objects.filter(packaging=material, reference_type="catalog_sale_restore", quantity=2).exists())
+        self.assertEqual(FloristSalaryEntry.objects.get(florist=decorator, catalog_item=item, source="sale_decoration").amount, Decimal("40000.00"))
+
     def test_catalog_sell_api_accepts_discounted_price_with_reason(self):
         item = CatalogItem.objects.create(name_uz="API skidka buket", arrangement_type="bouquet", price=500000, quantity_total=2, status="available")
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {"sale_image_url": "https://example.com/sale.jpg", "quantity": 1, "sale_price": "450000.00"}, format="json")
