@@ -260,6 +260,35 @@ def fingerprint_score(source, target, item_text=""):
     return int(score)
 
 
+def vision_json(client, *, schema_name, schema, instructions, content, max_output_tokens):
+    """Vision so'rovini yuborib JSON qaytaradi, kesilib qolsa bir marta qayta uradi.
+
+    reasoning byudjeti max_output_tokens ichidan yeyiladi, shuning uchun uzunroq
+    o'ylagan javob JSON tugamasdan kesilib qolishi mumkin. Bunday holatda joyni
+    kengaytirib va o'ylashni qisqartirib qayta so'raymiz.
+    """
+    attempts = [
+        (max_output_tokens, vision_reasoning()),
+        (max_output_tokens * 2, "low"),
+    ]
+    last_error = None
+    for tokens, effort in attempts:
+        response = client.responses.create(
+            model=vision_model(),
+            instructions=instructions,
+            input=[{"role": "user", "content": content}],
+            max_output_tokens=tokens,
+            reasoning={"effort": effort},
+            text={"format": {"type": "json_schema", "name": schema_name, "strict": True, "schema": schema}},
+        )
+        try:
+            return json.loads(response.output_text)
+        except (json.JSONDecodeError, TypeError) as error:
+            last_error = error
+            print(f"VISION_JSON_INCOMPLETE schema={schema_name} status={getattr(response, 'status', '')} tokens={tokens}", flush=True)
+    raise ValueError(f"vision response was not valid json: {last_error}")
+
+
 def analyze_image(image_url, context_text="", instructions="", with_region=False, api_key=""):
     """Bitta rasmni tahlil qilib fingerprint qaytaradi."""
     api_key = api_key or openai_api_key()
@@ -286,15 +315,15 @@ def analyze_image(image_url, context_text="", instructions="", with_region=False
         {"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)},
         {"type": "input_image", "image_url": image_url, "detail": vision_detail()},
     ]
-    response = OpenAI(api_key=api_key).responses.create(
-        model=vision_model(),
+    raw = vision_json(
+        OpenAI(api_key=api_key),
+        schema_name="flower_fingerprint",
+        schema=fingerprint_schema(with_region=with_region),
         instructions=instructions or "You describe flower arrangements for a flower shop catalog. Be literal and precise about flower form and flower colour. Return JSON only.",
-        input=[{"role": "user", "content": content}],
-        max_output_tokens=1500,
-        reasoning={"effort": vision_reasoning()},
-        text={"format": {"type": "json_schema", "name": "flower_fingerprint", "strict": True, "schema": fingerprint_schema(with_region=with_region)}},
+        content=content,
+        max_output_tokens=3000,
     )
-    return clean_fingerprint(json.loads(response.output_text))
+    return clean_fingerprint(raw)
 
 
 def catalog_item_context(item):
@@ -406,12 +435,11 @@ def verify_candidates(source_url, source, rows, customer_text="", api_key=""):
         item = row["item"]
         content.append({"type": "input_text", "text": f"CATALOG PHOTO catalog_id={item.id} name={item.name}"})
         content.append({"type": "input_image", "image_url": item.image_url, "detail": vision_detail()})
-    response = OpenAI(api_key=api_key).responses.create(
-        model=vision_model(),
+    return vision_json(
+        OpenAI(api_key=api_key),
+        schema_name="catalog_verification",
+        schema=verification_schema(),
         instructions="You are a strict flower identification checker for a flower shop. You decide only whether two photos show the same catalog product. Prefer 'different' over a wrong match. Return JSON only.",
-        input=[{"role": "user", "content": content}],
-        max_output_tokens=2000,
-        reasoning={"effort": vision_reasoning()},
-        text={"format": {"type": "json_schema", "name": "catalog_verification", "strict": True, "schema": verification_schema()}},
+        content=content,
+        max_output_tokens=4000,
     )
-    return json.loads(response.output_text)

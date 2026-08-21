@@ -7194,6 +7194,34 @@ class VisionFingerprintTests(TestCase):
         self.assertTrue(vision_services.fingerprint_is_stale(item))
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_truncated_vision_json_is_retried_with_more_room(self):
+        """reasoning byudjeti JSON ni kesib qo'ysa so'rov kengroq joy bilan qaytariladi."""
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/a.jpg")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.side_effect = [
+                SimpleNamespace(output_text='{"flower_form": "peo', status="incomplete"),
+                SimpleNamespace(output_text=json.dumps(vision_fingerprint()), status="completed"),
+            ]
+            fingerprint = vision_services.build_catalog_fingerprint(item)
+        self.assertEqual(fingerprint["flower_form"], "peony_rose")
+        first, second = client.responses.create.call_args_list
+        self.assertEqual(second.kwargs["max_output_tokens"], first.kwargs["max_output_tokens"] * 2)
+        self.assertEqual(second.kwargs["reasoning"]["effort"], "low")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_vision_json_gives_up_after_the_retry(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/a.jpg")
+        with patch("core.vision_services.OpenAI") as openai_class:
+            openai_class.return_value.responses.create.return_value = SimpleNamespace(output_text="{", status="incomplete")
+            # ensure_catalog_fingerprint xatoni yutadi va eski fingerprintni qoldiradi.
+            self.assertEqual(vision_services.ensure_catalog_fingerprint(item), {})
+        item.refresh_from_db()
+        self.assertEqual(item.visual_fingerprint, {})
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_catalog_fingerprint_gets_the_name_and_note_as_context(self):
         from unittest.mock import patch
         item = AICatalogItem.objects.create(name="Katalina Gulidan Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/k.jpg", note="pionavidniy katalina ranglari tiniq sariq")
