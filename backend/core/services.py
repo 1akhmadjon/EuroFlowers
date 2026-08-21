@@ -13,6 +13,7 @@ from .platform_services import instagram_send_carousel, instagram_send_image, op
 
 
 AI_REPLY_WAIT_SECONDS = 7
+INSTAGRAM_AI_REPLY_WAIT_SECONDS = 10
 AI_FOLLOW_UP_DELAY_SECONDS = 30 * 60
 
 # Sklad AI ga ko'rsatilmaydi. Bu nomlar tool ro'yxatidan olib tashlangan, model baribir
@@ -1669,7 +1670,7 @@ def ingest_customer_message(conversation, message_text, instagram_message_id="",
     return message
 
 
-def ai_reply_wait_seconds_remaining(conversation_id, expected_message_id):
+def ai_reply_wait_seconds_remaining(conversation_id, expected_message_id, wait_seconds=None):
     conversation = Conversation.objects.filter(id=conversation_id).first()
     if not conversation:
         return None
@@ -1677,7 +1678,7 @@ def ai_reply_wait_seconds_remaining(conversation_id, expected_message_id):
     if not latest or latest.id != expected_message_id:
         return None
     elapsed = (timezone.now() - latest.created_at).total_seconds()
-    return max(0, AI_REPLY_WAIT_SECONDS - elapsed)
+    return max(0, (wait_seconds or AI_REPLY_WAIT_SECONDS) - elapsed)
 
 
 def compact_match_text(value):

@@ -3,7 +3,7 @@ from math import ceil
 import threading
 import time
 from .platform_services import instagram_send, instagram_sender_action, send_due_lead_recalls, send_lead_recall, telegram_send, telegram_sender_action
-from .services import AI_FOLLOW_UP_DELAY_SECONDS, ai_reply_wait_seconds_remaining, process_pending_customer_reply, process_stalled_conversation_follow_up, should_start_ai_reply
+from .services import AI_FOLLOW_UP_DELAY_SECONDS, INSTAGRAM_AI_REPLY_WAIT_SECONDS, ai_reply_wait_seconds_remaining, process_pending_customer_reply, process_stalled_conversation_follow_up, should_start_ai_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import send_backup_to_telegram
 
@@ -22,7 +22,12 @@ def keep_typing(send_action, stop_event, error_label, interval=4):
 def process_instagram_webhook(payload):
     jobs = resolve_instagram_event(payload)
     for job in jobs:
-        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=7)
+        if should_start_ai_reply(job["conversation_id"], job["message_id"]):
+            try:
+                instagram_sender_action(job["recipient_id"], "typing_on")
+            except Exception as exc:
+                print(f"INSTAGRAM_TYPING_ON_FAILED recipient={job['recipient_id']} error={exc}", flush=True)
+        process_delayed_instagram_reply.apply_async(args=[job["conversation_id"], job["message_id"], job["recipient_id"]], countdown=INSTAGRAM_AI_REPLY_WAIT_SECONDS)
     return jobs
 
 
@@ -30,7 +35,7 @@ def process_instagram_webhook(payload):
 def process_delayed_instagram_reply(conversation_id, expected_message_id, recipient_id):
     if not should_start_ai_reply(conversation_id, expected_message_id):
         return None
-    remaining = ai_reply_wait_seconds_remaining(conversation_id, expected_message_id)
+    remaining = ai_reply_wait_seconds_remaining(conversation_id, expected_message_id, INSTAGRAM_AI_REPLY_WAIT_SECONDS)
     if remaining is None:
         return None
     if remaining > 0:
