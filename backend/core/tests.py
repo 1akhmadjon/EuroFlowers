@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from .models import AICatalogItem, AISettings, AuditLog, Debt, Expense, BusinessSettings, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, Conversation, Customer, FloristAttendance, FloristProfile, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, SocialPost, StockDelivery, Branch, CatalogTransfer, FloristDayOff, FloristStockBalance, FloristStockIssue, StockBatch, StockMovement, Supplier, SupplierPayment, UserProfile
 from .serializers import CatalogItemSerializer, ConversationSerializer, FloristProfileSerializer, FloristSalaryEntrySerializer, FloristVolumeRateSerializer, PackagingSerializer, StockBatchSerializer, permission_matrix
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
-from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, send_stock_batch_image, stock_batch_ai_row
+from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, recent_customer_orders, send_stock_batch_image, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
@@ -737,9 +737,8 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(result["image_url"], "https://example.com/freedom.jpg")
         image_mock.assert_called_once_with("13", "https://example.com/freedom.jpg")
 
-    def test_client_lead_create_tool_creates_customer_lead_and_usage(self):
-        self.item.status = "available"
-        self.item.save(update_fields=["status", "updated_at"])
+    def _ai_catalog_lead(self, catalog_name="Oq buket"):
+        AICatalogItem.objects.create(name="Oq buket", arrangement_type="bouquet", quantity=3, price=Decimal("500000"))
         customer = Customer.objects.create(instagram_user_id="telegram:10")
         conversation = Conversation.objects.create(customer=customer)
         result = execute_ai_tool("client_lead_create", {
@@ -748,10 +747,14 @@ class BusinessRulesTests(TestCase):
             "request_text": "Oq buket 1 dona, kelib olish",
             "arrangement_type": "catalog",
             "estimated_price": 500000,
-            "catalog_items": [{"catalog_name": "Oq buket", "quantity": 1}],
+            "catalog_items": [{"catalog_name": catalog_name, "quantity": 1}],
             "stock_items": [],
             "note": None,
         }, conversation)
+        return customer, result
+
+    def test_client_lead_create_tool_creates_customer_and_lead(self):
+        customer, result = self._ai_catalog_lead()
         self.assertTrue(result["ok"])
         customer.refresh_from_db()
         self.assertEqual(customer.name, "Ahmad")
@@ -759,7 +762,31 @@ class BusinessRulesTests(TestCase):
         lead = Lead.objects.get(id=result["lead_id"])
         self.assertEqual(lead.request_uz, "Oq buket 1 dona, kelib olish")
         self.assertEqual(lead.source, "telegram")
-        self.assertTrue(LeadCatalogUsage.objects.filter(lead=lead, catalog_item=self.item, quantity=1).exists())
+
+    def test_client_lead_create_writes_ai_catalog_choice_into_details(self):
+        item = AICatalogItem.objects.filter(name="Oq buket").first()
+        _, result = self._ai_catalog_lead()
+        lead = Lead.objects.get(id=result["lead_id"])
+        row = lead.details["catalog_items"][0]
+        self.assertEqual(row["catalog_name"], "Oq buket")
+        self.assertEqual(row["quantity"], 1)
+        self.assertEqual(row["price"], "500000.00")
+        self.assertEqual(row["ai_catalog_item"], AICatalogItem.objects.get(name="Oq buket").id)
+        # AI katalogi sklad katalogi emas — bog'lanish ochilmaydi, operator o'zi tanlaydi
+        self.assertFalse(LeadCatalogUsage.objects.filter(lead=lead).exists())
+
+    def test_client_lead_create_keeps_unmatched_catalog_name(self):
+        _, result = self._ai_catalog_lead(catalog_name="Nomalum kompozitsiya")
+        lead = Lead.objects.get(id=result["lead_id"])
+        row = lead.details["catalog_items"][0]
+        self.assertEqual(row["catalog_name"], "Nomalum kompozitsiya")
+        self.assertIsNone(row["ai_catalog_item"])
+
+    def test_recent_orders_show_ai_catalog_choice(self):
+        customer, result = self._ai_catalog_lead()
+        orders = recent_customer_orders(customer)
+        self.assertEqual(orders[0]["catalog_items"][0]["name_uz"], "Oq buket")
+        self.assertEqual(orders[0]["catalog_items"][0]["quantity"], 1)
 
     def test_ai_stock_rows_matches_long_price_query(self):
         rows = ai_stock_rows("Mondial oq atirgul narxi va mavjudlik 10 dona", limit=10)

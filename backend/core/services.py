@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadCatalogUsage, LeadStockUsage, Message, Notification, Packaging, StockBatch
+from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadStockUsage, Message, Notification, Packaging, StockBatch
 from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group, telegram_send_rich_message_with, telegram_send_with
 
 
@@ -342,6 +342,13 @@ def recent_customer_orders(customer):
     orders = []
     for lead in customer.leads.select_related("social_post").prefetch_related("catalog_usage__catalog_item", "stock_usage__stock_batch__variant__flower", "packaging_usage__packaging").order_by("-created_at")[:3]:
         catalog_items = [{"name_uz": row.catalog_item.name_uz, "quantity": row.quantity, "type": row.catalog_item.arrangement_type, "price": str(row.catalog_item.price)} for row in lead.catalog_usage.all()]
+        if not catalog_items:
+            # AI orqali tushgan leadda sklad katalogi bog'lanmaydi, tanlov `details` da turadi.
+            catalog_items = [
+                {"name_uz": row.get("catalog_name") or "", "quantity": row.get("quantity") or 1, "type": lead.arrangement_type, "price": row.get("price") or ""}
+                for row in (lead.details or {}).get("catalog_items") or []
+                if isinstance(row, dict) and row.get("catalog_name")
+            ]
         stock_items = [{
             "flower_uz": row.stock_batch.variant.flower.name_uz,
             "variant_uz": row.stock_batch.variant.name_uz,
@@ -655,6 +662,28 @@ def calculate_custom_arrangement_price(stock_items):
             "total": f"Jami taxminan {money_uz(total)} so'm",
         },
     }
+
+
+def ai_catalog_lead_rows(arguments):
+    """AI katalogidan tanlangan mahsulotlar leadga izoh sifatida yoziladi.
+
+    AI ko'radigan katalog — alohida `AICatalogItem` ro'yxati, sklad katalogi emas.
+    Shuning uchun `LeadCatalogUsage` ochilmaydi: u sklad mahsulotiga bog'lanadi va
+    haqiqiy mahsulotni operator o'zi tanlaydi.
+    """
+    rows = []
+    for row in arguments.get("catalog_items") or []:
+        quantity = int(row.get("quantity") or 1)
+        if quantity <= 0:
+            continue
+        item = _catalog_item_for_ai(row.get("catalog_name"))
+        rows.append({
+            "catalog_name": item.name if item else str(row.get("catalog_name") or "").strip()[:180],
+            "quantity": quantity,
+            "ai_catalog_item": item.id if item else None,
+            "price": str(item.price) if item else "",
+        })
+    return rows
 
 
 def lead_request_details(arguments):
@@ -1252,7 +1281,7 @@ def execute_ai_tool(name, arguments, conversation):
     desired_date = parse_lead_date(arguments.get("desired_date"))
     desired_time = (arguments.get("desired_time") or "").strip()
     details = {
-        "catalog_items": arguments.get("catalog_items") or [],
+        "catalog_items": ai_catalog_lead_rows(arguments),
         "stock_items": arguments.get("stock_items") or [],
         "note": arguments.get("note") or "",
         "created_by": "ai_tool",
@@ -1299,13 +1328,6 @@ def execute_ai_tool(name, arguments, conversation):
             fields.append("details")
         if fields:
             lead.save(update_fields=list(set(fields)) + ["updated_at"])
-        if arguments.get("catalog_items") is not None:
-            lead.catalog_usage.all().delete()
-            for row in arguments.get("catalog_items") or []:
-                item = _catalog_item_for_ai(row.get("catalog_name"))
-                quantity = int(row.get("quantity") or 1)
-                if item and quantity > 0:
-                    LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=quantity)
         if arguments.get("stock_items") is not None:
             lead.stock_usage.all().delete()
             for row in arguments.get("stock_items") or []:
@@ -1336,11 +1358,6 @@ def execute_ai_tool(name, arguments, conversation):
         details=details,
         source="telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
     )
-    for row in arguments.get("catalog_items") or []:
-        item = _catalog_item_for_ai(row.get("catalog_name"))
-        quantity = int(row.get("quantity") or 1)
-        if item and quantity > 0:
-            LeadCatalogUsage.objects.create(lead=lead, catalog_item=item, quantity=quantity)
     for row in arguments.get("stock_items") or []:
         batch = StockBatch.objects.filter(id=row.get("batch_id"), is_active=True).first()
         quantity_stems = int(row.get("quantity_stems") or 0)
