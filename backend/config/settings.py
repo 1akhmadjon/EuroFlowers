@@ -95,7 +95,8 @@ OPENAI_IMAGE_QUALITY = os.getenv("OPENAI_IMAGE_QUALITY", "low")
 # Gul navini (Alfalob, Jumila, London, Katalina) ajratish uchun past sifatli rasm
 # yetmaydi — 512px da gulbarg shakli yo'qoladi. Shuning uchun bu yerda default high.
 OPENAI_VISION_DETAIL = os.getenv("OPENAI_VISION_DETAIL", "high")
-OPENAI_VISION_REASONING = os.getenv("OPENAI_VISION_REASONING", "medium")
+OPENAI_VISION_REASONING = os.getenv("OPENAI_VISION_REASONING", "low")
+OPENAI_VISION_CROWDED_REASONING = os.getenv("OPENAI_VISION_CROWDED_REASONING", "medium")
 AI_CATALOG_MATCH_SHORTLIST = int(os.getenv("AI_CATALOG_MATCH_SHORTLIST", "4"))
 AI_CATALOG_MATCH_MIN_SCORE = int(os.getenv("AI_CATALOG_MATCH_MIN_SCORE", "55"))
 AI_TEST_INSTAGRAM_USERNAMES = [value.strip().lower().lstrip("@") for value in os.getenv("AI_TEST_INSTAGRAM_USERNAMES", "extra_teest").split(",") if value.strip()]

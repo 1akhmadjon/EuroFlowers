@@ -150,9 +150,27 @@ def vision_detail():
     return value if value in {"low", "high", "auto"} else "high"
 
 
-def vision_reasoning():
-    value = (getattr(settings, "OPENAI_VISION_REASONING", "") or "medium").lower()
+def crowded_reasoning():
+    """Kadrda bir nechta mahsulot turgan rasm uchun o'ylash byudjeti.
+
+    O'lchov: oddiy mahsulot rasmida "medium" sifatni umuman oshirmadi, faqat
+    har so'rovni 15 soniyadan 25 soniyaga cho'zdi. Kadrda beshta buket bo'lganda
+    esa aksincha — "low" uchdan bir hollarda noto'g'ri buketni tanladi. Shuning
+    uchun chuqur o'ylash faqat o'sha holatga sarflanadi.
+    """
+    value = (getattr(settings, "OPENAI_VISION_CROWDED_REASONING", "") or "medium").lower()
     return value if value in {"minimal", "low", "medium", "high"} else "medium"
+
+
+def vision_reasoning():
+    """Oddiy mahsulot rasmi uchun o'ylash byudjeti.
+
+    O'lchandi: bitta mahsulot turgan rasmda "medium" sifatni oshirmadi, faqat
+    har so'rovni 15 soniyadan 25 soniyaga cho'zdi. Murakkab kadr uchun
+    crowded_reasoning() ishlatiladi.
+    """
+    value = (getattr(settings, "OPENAI_VISION_REASONING", "") or "low").lower()
+    return value if value in {"minimal", "low", "medium", "high"} else "low"
 
 
 def shortlist_size():
@@ -381,7 +399,7 @@ def sizes_can_match(source, target):
     return True
 
 
-def vision_json(client, *, schema_name, schema, instructions, content, max_output_tokens):
+def vision_json(client, *, schema_name, schema, instructions, content, max_output_tokens, reasoning=""):
     """Vision so'rovini yuborib JSON qaytaradi, kesilib qolsa bir marta qayta uradi.
 
     reasoning byudjeti max_output_tokens ichidan yeyiladi, shuning uchun uzunroq
@@ -389,7 +407,7 @@ def vision_json(client, *, schema_name, schema, instructions, content, max_outpu
     kengaytirib va o'ylashni qisqartirib qayta so'raymiz.
     """
     attempts = [
-        (max_output_tokens, vision_reasoning()),
+        (max_output_tokens, reasoning or vision_reasoning()),
         (max_output_tokens * 2, "low"),
     ]
     last_error = None
@@ -440,14 +458,39 @@ def analyze_image(image_url, context_text="", instructions="", with_region=False
         {"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)},
         {"type": "input_image", "image_url": image_url, "detail": vision_detail()},
     ]
+    client = OpenAI(api_key=api_key)
+    schema = fingerprint_schema(with_region=with_region)
+    instructions = instructions or "You describe flower arrangements for a flower shop catalog. Be literal and precise about flower form and flower colour. Return JSON only."
     raw = vision_json(
-        OpenAI(api_key=api_key),
+        client,
         schema_name="flower_fingerprint",
-        schema=fingerprint_schema(with_region=with_region),
-        instructions=instructions or "You describe flower arrangements for a flower shop catalog. Be literal and precise about flower form and flower colour. Return JSON only.",
+        schema=schema,
+        instructions=instructions,
         content=content,
         max_output_tokens=4000 if with_region else 3000,
     )
+    first = clean_fingerprint(raw)
+    # Kadrda bir nechta mahsulot bor va mijoz bittasini ko'rsatgan bo'lsa, tahlilni
+    # chuqurroq o'ylash bilan qaytaramiz. Buni oldindan bilib bo'lmaydi — rasmda
+    # nechta gul borligini birinchi tahlilning o'zi aytadi.
+    crowded = bool(first.get("region_requested")) and (
+        bool(first.get("multiple_products_visible")) or len(first.get("visible_products") or []) > 1
+    )
+    if not crowded or crowded_reasoning() == vision_reasoning():
+        return first
+    try:
+        raw = vision_json(
+            client,
+            schema_name="flower_fingerprint",
+            schema=schema,
+            instructions=instructions,
+            content=content,
+            max_output_tokens=5000,
+            reasoning=crowded_reasoning(),
+        )
+    except Exception as error:
+        print(f"VISION_CROWDED_RETRY_FAILED error={error}", flush=True)
+        return first
     return clean_fingerprint(raw)
 
 

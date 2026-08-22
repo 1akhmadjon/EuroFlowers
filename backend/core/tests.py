@@ -7350,6 +7350,29 @@ class OperatorHandoffTests(TestCase):
         self.assertGreater(vision_services.fingerprint_score(source, same), 85)
         self.assertLessEqual(vision_services.fingerprint_score(source, smaller), vision_services.DIFFERENT_SIZE_CEILING)
 
+    def test_a_crowded_photo_is_analysed_again_with_a_deeper_budget(self):
+        """Kadrda beshta buket bo'lsa "low" uchdan bir hollarda adashadi."""
+        from unittest.mock import patch
+        crowded = vision_services.clean_fingerprint(vision_fingerprint(
+            region_requested=True, multiple_products_visible=True,
+            visible_products=[{"position": 1, "where": "top", "short_description": "a"}, {"position": 2, "where": "bottom", "short_description": "b"}],
+            chosen_position=2,
+        ))
+        with patch.object(vision_services, "vision_json", return_value=crowded) as call:
+            with override_settings(OPENAI_VISION_REASONING="low", OPENAI_VISION_CROWDED_REASONING="medium"):
+                vision_services.analyze_image("https://cdn.example.com/grid.jpg", context_text="tepadan 2chisi", with_region=True, api_key="test-key")
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_args_list[0].kwargs.get("reasoning", ""), "")
+        self.assertEqual(call.call_args_list[1].kwargs["reasoning"], "medium")
+
+    def test_a_single_product_photo_is_analysed_once(self):
+        from unittest.mock import patch
+        plain = vision_services.clean_fingerprint(vision_fingerprint(region_requested=False, multiple_products_visible=False))
+        with patch.object(vision_services, "vision_json", return_value=plain) as call:
+            with override_settings(OPENAI_VISION_REASONING="low", OPENAI_VISION_CROWDED_REASONING="medium"):
+                vision_services.analyze_image("https://cdn.example.com/one.jpg", context_text="shu nechpul", with_region=True, api_key="test-key")
+        self.assertEqual(call.call_count, 1)
+
     def test_a_low_basket_full_of_flowers_still_matches_its_own_photo(self):
         """Savat katalogda "medium" (bo'yi past), rasmda esa model uni "extra_large" deydi."""
         catalog = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket", size="medium", count_bucket="over_100")
