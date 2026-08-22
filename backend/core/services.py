@@ -1194,6 +1194,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     # Mijoz rasmidagi idish savatmi, buketmi, quticha yoki vazami. Model bir savatni
     # qo'ldagi buketga "same_product" deb qo'yishi mumkin, shu yerda to'xtatiladi.
     source_family = vision_services.container_family(source)
+    required = vision_services.required_score(source)
 
     passed = []
     rejected = []
@@ -1210,7 +1211,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             and bool(judgement.get("flower_form_match"))
             and bool(judgement.get("color_match"))
             and bool(judgement.get("container_match"))
-            and row["score"] >= vision_services.min_match_score()
+            and row["score"] >= required
             and vision_services.families_can_match(source_family, row["family"])
             and vision_services.sizes_can_match(source, row["fingerprint"])
             and vision_services.forms_can_match(source.get("flower_form"), row["fingerprint"].get("flower_form"))

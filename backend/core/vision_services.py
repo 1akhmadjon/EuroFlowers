@@ -163,6 +163,23 @@ def min_match_score():
     return max(0, min(int(getattr(settings, "AI_CATALOG_MATCH_MIN_SCORE", 55) or 55), 100))
 
 
+# Kadrda beshta buket turganda ularning har biri kichkina bo'lib qoladi va model
+# gul turini chalkashtiradi: shoxli gulni pionavidniy, pionavidniyni shoxli deb
+# ataydi. Bitta gul turgan rasmda bunday bo'lmaydi. Shuning uchun ko'rsatilgan
+# gulni topish uchun ancha baland ball talab qilinadi — yetmasa mijozdan o'sha
+# gulni kesib yuborishini so'raymiz, taxmin qilib narx aytgandan ko'ra.
+CROWDED_PHOTO_MIN_SCORE = 78
+
+
+def required_score(source):
+    """Shu rasm uchun ishonchli deb hisoblanadigan eng past ball."""
+    base = min_match_score()
+    crowded = bool(source.get("region_requested")) and (
+        bool(source.get("multiple_products_visible")) or len(source.get("visible_products") or []) > 1
+    )
+    return max(base, CROWDED_PHOTO_MIN_SCORE) if crowded else base
+
+
 def fingerprint_schema(with_region=False):
     properties = {
         "flower_form": {"type": "string", "enum": FLOWER_FORMS},

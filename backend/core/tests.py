@@ -7052,6 +7052,33 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_middling_score_is_enough_for_a_single_product_photo(self):
+        item = AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket", color_pattern="solid", size="medium", count_bucket="over_100"))
+        conversation = media_conversation("ig-single-middling")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["yellow", "cream"], container="basket", color_pattern="two_tone", size="large", count_bucket="50_to_100")
+        with patch_vision(source, {item.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertLess(result["matches"][0]["score"], vision_services.CROWDED_PHOTO_MIN_SCORE)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_same_middling_score_is_not_enough_in_a_crowded_photo(self):
+        """Kadrda beshta buket turganda model gul turini chalkashtiradi — chegara balandroq."""
+        item = AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket", color_pattern="solid", size="medium", count_bucket="over_100"))
+        conversation = media_conversation("ig-crowded-middling")
+        source = vision_fingerprint(
+            flower_form="peony_rose", dominant_colors=["yellow", "cream"], container="basket",
+            color_pattern="two_tone", size="large", count_bucket="50_to_100",
+            region_requested=True, multiple_products_visible=True,
+            visible_products=[{"position": 1, "where": "top", "short_description": "a"}, {"position": 2, "where": "bottom", "short_description": "b"}],
+            chosen_position=2,
+        )
+        with patch_vision(source, {item.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "chizganim qancha"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertEqual(result["detail"], "ask_for_crop")
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_pointed_at_flower_in_a_crowded_photo_gets_a_crop_request(self):
         """Ko'p gulli rasmdan bittasi ko'rsatilib topilmasa, kesib yuborishni so'raymiz."""
         AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"))
