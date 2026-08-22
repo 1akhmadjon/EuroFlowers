@@ -135,7 +135,7 @@ VERDICTS = ["same_product", "similar_only", "different"]
 
 # Ikki katalog mahsulotining rasmi shu balldan yuqori o'xshasa ularni bir-biridan
 # rasm orqali ajratib bo'lmaydi.
-TWIN_SCORE = 85
+TWIN_SCORE = 90
 
 FINGERPRINT_VERSION = 2
 

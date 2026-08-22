@@ -7041,7 +7041,8 @@ class OperatorHandoffTests(TestCase):
         big = AICatalogItem.objects.create(name="Buket Jumila 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/big.jpg", **catalog_fingerprint_fields("https://cdn.example.com/big.jpg", flower_form="spray_rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet"))
         conversation = media_conversation("ig-look-alike")
         source = vision_fingerprint(flower_form="spray_rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet")
-        with patch_vision(source, {small.id: verdict_payload(), big.id: verdict_payload(verdict="similar_only")}):
+        # Rasmda ajratib bo'lmagani uchun model ikkalasini ham aynan shu mahsulot deydi.
+        with patch_vision(source, {small.id: verdict_payload(), big.id: verdict_payload()}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertTrue(result["ok"])
         self.assertFalse(result["allow_send"])
@@ -7050,6 +7051,31 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(result["matches"], [])
         self.assertEqual(sorted(row["catalog_id"] for row in result["group_matches"]), sorted([small.id, big.id]))
         self.assertIn("send_catalog_album", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_merely_similar_item_is_not_put_in_the_group(self):
+        """Model "o'xshash" degani "boshqa mahsulot" degani — uni ko'rsatish chalg'itadi."""
+        winner = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket"))
+        other = AICatalogItem.objects.create(name="Savat Bables", arrangement_type="basket", price=1500000, quantity=1, image_url="https://cdn.example.com/bables.jpg", **catalog_fingerprint_fields("https://cdn.example.com/bables.jpg", flower_form="peony_rose", dominant_colors=["pink", "hot_pink"], container="basket"))
+        conversation = media_conversation("ig-similar-not-group")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket")
+        with patch_vision(source, {winner.id: verdict_payload(), other.id: verdict_payload(verdict="similar_only")}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [winner.id])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [other.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_clearly_weaker_candidate_is_not_put_in_the_group(self):
+        """G'olibdan ancha orqada qolgan mahsulotni "qaysi biri" deb so'rash keraksiz."""
+        winner = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket", color_pattern="two_tone"))
+        weaker = AICatalogItem.objects.create(name="Savat Jumila", arrangement_type="basket", price=900000, quantity=1, image_url="https://cdn.example.com/jumila.jpg", **catalog_fingerprint_fields("https://cdn.example.com/jumila.jpg", flower_form="peony_rose", dominant_colors=["white", "cream"], container="basket", color_pattern="solid"))
+        conversation = media_conversation("ig-weaker-not-group")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket", color_pattern="two_tone")
+        with patch_vision(source, {winner.id: verdict_payload(), weaker.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [winner.id])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_a_middling_score_is_enough_for_a_single_product_photo(self):

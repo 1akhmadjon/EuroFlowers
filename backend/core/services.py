@@ -40,6 +40,10 @@ MAX_LINK_MATCHES = 5
 # modelga umuman aloqasi yo'q rasmni ko'rsatib o'tirishning hojati yo'q.
 AI_CATALOG_SHORTLIST_FLOOR = 30
 
+# Guruhga faqat g'olib bilan shu qadar yaqin ballar tushadi. Undan pastdagisi
+# g'olibga yetmagan mahsulot — uni ko'rsatish mijozni chalg'itadi.
+TIED_SCORE_GAP = 6
+
 MEDIA_MATCH_FOUND_INSTRUCTION = (
     "Aynan shu mahsulot topildi. send_catalog_image ni shu catalog_id bilan chaqir. "
     "Javobni \"Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:\" degan mazmundagi "
@@ -1263,8 +1267,19 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
 
     # G'olibdan rasmda ajratib bo'lmaydigan mahsulotlar bormi. Bo'lsa bittasini tanlab
     # narx aytish xato bo'ladi — hammasini ko'rsatib mijozning o'zidan so'raymiz.
-    twins = [row for row in vision_services.indistinguishable_items(winner, shortlist) if row["verdict"] in {"same_product", "similar_only"}]
-    twins += [row for row in passed if row is not winner and row not in twins]
+    #
+    # Guruh tor bo'lishi kerak. Model "similar_only" degani — "bu boshqa mahsulot";
+    # uni mijozga ko'rsatish "shulardan qaysi biri" degan keraksiz savol tug'diradi.
+    # Shuning uchun guruhga faqat modelning o'zi ham aynan shu mahsulot deganlari,
+    # va ballari g'olibga juda yaqinlari kiradi.
+    twins = [
+        row for row in vision_services.indistinguishable_items(winner, shortlist)
+        if row["verdict"] == "same_product"
+    ]
+    twins += [
+        row for row in passed
+        if row is not winner and row not in twins and winner["score"] - row["score"] <= TIED_SCORE_GAP
+    ]
     # Savat bilan buketni yonma-yon qo'yib "qaysi biri" deb so'rash ma'nosiz — ular
     # rasmda aniq farq qiladi, mijoz allaqachon birini ko'rsatgan.
     twins = [row for row in twins if row["family"] == winner["family"]]
