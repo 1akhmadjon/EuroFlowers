@@ -251,13 +251,15 @@ def social_post_from_ai_catalog_item(item, webhook_event=None, permalink=""):
     if not item:
         return None
     permalink = permalink or item.instagram_link
+    if not permalink:
+        return None
     media_id = (webhook_event.media_id or webhook_event.story_id) if webhook_event else ""
-    if not media_id or SocialPost.objects.filter(media_id=media_id).exists():
+    if not media_id:
         media_id = f"ai-catalog-item-{item.id}"
+    post = SocialPost.objects.filter(media_id=media_id).first()
     post_type = social_post_type_from_url(permalink, "story" if webhook_event and webhook_event.event_type in ["story_reply", "story_send"] else "post")
-    return SocialPost.objects.create(
+    defaults = dict(
         post_type=post_type,
-        media_id=media_id,
         permalink=permalink,
         story_share_id=story_share_id_from_url(permalink),
         webhook_story_id=(webhook_event.story_id or webhook_event.media_id) if webhook_event and post_type == "story" else "",
@@ -270,6 +272,14 @@ def social_post_from_ai_catalog_item(item, webhook_event=None, permalink=""):
         image_url=item.image_url,
         is_active=True,
     )
+    if post:
+        for key, value in defaults.items():
+            if key in ["webhook_story_id", "webhook_story_url"] and not value:
+                continue
+            setattr(post, key, value)
+        post.save()
+        return post
+    return SocialPost.objects.create(media_id=media_id, **defaults)
 
 
 def append_story_webhook_id(post, story_id):

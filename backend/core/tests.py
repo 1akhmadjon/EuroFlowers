@@ -18,7 +18,7 @@ from .serializers import CatalogItemSerializer, ConversationSerializer, FloristP
 from .inventory_services import catalog_remaining, close_selected_florist_issues, create_catalog_rework, issue_stock_to_florist, deduct_catalog_stock, mark_catalog_sold, sync_catalog_financials
 from .services import available_catalog_queryset, catalog_composition_summary, AI_FOLLOW_UP_DELAY_SECONDS, ai_allowed_for_conversation, ai_catalog_rows, ai_flower_variant_rows, ai_reply, ai_stock_rows, ai_tool_definitions, apply_media_match_safeguard, calculate_custom_arrangement_price, create_ai_reply_for_conversation, customer_attachment_rows, execute_ai_tool, mini_app_custom_quote_ai, mini_app_quote_note, normalize_phone, process_pending_customer_reply, process_stalled_conversation_follow_up, recent_customer_orders, send_stock_batch_image, stock_batch_ai_row
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
-from .webhook_services import resolve_instagram_event, resolve_telegram_update
+from .webhook_services import resolve_instagram_event, resolve_telegram_update, social_post_from_ai_catalog_item
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
 from . import vision_services
 
@@ -574,6 +574,25 @@ class BusinessRulesTests(TestCase):
         # Izoh mijozga tayyor matn emas, shuning uchun description nomi bilan berilmaydi.
         self.assertNotIn("description_uz", row)
         self.assertNotIn("description_ru", row)
+
+    def test_ai_catalog_instagram_link_syncs_to_social_post(self):
+        item = AICatalogItem.objects.create(name="Reel buket", arrangement_type="bouquet", price=750000, quantity=1, image_url="https://cdn.example.com/reel.jpg", instagram_link="https://www.instagram.com/reel/ABC123/?igsh=test")
+        post = social_post_from_ai_catalog_item(item)
+        self.assertEqual(post.post_type, "reel")
+        self.assertEqual(post.title_uz, item.name)
+        self.assertEqual(post.price, item.price)
+        item.name = "Yangilangan reel buket"
+        item.price = Decimal("800000")
+        item.save()
+        updated = social_post_from_ai_catalog_item(item)
+        self.assertEqual(updated.id, post.id)
+        updated.refresh_from_db()
+        self.assertEqual(updated.title_uz, "Yangilangan reel buket")
+        self.assertEqual(updated.price, Decimal("800000"))
+        second = AICatalogItem.objects.create(name="Ikkinchi reel buket", arrangement_type="bouquet", price=650000, quantity=1, image_url="https://cdn.example.com/reel-2.jpg", instagram_link=item.instagram_link)
+        second_post = social_post_from_ai_catalog_item(second)
+        self.assertNotEqual(second_post.id, post.id)
+        self.assertEqual(SocialPost.objects.filter(permalink=item.instagram_link).count(), 2)
 
     def test_custom_catalog_deducts_inventory_and_creates_salary_from_volume_rate(self):
         florist_user = User.objects.create_user("florist", password="password", first_name="Ali")

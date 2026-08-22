@@ -3998,7 +3998,14 @@ class AICatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         }
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        item = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        from .webhook_services import social_post_from_ai_catalog_item
+        social_post_from_ai_catalog_item(item)
+
+    def perform_update(self, serializer):
+        item = serializer.save()
+        from .webhook_services import social_post_from_ai_catalog_item
+        social_post_from_ai_catalog_item(item)
 
 
 class ReservationViewSet(ScopedViewSet):
