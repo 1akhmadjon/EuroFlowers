@@ -1452,9 +1452,14 @@ def apply_media_match_safeguard(conversation, result, tool_results):
     if not match:
         return result
     item = catalog_album_queryset().filter(id=match.get("catalog_id")).first()
-    if item and not tool_results_sent_catalog(tool_results, item.id):
-        output = send_catalog_item_image(conversation, item)
-        tool_results.append({"name": "send_catalog_image", "arguments": {"query": "", "catalog_id": item.id, "safeguard": True}, "output": output})
+    if not item or tool_results_sent_catalog(tool_results, item.id):
+        return result
+    if catalog_image_already_sent(conversation, item.id):
+        # Mijoz bu rasmni oldingi javobda ko'rgan. Uni yana yuborish "yana
+        # qanaqalari bor" degan savolga o'sha gulni uchinchi marta ko'rsatish bo'lardi.
+        return result
+    output = send_catalog_item_image(conversation, item)
+    tool_results.append({"name": "send_catalog_image", "arguments": {"query": "", "catalog_id": item.id, "safeguard": True}, "output": output})
     return result
 
 

@@ -7337,6 +7337,19 @@ class OperatorHandoffTests(TestCase):
         send_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_safeguard_does_not_resend_a_photo_from_an_earlier_turn(self):
+        """G'olib rasmi oldin yuborilgan bo'lsa, xavfsizlik chorasi ham qayta yubormaydi."""
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Qizil Atir Gul", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/red.jpg")
+        conversation = media_conversation("ig-safeguard-once")
+        conversation.messages.create(sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "delivered": True, "detail": "sent"}})
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "allow_send": True, "matches": [{"catalog_id": item.id}], "group_matches": [], "near_matches": []}}]
+        with patch("core.services.send_image_to_customer") as send_mock:
+            apply_media_match_safeguard(conversation, {"reply": "..."}, tool_results)
+        send_mock.assert_not_called()
+        self.assertEqual([row["name"] for row in tool_results], ["match_ai_catalog_by_media"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_the_whole_catalog_is_not_sent_twice(self):
         """Mijoz katalogni allaqachon ko'rgan — qayta yuborish yangi hech narsa bermaydi."""
         from unittest.mock import patch
