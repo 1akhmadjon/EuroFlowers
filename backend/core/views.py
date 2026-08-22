@@ -3656,7 +3656,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         with transaction.atomic():
             item = CatalogItem.objects.select_for_update().get(pk=instance.pk)
             before = instance_snapshot(item)
-            restore_catalog_inventory(item, self.request.user)
+            restore_catalog_inventory(item, self.request.user, restore_flowers=not (item.source_item_id or item.branch_id))
             item.refresh_from_db()
             try:
                 item.delete()

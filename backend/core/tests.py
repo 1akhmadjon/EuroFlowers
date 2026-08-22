@@ -1981,6 +1981,17 @@ class ApiTests(TestCase):
         row = [r for r in listed.data["results"] if r["id"] == item.id][0]
         self.assertEqual(row["composition"], [])
 
+    def test_deleting_transferred_catalog_does_not_restore_flowers_to_florist(self):
+        profile = FloristProfile.objects.create(user=User.objects.create_user("branch-florist", password="p"), staff_type="florist")
+        source = CatalogItem.objects.create(name_uz="Asosiy buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=1, quantity_stock_deducted=1, status="available", florist=profile)
+        branch = Branch.objects.create(name="Test filial")
+        UserProfile.objects.create(user=self.user, role="admin", branch=branch)
+        item = CatalogItem.objects.create(name_uz="Filial buket", arrangement_type="bouquet", price=Decimal("300000"), quantity_total=1, quantity_stock_deducted=1, status="available", florist=profile, source_item=source, branch=branch)
+        CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=12)
+        response = self.client.delete(f"/api/catalog/{item.id}/")
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(FloristStockBalance.objects.filter(florist=profile, batch=self.batch, remaining_stems__gt=0).exists())
+
     def test_catalog_item_can_be_created_without_customer(self):
         response = self.client.post("/api/catalog/", {"name_uz": "Mijozsiz buket", "arrangement_type": "bouquet", "price": "300000", "quantity_total": 1, "status": "available"}, format="json")
         self.assertEqual(response.status_code, 201)

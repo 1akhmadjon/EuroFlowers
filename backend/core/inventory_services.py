@@ -1493,7 +1493,7 @@ def deduct_catalog_inventory(item, user, quantity=None):
     return item
 
 
-def restore_catalog_inventory(item, user, quantity=None):
+def restore_catalog_inventory(item, user, quantity=None, restore_flowers=True):
     with transaction.atomic():
         item = CatalogItem.objects.select_for_update().get(pk=item.pk)
         max_quantity = max(item.quantity_stock_deducted - item.quantity_sold, 0)
@@ -1503,6 +1503,8 @@ def restore_catalog_inventory(item, user, quantity=None):
             return item
         rows = list(item.composition.select_related("stock_batch").select_for_update())
         material_rows = list(item.materials.select_related("packaging").select_for_update())
+        if not restore_flowers:
+            rows = []
         if item.florist_id and item.catalog_kind != "custom" and rows:
             restore_florist_stock(item.florist, rows, quantity)
             rows = []
