@@ -7223,6 +7223,35 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [basket.id])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_same_catalog_photo_is_not_sent_twice(self):
+        """"Yana qanaqalari bor" degan savolga o'sha rasmni qayta yuborish javob emas."""
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Qizil Atir Gul", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/red.jpg")
+        conversation = media_conversation("ig-no-resend")
+        with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {"mocked": True})) as send_mock:
+            first = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        self.assertTrue(first["ok"])
+        send_mock.assert_called_once()
+        with patch("core.services.send_image_to_customer") as send_mock:
+            second = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["detail"], "catalog_image_already_sent")
+        self.assertIn("send_catalog_album", second["instruction_uz"])
+        send_mock.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_photo_already_seen_in_an_album_is_not_sent_again(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg")
+        conversation = media_conversation("ig-album-then-image")
+        conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {"ok": True, "items": [{"catalog_id": item.id, "delivered": True}]}})
+        with patch("core.services.send_image_to_customer") as send_mock:
+            result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "catalog_image_already_sent")
+        send_mock.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_high_scoring_reject_is_offered_as_a_closest_match(self):
         """Ball baland bo'lsa "bizda bunday gul yo'q" deyish yolg'on bo'lardi."""
         item = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket"))

@@ -1304,6 +1304,20 @@ def media_match_send_block(tool_results, name, catalog_ids):
     }
 
 
+def catalog_image_already_sent(conversation, catalog_id):
+    """Shu katalog rasmi bu suhbatda allaqachon yuborilganmi."""
+    if not catalog_id:
+        return False
+    for message in conversation.messages.filter(sender="system").order_by("-created_at", "-id")[:40]:
+        result = (message.metadata or {}).get("image_tool_result") or {}
+        if result.get("catalog_id") == catalog_id and result.get("delivered"):
+            return True
+        for row in ((message.metadata or {}).get("catalog_album_result") or {}).get("items") or []:
+            if row.get("catalog_id") == catalog_id and row.get("delivered"):
+                return True
+    return False
+
+
 def matched_story_ids(conversation, tool_results):
     """Suhbatda media matching qaysi storylarni topgan bo'lsa, o'shalarning id si.
 
@@ -2117,6 +2131,19 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             item = _catalog_item_for_ai(query)
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
+        if catalog_image_already_sent(conversation, item.id):
+            # Mijoz bu rasmni allaqachon ko'rgan. Uni qayta yuborish "yana qanaqalari
+            # bor" degan savolga javob emas — o'sha savolni yana bir marta bermoqda.
+            return {
+                "ok": False,
+                "detail": "catalog_image_already_sent",
+                "catalog_id": item.id,
+                "instruction_uz": (
+                    f"{item.name} rasmi bu suhbatda allaqachon yuborilgan. Uni qayta yuborma. "
+                    "Mijoz boshqa variantlarni so'rayotgan bo'lsa send_catalog_album chaqirib "
+                    "katalogni ko'rsat, aks holda shunchaki savoliga javob yoz."
+                ),
+            }
         return send_catalog_item_image(conversation, item)
     if name == "send_post_image":
         return send_social_post_image(conversation, arguments.get("social_post_id"), tool_results=tool_results)
