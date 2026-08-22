@@ -2436,7 +2436,11 @@ def ai_reply(conversation):
         if cyrillic_mode:
             content = cyrillic_to_latin(content)
         history.append({"role": "user" if message.sender == "customer" else "assistant", "content": content})
-    ai_replies_count = sum(1 for message in history_messages if message.sender == "ai")
+    # "Sessiya" — bu joriy suhbat, butun tarix emas. Mijoz ertasi kuni qaytganda
+    # kechagi javoblarimiz "bu suhbatda allaqachon salomlashdik" degani emas —
+    # aks holda u salomsiz, "Ahmad, sizga qanday gul kerak?" bilan kutib olinadi.
+    session_messages = history_messages[-1:] if fresh_session else history_messages
+    ai_replies_count = sum(1 for message in session_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
     latest_ai_index = max((index for index, message in enumerate(history_messages) if message.sender == "ai"), default=-1)
     pending_customer_messages = [message.text for message in history_messages[latest_ai_index + 1:] if message.sender == "customer"]

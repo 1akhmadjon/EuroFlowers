@@ -7241,6 +7241,36 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(row["days_since_previous_message"], 2)
         self.assertEqual(row["previous_message_date"], (timezone.localdate() - _timedelta(days=2)).isoformat())
 
+    def test_yesterdays_replies_do_not_count_as_this_sessions_greeting(self):
+        """24 soatdan keyin qaytgan mijoz uchun bu yangi suhbat — salomlashiladi."""
+        from datetime import timedelta as _timedelta
+        from unittest.mock import patch
+        customer = Customer.objects.create(instagram_user_id="ig-fresh-session", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        old_customer = conversation.messages.create(sender="customer", text="rahmat")
+        old_ai = conversation.messages.create(sender="ai", text="Rahmat, kuningiz xayrli o'tsin.")
+        conversation.messages.filter(id__in=[old_customer.id, old_ai.id]).update(created_at=timezone.now() - _timedelta(days=2))
+        conversation.messages.create(sender="customer", text="salom")
+        captured = {}
+
+        class Response:
+            output = []
+            id = "resp-1"
+            output_text = json.dumps({"reply": "Assalomu alaykum, Ahmad!", "handoff": False, "lead_ready": False, "phone": None, "customer_name": None, "detected_language": "uz", "estimated_price": None, "arrangement_type": None, "lead_request": None, "catalog_items": [], "stock_items": []})
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return Response()
+
+        with override_settings(OPENAI_API_KEY="test-key"):
+            with patch("core.services.OpenAI") as client_cls:
+                client_cls.return_value.responses.create.side_effect = fake_create
+                ai_reply(conversation)
+        context = json.loads(captured["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
+        self.assertTrue(context["conversation"]["fresh_session"])
+        self.assertFalse(context["conversation"]["has_ai_reply_in_session"])
+        self.assertEqual(context["customer"]["days_since_previous_message"], 2)
+
     def test_a_first_message_has_no_previous_visit(self):
         customer = Customer.objects.create(instagram_user_id="ig-brand-new")
         conversation = Conversation.objects.create(customer=customer)
