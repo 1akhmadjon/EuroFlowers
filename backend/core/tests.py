@@ -7008,13 +7008,14 @@ class OperatorHandoffTests(TestCase):
         conversation = media_conversation("ig-similar-only")
         with patch_vision(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"), {item.id: verdict_payload(verdict="similar_only", color_match=False, differences="katalogda sariq")}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
-        self.assertFalse(result["ok"])
+        # Aynan o'shasi emas: rasm yuborilmaydi va "topdim" deyilmaydi. Lekin mijoz
+        # quruq qaytmasin — bir xil turdagi savat o'xshashi sifatida ko'rsatiladi.
         self.assertFalse(result["allow_send"])
-        self.assertFalse(result["allow_group"])
-        self.assertEqual(result["detail"], "not_confident")
         self.assertEqual(result["matches"], [])
-        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
-        self.assertIn("YUBORMA", result["instruction_uz"])
+        self.assertEqual(result["detail"], "similar_only")
+        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [item.id])
+        self.assertIn("o'xshaydiganlari", result["instruction_uz"])
+        self.assertIn("topdim", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_media_match_refuses_same_product_when_a_check_failed(self):

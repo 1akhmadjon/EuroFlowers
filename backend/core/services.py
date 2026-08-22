@@ -1100,8 +1100,10 @@ def direct_ai_catalog_link_matches(items, source_url, attachment=None, conversat
 
 
 # Aynan mos kelmagan, lekin mijozga ko'rsatishga arziydigan mahsulot uchun eng past
-# ball. Bundan pastdagisi boshqa gul — uni ko'rsatish mijozni chalg'itadi.
-SIMILAR_ENOUGH_SCORE = 50
+# ball. Rangi butunlay boshqa bo'lgan mahsulot 45 dan oshmaydi (DIFFERENT_COLOUR_CEILING),
+# lekin gul turi va idishi bir xil bo'lsa u ham ko'rsatishga arziydi: "binafsha savat
+# yo'q, lekin savatlarimiz shular" — bu mijozni quruq qaytarishdan yaxshi.
+SIMILAR_ENOUGH_SCORE = 42
 
 
 def similar_enough_rows(rejected, source, limit=3):
