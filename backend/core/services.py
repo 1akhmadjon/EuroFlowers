@@ -95,6 +95,14 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "aynan o'sha gul hozir yo'q, katalogimizda shunga o'xshaydiganlari shular. Keyin "
     "qaysi biri yoqishini so'ra. \"Aynan shu\" yoki \"topdim\" dema."
 )
+MEDIA_MATCH_CLOSE_INSTRUCTION = (
+    "Rasmdagi gul katalogimizdagi bir nechta mahsulotga juda yaqin, lekin qaysi biri "
+    "ekaniga to'liq ishonch yo'q. group_matches dagi catalog_id larni send_catalog_album "
+    "bilan yubor va \"shu rasmga eng mos variantlarimiz shular\" degan mazmunda yozib, "
+    "qaysi biri kerakligini so'ra. \"Aynan o'sha gul yo'q\" DEMA — bo'lishi mumkin, "
+    "shunchaki qaysi biri ekanini mijozning o'zi tasdiqlashi kerak. Bittasini tanlab "
+    "narx aytma."
+)
 MEDIA_MATCH_CROP_INSTRUCTION = (
     "Rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini "
     "aniq ayta olmadik. Katalogdan hech qanday rasm YUBORMA, narx aytma va hozircha "
@@ -113,7 +121,7 @@ Never invent a product name or a price. Every name and every price you write mus
 Once a flower has been identified this turn, asking "what else do you have like it" is a request for the catalog, not for that same flower again: call send_catalog_album, do not call match_ai_catalog_by_media a second time on the same picture.
 When the flower under discussion came from one of our own stories, "send me the picture" means that story's picture: call send_post_image with its social_post_id, which stays valid for the rest of the conversation. Sending the whole catalog album instead answers a question nobody asked.
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
-allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" means the exact flower is NOT in the catalog and these merely resemble it, so say so plainly and never claim you found it.
+allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" means the exact flower is NOT in the catalog and these merely resemble it, so say so plainly and never claim you found it; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
 allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
@@ -1167,6 +1175,10 @@ def direct_ai_catalog_link_matches(items, source_url, attachment=None, conversat
 # yo'q, lekin savatlarimiz shular" — bu mijozni quruq qaytarishdan yaxshi.
 SIMILAR_ENOUGH_SCORE = 42
 
+# Bundan yuqori ball olgan nomzod haqida "bizda bunday gul yo'q" deb bo'lmaydi —
+# u aniq o'sha mahsulot bo'lishi mumkin, faqat tekshiruvdan o'tmagan.
+CLOSE_MATCH_SCORE = 70
+
 
 def similar_enough_rows(rejected, source, limit=3):
     """Aynan o'shasi bo'lmasa, katalogdagi eng yaqin mahsulotlar.
@@ -1568,16 +1580,21 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         # o'xshashlarini ko'rsatamiz. Bu "topdim" degani emas va shuni aytish shart.
         similar = similar_enough_rows(rejected, source)
         if similar:
+            # Eng yaqin nomzod baland ball olgan bo'lsa, bu "bizda bunday gul yo'q"
+            # degani emas — model o'z javobida ziddiyatga tushgan bo'lishi mumkin
+            # (mahsulotni "same_product" deb, ayni paytda rangini mos emas deb).
+            # Bunday holatda mijozga "aynan yo'q" deyish yolg'on bo'lardi.
+            close = similar[0]["score"] >= CLOSE_MATCH_SCORE
             return media_match_result(conversation, dict(common, **{
                 "ok": True,
                 "allow_send": False,
                 "allow_group": True,
-                "detail": "similar_only",
+                "detail": "close_matches" if close else "similar_only",
                 "matches": [],
                 "group_matches": [as_row(row) for row in similar],
                 "near_matches": [],
-                "no_match_reason": "Aynan shu mahsulot yo'q, o'xshaydiganlari ko'rsatilyapti.",
-                "instruction_uz": MEDIA_MATCH_SIMILAR_INSTRUCTION,
+                "no_match_reason": "" if close else "Aynan shu mahsulot yo'q, o'xshaydiganlari ko'rsatilyapti.",
+                "instruction_uz": MEDIA_MATCH_CLOSE_INSTRUCTION if close else MEDIA_MATCH_SIMILAR_INSTRUCTION,
             }))
         return media_match_result(conversation, dict(common, **{
             "ok": False,

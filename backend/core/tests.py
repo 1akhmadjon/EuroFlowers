@@ -20,7 +20,7 @@ from .services import available_catalog_queryset, catalog_composition_summary, A
 from .tasks import process_conversation_follow_up, process_delayed_instagram_reply, process_delayed_telegram_reply
 from .webhook_services import resolve_instagram_event, resolve_telegram_update, social_post_from_ai_catalog_item
 from .backup_services import backup_command_matches, backup_caption, create_media_backup
-from . import vision_services
+from . import services, vision_services
 
 
 def vision_fingerprint(**overrides):
@@ -7033,10 +7033,12 @@ class OperatorHandoffTests(TestCase):
         with patch_vision(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"), {item.id: verdict_payload(color_match=False, differences="rangi boshqa")}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertFalse(result["allow_send"])
-        # Aynan o'shasi emas, lekin mijozga o'xshaydigani sifatida ko'rsatiladi.
-        self.assertEqual(result["detail"], "similar_only")
+        # Model o'z javobida ziddiyatga tushdi: mahsulotni "same_product" dedi, ammo
+        # rangi mos emas dedi. Rasm yuborilmaydi, lekin "bunday gul yo'q" ham deyilmaydi —
+        # ball baland, bu o'sha mahsulot bo'lishi mumkin.
+        self.assertEqual(result["detail"], "close_matches")
         self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [item.id])
-        self.assertIn("o'xshaydiganlari", result["instruction_uz"])
+        self.assertIn("eng mos", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_look_alike_catalog_items_are_offered_as_an_album(self):
@@ -7197,13 +7199,15 @@ class OperatorHandoffTests(TestCase):
         close = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket"))
         far = AICatalogItem.objects.create(name="Qizil Quti", arrangement_type="", price=400000, quantity=1, image_url="https://cdn.example.com/red.jpg", **catalog_fingerprint_fields("https://cdn.example.com/red.jpg", flower_form="rose", dominant_colors=["red"], container="hat_box"))
         conversation = media_conversation("ig-similar-album")
-        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket")
+        # Rangi ham, hajmi ham boshqa: bu haqiqatan "o'xshash", "o'sha" emas.
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["purple", "lavender"], container="basket", size="small", count_bucket="25_to_50")
         with patch_vision(source, {close.id: verdict_payload(verdict="similar_only"), far.id: verdict_payload(verdict="similar_only")}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertFalse(result["allow_send"])
         self.assertTrue(result["allow_group"])
         self.assertEqual(result["detail"], "similar_only")
         self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [close.id])
+        self.assertLess(result["group_matches"][0]["score"], services.CLOSE_MATCH_SCORE)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_the_same_arrangement_in_another_colour_counts_as_similar(self):
@@ -7217,6 +7221,19 @@ class OperatorHandoffTests(TestCase):
         self.assertTrue(result["allow_group"])
         self.assertEqual(result["detail"], "similar_only")
         self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [basket.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_high_scoring_reject_is_offered_as_a_closest_match(self):
+        """Ball baland bo'lsa "bizda bunday gul yo'q" deyish yolg'on bo'lardi."""
+        item = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket"))
+        conversation = media_conversation("ig-close-match")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket")
+        with patch_vision(source, {item.id: verdict_payload(verdict="similar_only")}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertEqual(result["detail"], "close_matches")
+        self.assertTrue(result["allow_group"])
+        self.assertEqual(result["no_match_reason"], "")
+        self.assertGreaterEqual(result["group_matches"][0]["score"], services.CLOSE_MATCH_SCORE)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_nothing_close_enough_still_goes_to_the_operator(self):
