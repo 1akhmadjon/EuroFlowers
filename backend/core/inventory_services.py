@@ -870,7 +870,12 @@ def florist_close_plan(florist, batch, return_stems=0, absorb_remainder=True):
     amount = max(held - return_stems, 0)
     rows = florist_open_catalog_rows(florist, batch)
     items = [row.catalog_item for row in rows]
-    weights, missing, weight_source = florist_weight_plan(florist, items)
+    if florist.staff_type == "florist":
+        weights, missing, weight_source = florist_weight_plan(florist, items)
+    else:
+        weights = {item.id: 1 for item in items}
+        missing = []
+        weight_source = "apprentice_equal"
     weighted = [(item, int(item.quantity_total or 1), weights.get(item.id, 0)) for item in items]
     plan, unplaced = split_stems_by_weight(amount, weighted) if not missing else ({}, amount)
     rounded_extra = 0
@@ -957,7 +962,12 @@ def close_florist_issue(florist, batch, return_stems=0, user=None, absorb_remain
                 f"{florist} da bu guldan yasalgan, soni yozilmagan katalog yo‘q. "
                 f"Qolgan {amount} dona gulni skladga qaytaring yoki chiqitga yozing."
             )
-        weights, missing, weight_source = florist_weight_plan(florist, items)
+        if florist.staff_type == "florist":
+            weights, missing, weight_source = florist_weight_plan(florist, items)
+        else:
+            weights = {item.id: 1 for item in items}
+            missing = []
+            weight_source = "apprentice_equal"
         if missing:
             raise ValueError(
                 f"{florist} uchun hajm tarifi to‘liq emas: " + ", ".join(missing)

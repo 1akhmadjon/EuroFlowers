@@ -658,6 +658,27 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(item.florist_salary_amount, Decimal("0.00"))
         self.assertFalse(FloristSalaryEntry.objects.filter(catalog_item=item).exists())
 
+    def test_apprentice_issue_close_does_not_require_volume_rate(self):
+        apprentice_user = User.objects.create_user("close-apprentice", password="password", first_name="Vali")
+        apprentice = FloristProfile.objects.create(user=apprentice_user, staff_type="apprentice", daily_pay=100000)
+        issue_stock_to_florist(apprentice, self.batch, 10, "test", self.user)
+        item = CatalogItem.objects.create(
+            name_uz="Shogird yopish buketi",
+            arrangement_type="bouquet",
+            catalog_kind="standard",
+            volume="small",
+            florist=apprentice,
+            price=Decimal("250000.00"),
+            quantity_total=1,
+        )
+        row = CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=0)
+        from .inventory_services import close_florist_issue
+        result = close_florist_issue(apprentice, self.batch, user=self.user)
+        row.refresh_from_db()
+        self.assertEqual(result["weight_source"], "apprentice_equal")
+        self.assertEqual(row.quantity_stems, 10)
+        self.assertFalse(FloristSalaryEntry.objects.filter(catalog_item=item).exists())
+
     def test_custom_catalog_accepts_custom_volume_and_manual_salary_amount(self):
         florist_user = User.objects.create_user("custom-florist", password="password", first_name="Ali")
         florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
