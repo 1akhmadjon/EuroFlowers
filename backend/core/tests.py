@@ -7330,11 +7330,21 @@ class OperatorHandoffTests(TestCase):
         self.assertTrue(first["ok"])
         send_mock.assert_called_once()
         with patch("core.services.send_image_to_customer") as send_mock:
-            second = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
-        self.assertFalse(second["ok"])
-        self.assertEqual(second["detail"], "catalog_image_already_sent")
-        self.assertIn("send_catalog_album", second["instruction_uz"])
+            with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked")) as album_mock:
+                second = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        # Rad etib qo'yish yetarli emas — o'rniga mijoz so'ragan katalog yuboriladi.
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["detail"], "catalog_sent_instead")
         send_mock.assert_not_called()
+        album_mock.assert_called()
+        self.assertTrue(services.whole_catalog_already_sent(conversation))
+        with patch("core.services.send_image_to_customer") as send_mock:
+            with patch("core.services.send_catalog_album_chunk") as album_mock:
+                third = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        self.assertFalse(third["ok"])
+        self.assertEqual(third["detail"], "catalog_image_already_sent")
+        self.assertIn("handoff_media_to_operator", third["instruction_uz"])
+        album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_the_safeguard_does_not_resend_a_photo_from_an_earlier_turn(self):
@@ -7382,11 +7392,13 @@ class OperatorHandoffTests(TestCase):
         from unittest.mock import patch
         item = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg")
         conversation = media_conversation("ig-album-then-image")
-        conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {"ok": True, "items": [{"catalog_id": item.id, "delivered": True}]}})
+        conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {"ok": True, "whole_catalog": True, "items": [{"catalog_id": item.id, "delivered": True}]}})
         with patch("core.services.send_image_to_customer") as send_mock:
             result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
+        # Butun katalog ham, bu rasm ham ko'rilgan — endi operatorga uzatiladi.
         self.assertFalse(result["ok"])
         self.assertEqual(result["detail"], "catalog_image_already_sent")
+        self.assertIn("handoff_media_to_operator", result["instruction_uz"])
         send_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")

@@ -1358,11 +1358,16 @@ def media_match_send_block(tool_results, name, catalog_ids):
     }
 
 
-def whole_catalog_already_sent(conversation, minimum=6):
-    """Butun katalog bu suhbatda allaqachon albom bo'lib ketganmi."""
+def whole_catalog_already_sent(conversation):
+    """Butun katalog bu suhbatda allaqachon albom bo'lib ketganmi.
+
+    Mahsulotlar sonini sanash bilan aniqlab bo'lmaydi — katalogda uchta mahsulot
+    bo'lsa "butun katalog" ham uchta rasm. Shuning uchun albom yuborilganda
+    uning butun katalog ekani o'sha yerda belgilab qo'yiladi.
+    """
     for message in conversation.messages.filter(sender="system").order_by("-created_at", "-id")[:40]:
-        rows = ((message.metadata or {}).get("catalog_album_result") or {}).get("items") or []
-        if len([row for row in rows if row.get("delivered")]) >= minimum:
+        result = (message.metadata or {}).get("catalog_album_result") or {}
+        if result.get("whole_catalog") and any(row.get("delivered") for row in result.get("items") or []):
             return True
     return False
 
@@ -2029,7 +2034,7 @@ def catalog_album_items(catalog_ids=None, limit=60):
     return [item for item in queryset[:limit]]
 
 
-def send_catalog_album(conversation, items):
+def send_catalog_album(conversation, items, whole_catalog=False):
     """Katalog rasmlarini albom qilib yuboradi. Bitta xabarga 10 tadan rasm sig'adi, bu platformaning chegarasi.
 
     Har rasm ostida tartib raqami, nomi va narxi ko'rinadi. Natijadagi position mijoz
@@ -2089,6 +2094,7 @@ def send_catalog_album(conversation, items):
         "messages_sent": messages_sent,
         "album_max_per_message": CATALOG_ALBUM_MAX_PER_MESSAGE,
         "numbering_visible": bool(sent_items) and fallback_chunks == 0,
+        "whole_catalog": bool(whole_catalog),
         "items": sent_items,
         "not_sent": not_sent,
     }
@@ -2239,7 +2245,7 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                     "bahslashma, operatorlar chat orqali ko'rib chiqishini qisqa ayt."
                 ),
             }
-        return send_catalog_album(conversation, items)
+        return send_catalog_album(conversation, items, whole_catalog=not catalog_ids)
     if name == "send_catalog_image":
         query = arguments.get("query") or ""
         catalog_id = arguments.get("catalog_id")
@@ -2254,17 +2260,30 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         if catalog_image_already_sent(conversation, item.id):
             # Mijoz bu rasmni allaqachon ko'rgan. Uni qayta yuborish "yana qanaqalari
             # bor" degan savolga javob emas — o'sha savolni yana bir marta bermoqda.
+            # Rad etib qo'yish ham yetarli emas: model o'shanda ba'zan hech narsa
+            # yubormay javobini takrorlab qo'yardi. Shuning uchun o'rniga butun
+            # katalogni yuboramiz — mijoz aynan shuni so'ragan.
+            if whole_catalog_already_sent(conversation):
+                return {
+                    "ok": False,
+                    "detail": "catalog_image_already_sent",
+                    "catalog_id": item.id,
+                    "instruction_uz": (
+                        f"{item.name} rasmi ham, butun katalog ham bu suhbatda allaqachon "
+                        "yuborilgan. Hech narsa yuborma. Mijozdan telefon raqamini so'ra va "
+                        "bergach handoff_media_to_operator chaqir."
+                    ),
+                }
+            album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
             return {
-                "ok": False,
-                "detail": "catalog_image_already_sent",
+                "ok": True,
+                "detail": "catalog_sent_instead",
                 "catalog_id": item.id,
+                "album": album,
                 "instruction_uz": (
-                    f"{item.name} rasmi bu suhbatda allaqachon yuborilgan. Uni qayta yuborma. "
-                    "Mijoz boshqa variantlarni so'rayotgan bo'lsa send_catalog_album ni "
-                    "catalog_ids BO'SH massiv bilan chaqir — shunda butun katalog ketadi. "
-                    "Bitta-ikkita mahsulotni tanlab albom qilib yuborib, keyin "
-                    "\"katalogimiz shu\" deb yozish xato bo'ladi. Mijoz boshqa narsa "
-                    "so'rayotgan bo'lsa shunchaki savoliga javob yoz."
+                    f"{item.name} rasmi allaqachon yuborilgani uchun uning o'rniga butun "
+                    "katalog albom qilib yuborildi. Mijozga hozirda bor gullar shu ekanini "
+                    "ayt va qaysi biri yoqishini so'ra. O'sha mahsulotni qayta taklif qilma."
                 ),
             }
         return send_catalog_item_image(conversation, item)
