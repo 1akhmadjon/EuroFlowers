@@ -835,7 +835,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertIn(AISettings.objects.get(pk=1).system_prompt, kwargs["instructions"])
@@ -866,7 +866,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
@@ -7055,6 +7055,60 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(result["matches"], [])
         self.assertEqual(sorted(row["catalog_id"] for row in result["group_matches"]), sorted([small.id, big.id]))
         self.assertIn("send_catalog_album", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_story_answers_from_what_the_shop_wrote_on_it(self):
+        """Storyda nomi va narxi turibdi — rasmni tahlil qilish faqat xato qo'shadi."""
+        AICatalogItem.objects.create(name="Alfalob 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/alfalob.jpg", **catalog_fingerprint_fields("https://cdn.example.com/alfalob.jpg", flower_form="peony_rose", dominant_colors=["hot_pink"], container="unwrapped_bouquet"))
+        story_url = "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18118106525486311&signature=abc"
+        SocialPost.objects.create(
+            post_type="story", media_id="story-share-3969235178066479407",
+            webhook_story_id="18118106525486311",
+            permalink="https://www.instagram.com/stories/euroflowers.premium/3969235178066479407",
+            title_uz="Alfalob 200 tali", description_uz="200 tali alfalob atirguldan yasalgan buket",
+            price=1600000, flower_count=200, image_url="https://cdn.example.com/story.jpg", is_active=True,
+        )
+        conversation = media_conversation("ig-own-story", image_url=story_url, kind="story")
+        result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "Nechpul"}, conversation)
+        self.assertEqual(result["detail"], "own_story_matched")
+        self.assertTrue(result["own_post"])
+        self.assertFalse(result["allow_send"])
+        self.assertEqual(result["story"]["title"], "Alfalob 200 tali")
+        self.assertEqual(result["story"]["price_text"], "1 600 000 so'm")
+        self.assertIn("O'xshagan", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_story_photo_can_be_sent_back_but_only_that_story(self):
+        from unittest.mock import patch
+        post = SocialPost.objects.create(post_type="story", media_id="story-1", webhook_story_id="111", title_uz="Alfalob 200 tali", price=1600000, image_url="https://cdn.example.com/story.jpg", is_active=True)
+        other = SocialPost.objects.create(post_type="story", media_id="story-2", webhook_story_id="222", title_uz="Boshqa story", price=500000, image_url="https://cdn.example.com/other.jpg", is_active=True)
+        conversation = media_conversation("ig-story-image")
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "detail": "own_story_matched", "allow_send": False, "story": {"social_post_id": post.id}}}]
+        with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {"mocked": True})) as send_mock:
+            allowed = execute_ai_tool("send_post_image", {"social_post_id": post.id}, conversation, tool_results=tool_results)
+        self.assertTrue(allowed["ok"])
+        send_mock.assert_called_once()
+        with patch("core.services.send_image_to_customer") as send_mock:
+            refused = execute_ai_tool("send_post_image", {"social_post_id": other.id}, conversation, tool_results=tool_results)
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["detail"], "story_not_matched")
+        send_mock.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_story_without_a_price_still_goes_through_the_picture(self):
+        """Operator storyga narx yozmagan bo'lsa, eski yo'l — rasmni tahlil qilish."""
+        item = AICatalogItem.objects.create(name="Alfalob 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/alfalob.jpg", **catalog_fingerprint_fields("https://cdn.example.com/alfalob.jpg", flower_form="peony_rose", dominant_colors=["hot_pink"], container="unwrapped_bouquet"))
+        story_url = "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=999888777&signature=abc"
+        SocialPost.objects.create(post_type="story", media_id="story-noprice", webhook_story_id="999888777", title_uz="", price=None, is_active=True)
+        conversation = media_conversation("ig-story-no-price", image_url=story_url, kind="story")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["hot_pink"], container="unwrapped_bouquet")
+        with patch_vision(source, {item.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "nechpul"}, conversation)
+        self.assertEqual(result["detail"], "matched")
+        self.assertTrue(result["allow_send"])
+        # Bizning storyimiz bo'lgani uchun "o'xshagan" demaydi.
+        self.assertTrue(result["own_post"])
+        self.assertIn("aynan o'sha mahsulotning o'zi", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_every_catalog_item_on_a_shared_reel_is_offered_as_an_album(self):

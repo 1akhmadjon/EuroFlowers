@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadStockUsage, Message, Notification, Packaging, StockBatch
+from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadStockUsage, Message, Notification, Packaging, SocialPost, StockBatch
 from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group, telegram_send_rich_message_with, telegram_send_with
 from . import vision_services
 
@@ -52,6 +52,20 @@ MEDIA_MATCH_FOUND_INSTRUCTION = (
     "bitta jumla bilan boshla, keyin yangi qatordan mahsulot nomi, narxi va bitta savol. "
     "Mijoz qaysi tilda yozgan bo'lsa shu tilda yoz."
 )
+MEDIA_MATCH_OWN_STORY_INSTRUCTION = (
+    "Mijoz bizning o'z storyimizni yubordi va uning ma'lumoti tizimda saqlangan: "
+    "story maydonidagi title va price_text aynan shu mahsulotniki. Mijozga o'sha nomni "
+    "va o'sha narxni ayt, keyin bitta savol ber. \"O'xshagan\" yoki \"o'xshash variant\" "
+    "DEMA — bu aynan o'sha gulning o'zi. Katalogdan boshqa rasm YUBORMA va boshqa "
+    "mahsulot nomini aytma. Mijoz shu storydagi gulning rasmini so'rasa "
+    "send_post_image ni social_post_id bilan chaqir."
+)
+MEDIA_MATCH_OWN_POST_INSTRUCTION = (
+    "Mijoz bizning o'z story/postimizni yubordi va undagi mahsulot aniq topildi. "
+    "send_catalog_image ni shu catalog_id bilan chaqir. \"O'xshagan\", \"o'xshash\" yoki "
+    "\"shunga o'xshagan variant\" DEMA — bu aynan o'sha mahsulotning o'zi. To'g'ridan-to'g'ri "
+    "mahsulot nomi, narxi va bitta savol yoz. Mijoz qaysi tilda yozgan bo'lsa shu tilda yoz."
+)
 MEDIA_MATCH_GROUP_INSTRUCTION = (
     "Katalogda bu rasmga o'xshaydigan bir nechta mahsulot bor, farqi hajmi va gul "
     "sonida — rasmdan qaysi biri ekanini aytib bo'lmaydi. group_matches dagi "
@@ -94,7 +108,9 @@ MEDIA MATCHING FIRST:
 If REAL_CONTEXT_JSON.conversation.customer_attachments has any customer image, story, post or reel media and the customer asks about that media, call match_ai_catalog_by_media before asking for phone or handing off to an operator.
 Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
 The tool result field allow_send is the only thing that decides what you may do next.
-allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id. Open the reply with one line saying this is what the shop has that looks like what they showed ("Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:"), then the item name, the price, and one next question, in the customer's own language.
+allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id, then give the item name, the price, and one next question, in the customer's own language. How you open that reply depends on own_post: when own_post is false, lead with one line saying this is what the shop has that looks like what they showed ("Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:"). When own_post is true the customer sent one of our own stories or reels, so the flower is not a resemblance, it is that exact product — never say "o'xshagan" or "similar", just name it and price it.
+Never invent a product name or a price. Every name and every price you write must come from a tool result in this turn. If you have not called a tool, you do not know what the shop sells.
+detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" means the exact flower is NOT in the catalog and these merely resemble it, so say so plainly and never claim you found it.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
 allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
@@ -1024,6 +1040,18 @@ def items_matching_link(items, link):
     return matched
 
 
+def customer_shared_our_post(attachment):
+    """Mijoz yuborgani bizning o'z story/postimizmi.
+
+    Storyga javob yozgan yoki uni directga tashlagan mijoz o'sha storydagi gulni
+    so'rayapti — bu tasodifiy o'xshashlik emas.
+    """
+    kind = (attachment or {}).get("kind", "").lower()
+    if kind in {"story", "reel", "post", "ig_story", "ig_reel", "share", "media_share"}:
+        return True
+    return bool(social_post_permalink_for_media(attachment))
+
+
 def shared_link_is_the_media(attachment, media_url):
     """Mijoz yuborgani rasm emas, postning o'zi (reel/story share) bo'lsa.
 
@@ -1035,24 +1063,54 @@ def shared_link_is_the_media(attachment, media_url):
     return "instagram.com/" in (media_url or "").lower()
 
 
-def social_post_permalink_for_media(attachment):
+def social_post_for_media(attachment):
     """Mijoz yuborgan story/reel qaysi bizning postimiz ekanini bazadan topadi.
 
     Instagram direct'da kelgan story rasm CDN havolasi bo'lib keladi, ichida
-    faqat asset_id turadi. O'sha asset_id bo'yicha SocialPost topilsa, uning
-    permalink'i katalogdagi instagram_link bilan solishtiriladigan havola bo'ladi.
+    faqat asset_id turadi. O'sha asset_id bo'yicha SocialPost topiladi.
     """
     from .webhook_services import social_post_by_media_or_url
 
     url = (attachment or {}).get("url") or ""
     if not url:
-        return ""
+        return None
     try:
-        post = social_post_by_media_or_url(url=url)
+        return social_post_by_media_or_url(url=url)
     except Exception as error:
         print(f"AI_CATALOG_SOCIAL_POST_LOOKUP_FAILED url={url[:80]} error={error}", flush=True)
-        return ""
+        return None
+
+
+def social_post_permalink_for_media(attachment):
+    """Post topilsa uning permalink'i — katalogdagi instagram_link bilan solishtirish uchun."""
+    post = social_post_for_media(attachment)
     return (post.permalink or post.webhook_story_url or "") if post else ""
+
+
+def social_post_answer(post):
+    """Storyning o'zida nomi va narxi yozilgan bo'lsa, javob shu yerda.
+
+    Operator storyni tizimga qo'yganda nomi, narxi va tavsifini yozadi. Mijoz
+    o'sha storyni directga tashlaganda taxmin qilishning hojati yo'q — rasmni
+    tahlil qilish faqat noaniqlik qo'shadi. Chatda aynan shunday bo'lgan:
+    story "Alfalob 200 tali, 1 600 000" edi, rasm tahlili esa 100 talik
+    boshqa mahsulotni topib bergan.
+    """
+    if not post or not post.is_active:
+        return None
+    title = (post.title_uz or "").strip()
+    price = post.price
+    if not title or price in (None, ""):
+        return None
+    return {
+        "social_post_id": post.id,
+        "title": title,
+        "description": (post.description_uz or "").strip()[:400],
+        "price": str(price),
+        "price_text": f"{money_uz(price)} so'm",
+        "flower_count": post.flower_count or None,
+        "has_image": bool(post.image_url),
+    }
 
 
 def conversation_shared_links(conversation):
@@ -1127,6 +1185,24 @@ def similar_enough_rows(rejected, source, limit=3):
         and vision_services.forms_can_match(source.get("flower_form"), row["fingerprint"].get("flower_form"))
     ]
     return sorted(rows, key=lambda row: row["score"], reverse=True)[:limit]
+
+
+def unanswered_customer_media(conversation):
+    """Oxirgi AI javobidan keyin mijoz rasm/story/reel yuborganmi.
+
+    Faqat yangi media uchun. Eski rasm haqida mijoz keyinroq savol bersa, model
+    o'zi qaror qiladi — u yerda majburlash suhbatni orqaga tortib yuborardi.
+    """
+    messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:12])
+    for message in messages:
+        if message.sender == "ai":
+            return False
+        if message.sender != "customer":
+            continue
+        for attachment in (message.metadata or {}).get("attachments") or []:
+            if attachment.get("url"):
+                return True
+    return False
 
 
 def crop_would_help(conversation, source):
@@ -1214,6 +1290,39 @@ def media_match_send_block(tool_results, name, catalog_ids):
     }
 
 
+def matched_story_ids(tool_results):
+    """Shu navbatda media matching qaysi storyni topgan bo'lsa, o'shaning id si."""
+    ids = set()
+    for row in tool_results or []:
+        if row.get("name") != "match_ai_catalog_by_media":
+            continue
+        story = (row.get("output") or {}).get("story") or {}
+        if story.get("social_post_id"):
+            ids.add(story["social_post_id"])
+    return ids
+
+
+def send_social_post_image(conversation, social_post_id, tool_results=None):
+    """Mijoz yuborgan storyning o'z rasmini qayta yuboradi.
+
+    Faqat shu navbatda media matching topgan story uchun. Aks holda AI o'zi
+    tanlagan boshqa postning rasmini yuborib qo'yishi mumkin edi.
+    """
+    allowed = matched_story_ids(tool_results)
+    if not allowed:
+        return {"ok": False, "detail": "no_matched_story", "instruction_uz": "Bu tool faqat match_ai_catalog_by_media own_story_matched qaytarganda ishlaydi."}
+    if social_post_id not in allowed:
+        return {"ok": False, "detail": "story_not_matched", "allowed_ids": sorted(allowed)}
+    post = SocialPost.objects.filter(id=social_post_id, is_active=True).first()
+    if not post or not post.image_url:
+        return {"ok": False, "detail": "post_image_not_found"}
+    delivered, detail, _ = send_image_to_customer(conversation.customer, post.image_url, conversation)
+    if not delivered:
+        return {"ok": False, "detail": detail or "send_failed"}
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"post_image_result": {"social_post_id": post.id, "image_url": post.image_url, "detail": detail}})
+    return {"ok": True, "image_sent": True, "social_post_id": post.id, "title": post.title_uz, "price_text": f"{money_uz(post.price)} so'm" if post.price else ""}
+
+
 def first_confident_media_match(tool_results):
     for row in reversed(tool_results or []):
         if row.get("name") != "match_ai_catalog_by_media":
@@ -1267,7 +1376,26 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
 
     # Mijoz yuborgan story/reel bizning qaysi postimiz ekani ma'lum bo'lsa, o'sha
     # postga qo'yilgan kataloglar aniq javob — rasmni tahlil qilish shart emas.
+    own_post = social_post_for_media(attachment)
     linked = direct_ai_catalog_link_matches(items, media_url, attachment=attachment, conversation=conversation)
+    story = social_post_answer(own_post) if not linked else None
+    if story:
+        # Storyning o'zida nomi va narxi turibdi — bu eng aniq manba.
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": False,
+            "allow_group": False,
+            "detail": "own_story_matched",
+            "source": attachment,
+            "source_description": "Mijoz bizning storyimizni yubordi, uning ma'lumoti tizimda saqlangan.",
+            "own_post": True,
+            "story": story,
+            "matches": [],
+            "group_matches": [],
+            "near_matches": [],
+            "no_match_reason": "",
+            "instruction_uz": MEDIA_MATCH_OWN_STORY_INSTRUCTION,
+        })
     if len(linked) == 1:
         return media_match_result(conversation, {
             "ok": True,
@@ -1280,7 +1408,8 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "group_matches": [],
             "near_matches": [],
             "no_match_reason": "",
-            "instruction_uz": MEDIA_MATCH_FOUND_INSTRUCTION,
+            "own_post": True,
+            "instruction_uz": MEDIA_MATCH_OWN_POST_INSTRUCTION,
         })
     if linked and (not vision_compatible_media_url(media_url, attachment.get("kind")) or shared_link_is_the_media(attachment, media_url)):
         # Reel video: tahlil qiladigan rasm yo'q, lekin o'sha reeldagi mahsulotlar ma'lum.
@@ -1489,6 +1618,9 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "instruction_uz": MEDIA_MATCH_GROUP_INSTRUCTION,
         }))
 
+    # Mijoz bizning o'z story yoki reelimizni yuborgan bo'lsa, undagi gul aniq —
+    # unga "o'xshagan variant" deb javob berish mijozni shubhaga soladi.
+    own_post = customer_shared_our_post(attachment)
     return media_match_result(conversation, dict(common, **{
         "ok": True,
         "allow_send": True,
@@ -1498,7 +1630,8 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         "group_matches": [],
         "near_matches": near[:3],
         "no_match_reason": "",
-        "instruction_uz": MEDIA_MATCH_FOUND_INSTRUCTION,
+        "own_post": own_post,
+        "instruction_uz": MEDIA_MATCH_OWN_POST_INSTRUCTION if own_post else MEDIA_MATCH_FOUND_INSTRUCTION,
     }))
 
 
@@ -1679,6 +1812,20 @@ def ai_tool_definitions():
                     "catalog_id": {"type": ["integer", "null"]},
                 },
                 "required": ["query", "catalog_id"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
+            "name": "send_post_image",
+            "description": "Mijoz yuborgan bizning story/postimizning o'z rasmini qayta yuborish. Faqat match_ai_catalog_by_media detail=own_story_matched qaytarganda va mijoz o'sha gulning rasmini so'raganda ishlatiladi. social_post_id o'sha tool natijasidagi story.social_post_id dan olinadi. Katalog mahsuloti uchun bu tool emas, send_catalog_image ishlatiladi.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "social_post_id": {"type": "integer"},
+                },
+                "required": ["social_post_id"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -1943,6 +2090,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         if not item:
             return {"ok": False, "detail": "catalog_not_found"}
         return send_catalog_item_image(conversation, item)
+    if name == "send_post_image":
+        return send_social_post_image(conversation, arguments.get("social_post_id"), tool_results=tool_results)
     if name == "handoff_media_to_operator":
         return handoff_media_to_operator(
             conversation,
@@ -2204,12 +2353,48 @@ def ai_reply(conversation):
     }
     response = client.responses.create(**response_kwargs)
     tool_results = []
-    for _ in range(8):
+    forced_media_match = False
+    for _ in range(10):
         calls = []
         for item in getattr(response, "output", []) or []:
             if getattr(item, "type", "") == "function_call":
                 calls.append(item)
         if not calls:
+            # Model media matching toolini chaqirmasdan javob yozib qo'yishi mumkin va
+            # o'shanda katalogda yo'q mahsulotni o'ylab topadi. Production'da aynan
+            # shunday bo'lgan: mijoz story yuborgan, model "Alfalob 200 tali, 1 600 000
+            # so'm" deb javob bergan — katalogda bunday mahsulot ham, bunday narx ham
+            # yo'q. Toolni o'zimiz chaqirib, natijasi bilan javobni qayta yozdiramiz.
+            if not forced_media_match and unanswered_customer_media(conversation):
+                forced_media_match = True
+                output = execute_ai_tool(
+                    "match_ai_catalog_by_media",
+                    {"source_url": None, "user_text": latest_customer_text},
+                    conversation,
+                    tool_results=tool_results,
+                )
+                tool_results.append({"name": "match_ai_catalog_by_media", "arguments": {"source_url": None, "user_text": latest_customer_text, "forced_by_backend": True}, "output": output})
+                response = client.responses.create(
+                    model=ai_settings.openai_model or settings.OPENAI_MODEL,
+                    instructions=effective_instructions,
+                    previous_response_id=response.id,
+                    input=[{
+                        "role": "user",
+                        "content": (
+                            "SYSTEM: Mijoz media yuborgan, lekin sen match_ai_catalog_by_media ni chaqirmading. "
+                            "Tool sening o'rningga chaqirildi, natijasi quyida. Javobingni shu natija asosida "
+                            "qayta yoz va instruction_uz da yozilganini bajar. Katalogda yo'q mahsulot nomini "
+                            "yoki narxini yozish qat'iy taqiqlanadi.\n\nMATCH_AI_CATALOG_BY_MEDIA natijasi:\n"
+                            + json.dumps(output, ensure_ascii=False, default=str)
+                        ),
+                    }],
+                    max_output_tokens=8000,
+                    reasoning={"effort": ai_settings.reasoning_effort or "low"},
+                    tools=ai_tool_definitions(),
+                    parallel_tool_calls=False,
+                    text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
+                )
+                continue
             break
         tool_outputs = []
         for call in calls:
