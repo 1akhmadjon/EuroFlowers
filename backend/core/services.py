@@ -61,6 +61,24 @@ MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "mahsulot nomi yoki narxini aytma. Mijozdan telefon raqamini so'ra va "
     "handoff_media_to_operator bilan operatorga uzat."
 )
+MEDIA_MATCH_LINK_GROUP_INSTRUCTION = (
+    "Mijoz yuborgan post/reelga bir nechta katalog mahsuloti qo'yilgan, qaysi birini "
+    "so'raganini aytib bo'lmaydi. group_matches dagi catalog_id larni send_catalog_album "
+    "bilan yubor va \"siz yuborgan reeldan hozir bizda borlari shular\" degan mazmunda "
+    "yozib, qaysi biri kerakligini so'ra."
+)
+MEDIA_MATCH_LINK_FALLBACK_INSTRUCTION = (
+    "Rasmdagi aynan mahsulot topilmadi, lekin mijoz yuborgan post/reelga qo'yilgan "
+    "kataloglar ma'lum. group_matches dagi catalog_id larni send_catalog_album bilan "
+    "yubor va \"siz yuborgan reeldan hozir bizda borlari shular\" degan mazmunda yozib, "
+    "qaysi biri kerakligini so'ra. Aynan rasmdagini topdim dema."
+)
+MEDIA_MATCH_SIMILAR_INSTRUCTION = (
+    "Mijoz yuborgan rasmdagi mahsulot katalogda yo'q, lekin unga o'xshaydiganlari bor. "
+    "group_matches dagi catalog_id larni send_catalog_album bilan yubor va rostini ayt: "
+    "aynan o'sha gul hozir yo'q, katalogimizda shunga o'xshaydiganlari shular. Keyin "
+    "qaysi biri yoqishini so'ra. \"Aynan shu\" yoki \"topdim\" dema."
+)
 MEDIA_MATCH_CROP_INSTRUCTION = (
     "Rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini "
     "aniq ayta olmadik. Katalogdan hech qanday rasm YUBORMA, narx aytma va hozircha "
@@ -75,7 +93,7 @@ If REAL_CONTEXT_JSON.conversation.customer_attachments has any customer image, s
 Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
 The tool result field allow_send is the only thing that decides what you may do next.
 allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id. Open the reply with one line saying this is what the shop has that looks like what they showed ("Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:"), then the item name, the price, and one next question, in the customer's own language.
-allow_group true: several catalog items look the same in a photo and differ only in size and stem count. Call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price.
+allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" means the exact flower is NOT in the catalog and these merely resemble it, so say so plainly and never claim you found it.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
 allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
@@ -989,22 +1007,118 @@ def vision_compatible_media_url(url, kind=""):
     return clean_url.endswith(direct_extensions) or "facebook.com/ads/image" in text or "lookaside.fbsbx.com/ig_messaging_cdn" in text or "photo" in text or "image" in text or "story" in text
 
 
-def direct_ai_catalog_link_matches(items, source_url):
-    """Mijoz yuborgan story/post linki katalogdagi link bilan aynan mos kelsa.
-
-    Bunda rasmni tahlil qilish shart emas — link o'zi aniq javob.
-    """
-    source_key = media_url_match_key(source_url)
-    if not source_key:
+def items_matching_link(items, link):
+    """Katalogdagi instagram_link shu havola bilan bir xilmi."""
+    key = media_url_match_key(link)
+    if not key:
         return []
     matched = []
     for item in items:
         catalog_key = media_url_match_key(item.instagram_link)
         if not catalog_key:
             continue
-        if catalog_key == source_key or catalog_key in source_key or source_key in catalog_key:
+        if catalog_key == key or catalog_key in key or key in catalog_key:
             matched.append(item)
     return matched
+
+
+def shared_link_is_the_media(attachment, media_url):
+    """Mijoz yuborgani rasm emas, postning o'zi (reel/story share) bo'lsa.
+
+    Bunday yuborishda tahlil qiladigan rasm yo'q — havolaning o'zi javob beradi.
+    """
+    kind = (attachment or {}).get("kind", "").lower()
+    if kind in {"reel", "video", "post", "share", "ig_reel", "media_share"}:
+        return True
+    return "instagram.com/" in (media_url or "").lower()
+
+
+def social_post_permalink_for_media(attachment):
+    """Mijoz yuborgan story/reel qaysi bizning postimiz ekanini bazadan topadi.
+
+    Instagram direct'da kelgan story rasm CDN havolasi bo'lib keladi, ichida
+    faqat asset_id turadi. O'sha asset_id bo'yicha SocialPost topilsa, uning
+    permalink'i katalogdagi instagram_link bilan solishtiriladigan havola bo'ladi.
+    """
+    from .webhook_services import social_post_by_media_or_url
+
+    url = (attachment or {}).get("url") or ""
+    if not url:
+        return ""
+    try:
+        post = social_post_by_media_or_url(url=url)
+    except Exception as error:
+        print(f"AI_CATALOG_SOCIAL_POST_LOOKUP_FAILED url={url[:80]} error={error}", flush=True)
+        return ""
+    return (post.permalink or post.webhook_story_url or "") if post else ""
+
+
+def conversation_shared_links(conversation):
+    """Suhbatda mijoz yuborgan story/reel havolalari, oxirgisi birinchi bo'lib.
+
+    Mijoz avval reel yuborib, keyin o'sha reeldan screenshot tashlashi mumkin.
+    Screenshot'ning o'z havolasi yo'q, lekin reel hali ham suhbatda turadi.
+    """
+    links = []
+    for message in conversation.messages.filter(sender="customer").order_by("-created_at", "-id")[:30]:
+        for attachment in (message.metadata or {}).get("attachments") or []:
+            url = attachment.get("url") or ""
+            if url and url not in links:
+                links.append(url)
+    return links
+
+
+def direct_ai_catalog_link_matches(items, source_url, attachment=None, conversation=None):
+    """Mijoz yuborgan story/post linki katalogdagi link bilan aynan mos kelsa.
+
+    Bunda rasmni tahlil qilish shart emas — link o'zi aniq javob. Havola uch
+    joydan qidiriladi: yuborilgan URL'ning o'zidan, o'sha media bog'langan
+    SocialPost'ning permalink'idan, va suhbatda oldinroq yuborilgan story/reel'dan.
+    """
+    matched = items_matching_link(items, source_url)
+    if matched:
+        return matched
+    permalink = social_post_permalink_for_media(attachment or {"url": source_url})
+    if permalink:
+        matched = items_matching_link(items, permalink)
+        if matched:
+            return matched
+    if conversation is None:
+        return []
+    for link in conversation_shared_links(conversation):
+        if media_url_match_key(link) == media_url_match_key(source_url):
+            continue
+        matched = items_matching_link(items, link)
+        if matched:
+            return matched
+        permalink = social_post_permalink_for_media({"url": link})
+        if permalink:
+            matched = items_matching_link(items, permalink)
+            if matched:
+                return matched
+    return []
+
+
+# Aynan mos kelmagan, lekin mijozga ko'rsatishga arziydigan mahsulot uchun eng past
+# ball. Bundan pastdagisi boshqa gul — uni ko'rsatish mijozni chalg'itadi.
+SIMILAR_ENOUGH_SCORE = 50
+
+
+def similar_enough_rows(rejected, source, limit=3):
+    """Aynan o'shasi bo'lmasa, katalogdagi eng yaqin mahsulotlar.
+
+    Gul turi va idishi mos kelishi shart — pushti savat so'ralganda qizil quti
+    ko'rsatish "o'xshash" emas. Bal bo'yicha eng yaxshi uchtasi olinadi.
+    """
+    source_family = vision_services.container_family(source)
+    rows = [
+        row for row in rejected
+        if row["verdict"] in {"same_product", "similar_only"}
+        and row["score"] >= SIMILAR_ENOUGH_SCORE
+        and vision_services.families_can_match(source_family, row["family"])
+        and vision_services.forms_can_match(source.get("flower_form"), row["fingerprint"].get("flower_form"))
+    ]
+    return sorted(rows, key=lambda row: row["score"], reverse=True)[:limit]
 
 
 def crop_would_help(conversation, source):
@@ -1143,8 +1257,10 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         return {"ok": False, "allow_send": False, "allow_group": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
     media_url = attachment["url"]
 
-    linked = direct_ai_catalog_link_matches(items, media_url)
-    if linked:
+    # Mijoz yuborgan story/reel bizning qaysi postimiz ekani ma'lum bo'lsa, o'sha
+    # postga qo'yilgan kataloglar aniq javob — rasmni tahlil qilish shart emas.
+    linked = direct_ai_catalog_link_matches(items, media_url, attachment=attachment, conversation=conversation)
+    if len(linked) == 1:
         return media_match_result(conversation, {
             "ok": True,
             "allow_send": True,
@@ -1152,10 +1268,26 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "detail": "instagram_link_matched",
             "source": attachment,
             "source_description": "Mijoz yuborgan Instagram linki katalogdagi mahsulot bilan aynan mos keldi.",
-            "matches": [catalog_match_row(item, reason="instagram_link matched") for item in linked[:MAX_LINK_MATCHES]],
+            "matches": [catalog_match_row(item, reason="instagram_link matched") for item in linked],
             "group_matches": [],
             "near_matches": [],
             "no_match_reason": "",
+            "instruction_uz": MEDIA_MATCH_FOUND_INSTRUCTION,
+        })
+    if linked and (not vision_compatible_media_url(media_url, attachment.get("kind")) or shared_link_is_the_media(attachment, media_url)):
+        # Reel video: tahlil qiladigan rasm yo'q, lekin o'sha reeldagi mahsulotlar ma'lum.
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": False,
+            "allow_group": True,
+            "detail": "instagram_link_group",
+            "source": attachment,
+            "source_description": "Mijoz yuborgan Instagram postiga bir nechta katalog mahsuloti qo'yilgan.",
+            "matches": [],
+            "group_matches": [catalog_match_row(item, reason="instagram_link matched") for item in linked[:MAX_LINK_MATCHES]],
+            "near_matches": [],
+            "no_match_reason": "",
+            "instruction_uz": MEDIA_MATCH_LINK_GROUP_INSTRUCTION,
         })
 
     if not vision_compatible_media_url(media_url, attachment.get("kind")):
@@ -1178,6 +1310,21 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
 
     scored = vision_services.shortlist_candidates(source, items, api_key=api_key)
     shortlist = [row for row in scored[:vision_services.shortlist_size()] if row["score"] >= AI_CATALOG_SHORTLIST_FLOOR]
+    if not shortlist and linked:
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": False,
+            "allow_group": True,
+            "detail": "instagram_link_fallback",
+            "source": attachment,
+            "source_description": source.get("summary", ""),
+            "region_description": source.get("region_description", ""),
+            "matches": [],
+            "group_matches": [catalog_match_row(item, reason="instagram_link matched") for item in linked[:MAX_LINK_MATCHES]],
+            "near_matches": [],
+            "no_match_reason": "Rasmdagi aynan mahsulot topilmadi, post havolasidagilar ko'rsatilyapti.",
+            "instruction_uz": MEDIA_MATCH_LINK_FALLBACK_INSTRUCTION,
+        })
     if not shortlist:
         return media_match_result(conversation, {
             "ok": False,
@@ -1187,6 +1334,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "source": attachment,
             "source_description": source.get("summary", ""),
             "region_description": source.get("region_description", ""),
+            "instruction_uz": MEDIA_MATCH_NOT_FOUND_INSTRUCTION,
             "matches": [],
             "group_matches": [],
             "near_matches": [],
@@ -1252,6 +1400,36 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
                 "near_matches": near[:3],
                 "no_match_reason": "Rasmda bir nechta gul bor, ko'rsatilganini aniq ajratib bo'lmadi.",
                 "instruction_uz": MEDIA_MATCH_CROP_INSTRUCTION,
+            }))
+        # Mijoz reel yuborgan bo'lsa, o'sha reelga qo'yilgan kataloglar aniq ma'lum.
+        # Rasmdagi aynan gulni topolmasak ham, "shu reeldan hozir borlari shular"
+        # deyish operatorga uzatishdan ko'ra ancha foydali.
+        if linked:
+            return media_match_result(conversation, dict(common, **{
+                "ok": True,
+                "allow_send": False,
+                "allow_group": True,
+                "detail": "instagram_link_fallback",
+                "matches": [],
+                "group_matches": [catalog_match_row(item, reason="instagram_link matched") for item in linked[:MAX_LINK_MATCHES]],
+                "near_matches": near[:3],
+                "no_match_reason": "Rasmdagi aynan mahsulot topilmadi, post havolasidagilar ko'rsatilyapti.",
+                "instruction_uz": MEDIA_MATCH_LINK_FALLBACK_INSTRUCTION,
+            }))
+        # Aynan o'shasi yo'q bo'lsa ham, mijoz quruq ketmasin: katalogdagi eng
+        # o'xshashlarini ko'rsatamiz. Bu "topdim" degani emas va shuni aytish shart.
+        similar = similar_enough_rows(rejected, source)
+        if similar:
+            return media_match_result(conversation, dict(common, **{
+                "ok": True,
+                "allow_send": False,
+                "allow_group": True,
+                "detail": "similar_only",
+                "matches": [],
+                "group_matches": [as_row(row) for row in similar],
+                "near_matches": [],
+                "no_match_reason": "Aynan shu mahsulot yo'q, o'xshaydiganlari ko'rsatilyapti.",
+                "instruction_uz": MEDIA_MATCH_SIMILAR_INSTRUCTION,
             }))
         return media_match_result(conversation, dict(common, **{
             "ok": False,
@@ -1455,7 +1633,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
+            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
             "parameters": {
                 "type": "object",
                 "properties": {

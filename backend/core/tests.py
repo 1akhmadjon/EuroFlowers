@@ -69,10 +69,10 @@ def patch_vision(source_fingerprint, verdicts):
     )
 
 
-def media_conversation(external_id, image_url="https://cdn.example.com/customer.jpg"):
+def media_conversation(external_id, image_url="https://cdn.example.com/customer.jpg", kind="photo"):
     customer = Customer.objects.create(instagram_user_id=external_id)
     conversation = Conversation.objects.create(customer=customer)
-    conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": image_url}]})
+    conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": kind, "url": image_url}]})
     return conversation
 
 
@@ -7032,7 +7032,10 @@ class OperatorHandoffTests(TestCase):
         with patch_vision(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"), {item.id: verdict_payload(color_match=False, differences="rangi boshqa")}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertFalse(result["allow_send"])
-        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
+        # Aynan o'shasi emas, lekin mijozga o'xshaydigani sifatida ko'rsatiladi.
+        self.assertEqual(result["detail"], "similar_only")
+        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [item.id])
+        self.assertIn("o'xshaydiganlari", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_look_alike_catalog_items_are_offered_as_an_album(self):
@@ -7051,6 +7054,72 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(result["matches"], [])
         self.assertEqual(sorted(row["catalog_id"] for row in result["group_matches"]), sorted([small.id, big.id]))
         self.assertIn("send_catalog_album", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_every_catalog_item_on_a_shared_reel_is_offered_as_an_album(self):
+        """Bitta reelga yetti xil mahsulot qo'yilgan — qaysi birini so'raganini link aytmaydi."""
+        reel = "https://www.instagram.com/reel/DXHQrOliE8f/?igsi=MWtoazNkZHMxODd5aQ=="
+        first = AICatalogItem.objects.create(name="Qizil Atir Gul", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/red.jpg", instagram_link=reel)
+        second = AICatalogItem.objects.create(name="Oq Jumila", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/white.jpg", instagram_link=reel)
+        conversation = media_conversation("ig-reel-album", image_url=reel, kind="reel")
+        result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shundan bormi"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertTrue(result["allow_group"])
+        self.assertEqual(result["detail"], "instagram_link_group")
+        self.assertEqual(sorted(row["catalog_id"] for row in result["group_matches"]), sorted([first.id, second.id]))
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_one_catalog_item_on_a_shared_reel_is_sent_on_its_own(self):
+        reel = "https://www.instagram.com/reel/DIjgRABNbSf/"
+        item = AICatalogItem.objects.create(name="Buket Alfalob", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/alfalob.jpg", instagram_link=reel)
+        conversation = media_conversation("ig-reel-single", image_url=reel, kind="reel")
+        result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shundan bormi"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual(result["detail"], "instagram_link_matched")
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [item.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_screenshot_falls_back_to_the_reel_the_customer_shared_earlier(self):
+        """Screenshot'ning o'z havolasi yo'q, lekin reel hali suhbatda turadi."""
+        reel = "https://www.instagram.com/reel/DXHQrOliE8f/"
+        first = AICatalogItem.objects.create(name="Qizil Atir Gul", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/red.jpg", instagram_link=reel, **catalog_fingerprint_fields("https://cdn.example.com/red.jpg", flower_form="rose", dominant_colors=["red"], container="unwrapped_bouquet"))
+        second = AICatalogItem.objects.create(name="Oq Jumila", arrangement_type="bouquet", price=900000, quantity=1, image_url="https://cdn.example.com/white.jpg", instagram_link=reel, **catalog_fingerprint_fields("https://cdn.example.com/white.jpg", flower_form="rose", dominant_colors=["white"], container="unwrapped_bouquet"))
+        conversation = media_conversation("ig-reel-screenshot", image_url=reel, kind="reel")
+        conversation.messages.create(sender="customer", text="", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/screenshot.jpg"}]})
+        conversation.messages.create(sender="customer", text="shundagisi bormi")
+        source = vision_fingerprint(flower_form="tulip", dominant_colors=["yellow"], container="vase")
+        with patch_vision(source, {}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shundagisi bormi"}, conversation)
+        self.assertTrue(result["allow_group"])
+        self.assertEqual(result["detail"], "instagram_link_fallback")
+        self.assertEqual(sorted(row["catalog_id"] for row in result["group_matches"]), sorted([first.id, second.id]))
+        self.assertIn("reeldan", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_closest_catalog_items_are_shown_when_the_exact_flower_is_missing(self):
+        """Aynan o'shasi yo'q bo'lsa ham mijoz quruq ketmasin."""
+        close = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket"))
+        far = AICatalogItem.objects.create(name="Qizil Quti", arrangement_type="", price=400000, quantity=1, image_url="https://cdn.example.com/red.jpg", **catalog_fingerprint_fields("https://cdn.example.com/red.jpg", flower_form="rose", dominant_colors=["red"], container="hat_box"))
+        conversation = media_conversation("ig-similar-album")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket")
+        with patch_vision(source, {close.id: verdict_payload(verdict="similar_only"), far.id: verdict_payload(verdict="similar_only")}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertTrue(result["allow_group"])
+        self.assertEqual(result["detail"], "similar_only")
+        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [close.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_nothing_close_enough_still_goes_to_the_operator(self):
+        item = AICatalogItem.objects.create(name="Qizil Quti", arrangement_type="", price=400000, quantity=1, image_url="https://cdn.example.com/red.jpg", **catalog_fingerprint_fields("https://cdn.example.com/red.jpg", flower_form="rose", dominant_colors=["red"], container="hat_box"))
+        conversation = media_conversation("ig-nothing-close")
+        source = vision_fingerprint(flower_form="tulip", dominant_colors=["yellow"], container="vase")
+        with patch_vision(source, {item.id: verdict_payload(verdict="different")}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertFalse(result["allow_group"])
+        self.assertIn(result["detail"], {"not_confident", "no_similar_catalog_item"})
+        self.assertIn("handoff_media_to_operator", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_a_merely_similar_item_is_not_put_in_the_group(self):
