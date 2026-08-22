@@ -7122,6 +7122,11 @@ class OperatorHandoffTests(TestCase):
         tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "detail": "own_story_matched", "allow_send": False, "story": {"social_post_id": post.id}}}]
         with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {"mocked": True})) as send_mock:
             allowed = execute_ai_tool("send_post_image", {"social_post_id": post.id}, conversation, tool_results=tool_results)
+        # Keyingi navbatda tool natijasi yo'q, lekin story hali suhbatning mavzusi.
+        conversation.messages.create(sender="system", text="", metadata={"ai_catalog_media_match": {"detail": "own_story_matched", "story": {"social_post_id": post.id}}})
+        with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {"mocked": True})):
+            later = execute_ai_tool("send_post_image", {"social_post_id": post.id}, conversation, tool_results=[])
+        self.assertTrue(later["ok"])
         self.assertTrue(allowed["ok"])
         send_mock.assert_called_once()
         with patch("core.services.send_image_to_customer") as send_mock:
