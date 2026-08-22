@@ -69,11 +69,26 @@ def update_customer_instagram_profile(customer, external_customer_id, account_id
 
 
 def instagram_sent_message_exists(conversation, instagram_message_id):
+    """Bu xabarni bizning tizimimiz yuborganmi.
+
+    Instagram yuborilgan har bir xabarni webhook orqali bizga qaytaradi. O'zimiz
+    yuborgan rasm yoki albomni tanimasak, u "operator javob yozdi" deb hisoblanib
+    AI o'zini o'n besh daqiqaga to'xtatib qo'yadi.
+    """
     if not instagram_message_id:
         return False
+    from .services import SENT_INSTAGRAM_MESSAGE_IDS
+
+    if instagram_message_id in SENT_INSTAGRAM_MESSAGE_IDS:
+        return True
     if Message.objects.filter(conversation=conversation, instagram_message_id=instagram_message_id).exists():
         return True
-    return Message.objects.filter(conversation=conversation, sender="system", metadata__image_tool_result__sent__message_id=instagram_message_id).exists()
+    return Message.objects.filter(
+        Q(metadata__image_tool_result__sent__message_id=instagram_message_id)
+        | Q(metadata__post_image_result__sent__message_id=instagram_message_id),
+        conversation=conversation,
+        sender="system",
+    ).exists()
 
 
 def attachment_kind(source, attachment_type, url):

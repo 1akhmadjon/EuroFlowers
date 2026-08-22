@@ -90,10 +90,13 @@ MEDIA_MATCH_LINK_FALLBACK_INSTRUCTION = (
     "qaysi biri kerakligini so'ra. Aynan rasmdagini topdim dema."
 )
 MEDIA_MATCH_SIMILAR_INSTRUCTION = (
-    "Mijoz yuborgan rasmdagi mahsulot katalogda yo'q, lekin unga o'xshaydiganlari bor. "
-    "group_matches dagi catalog_id larni send_catalog_album bilan yubor va rostini ayt: "
-    "aynan o'sha gul hozir yo'q, katalogimizda shunga o'xshaydiganlari shular. Keyin "
-    "qaysi biri yoqishini so'ra. \"Aynan shu\" yoki \"topdim\" dema."
+    "Mijoz yuborgan rasmdagi aynan o'sha mahsulot katalogda yo'q. Bir nechta tanlab "
+    "o'tirma — send_catalog_album ni catalog_ids BO'SH massiv bilan chaqirib butun "
+    "katalogni yubor. Keyin shu mazmunda yoz: hozirda bizda bor gullar shular, "
+    "shulardan tanlasangiz ham bo'ladi; yoki siz yuborgan gul ko'proq qiziq bo'lsa "
+    "telefon raqamingizni yuboring, operatorlarimiz aloqaga chiqib aniq narxini "
+    "aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Mijoz raqamini bergach "
+    "handoff_media_to_operator chaqir."
 )
 MEDIA_MATCH_CLOSE_INSTRUCTION = (
     "Rasmdagi gul katalogimizdagi bir nechta mahsulotga juda yaqin, lekin qaysi biri "
@@ -101,7 +104,8 @@ MEDIA_MATCH_CLOSE_INSTRUCTION = (
     "bilan yubor va \"shu rasmga eng mos variantlarimiz shular\" degan mazmunda yozib, "
     "qaysi biri kerakligini so'ra. \"Aynan o'sha gul yo'q\" DEMA — bo'lishi mumkin, "
     "shunchaki qaysi biri ekanini mijozning o'zi tasdiqlashi kerak. Bittasini tanlab "
-    "narx aytma."
+    "narx aytma. Agar mijoz \"bular emas\", \"o'xshamaydi\" desa, butun katalogni "
+    "send_catalog_album bilan yuborib, telefon raqamini so'ra."
 )
 MEDIA_MATCH_CROP_INSTRUCTION = (
     "Rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini "
@@ -637,6 +641,17 @@ def ai_flower_variant_rows(query="", limit=24):
     return rows
 
 
+def is_ad_attachment(url):
+    """Bu mijoz yuborgan rasm emas, u bosgan reklamaning banneri.
+
+    Instagram reklama orqali kelgan suhbatda o'sha banner mijozning HAR bir
+    xabariga qo'shib yuboriladi va imzosi har safar o'zgaradi. Uni oddiy media
+    deb qabul qilsak, mijoz "adres qayerda" deb yozganda ham rasm tahlili
+    ishga tushadi va savoliga javob o'rniga katalog albomi ketadi.
+    """
+    return "facebook.com/ads/image" in (url or "").lower()
+
+
 def customer_attachment_rows(history_messages):
     """Mijoz yuborgan rasm va media havolalari, eng yangisi oxirida.
 
@@ -644,6 +659,7 @@ def customer_attachment_rows(history_messages):
     ko'chirmaymiz — leadga aynan shu havola yoziladi.
     """
     rows = []
+    ad_seen = False
     for message in history_messages:
         if message.sender != "customer":
             continue
@@ -651,8 +667,41 @@ def customer_attachment_rows(history_messages):
             url = attachment.get("url")
             if not url or any(row["url"] == url for row in rows):
                 continue
+            if is_ad_attachment(url):
+                # Reklama banneri suhbatda bir marta hisobga olinadi.
+                if ad_seen:
+                    continue
+                ad_seen = True
+                rows.append({"kind": "ad", "url": url})
+                continue
             rows.append({"kind": attachment.get("kind") or "media", "url": url})
     return rows[-MAX_CONTEXT_ATTACHMENTS:]
+
+
+def previous_visit_context(conversation, history_messages):
+    """Mijoz avval qachon yozgan va nima so'ragan.
+
+    Ertaga qaytib kelgan mijozni "Sizga qanday gul kerak?" bilan kutib olish uni
+    birinchi marta ko'rayotgandek muomala qilish demak. Sanani va o'tgan safargi
+    so'rovni bilsak, suhbatni odamdek davom ettirish mumkin.
+    """
+    latest_customer = next((message for message in reversed(history_messages) if message.sender == "customer"), None)
+    previous = None
+    for message in reversed(history_messages):
+        if latest_customer and message.id == latest_customer.id:
+            continue
+        if message.sender in {"customer", "ai", "operator"}:
+            previous = message
+            break
+    if not previous or not latest_customer:
+        return {"days_since_previous_message": None, "previous_message_date": "", "previous_request": ""}
+    gap_days = (timezone.localtime(latest_customer.created_at).date() - timezone.localtime(previous.created_at).date()).days
+    lead = conversation.leads.order_by("-created_at", "-id").first()
+    return {
+        "days_since_previous_message": gap_days,
+        "previous_message_date": timezone.localtime(previous.created_at).date().isoformat(),
+        "previous_request": (lead.request_uz if lead else "")[:200],
+    }
 
 
 def ai_post_context(conversation):
@@ -1206,6 +1255,8 @@ def unanswered_customer_media(conversation):
 
     Faqat yangi media uchun. Eski rasm haqida mijoz keyinroq savol bersa, model
     o'zi qaror qiladi — u yerda majburlash suhbatni orqaga tortib yuborardi.
+    Reklama banneri media hisoblanmaydi: u mijozning har bir xabariga o'zi
+    qo'shiladi, mijoz uni yubormagan.
     """
     messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:12])
     for message in messages:
@@ -1214,7 +1265,8 @@ def unanswered_customer_media(conversation):
         if message.sender != "customer":
             continue
         for attachment in (message.metadata or {}).get("attachments") or []:
-            if attachment.get("url"):
+            url = attachment.get("url")
+            if url and not is_ad_attachment(url):
                 return True
     return False
 
@@ -1353,10 +1405,10 @@ def send_social_post_image(conversation, social_post_id, tool_results=None):
     post = SocialPost.objects.filter(id=social_post_id, is_active=True).first()
     if not post or not post.image_url:
         return {"ok": False, "detail": "post_image_not_found"}
-    delivered, detail, _ = send_image_to_customer(conversation.customer, post.image_url, conversation)
+    delivered, detail, sent = send_image_to_customer(conversation.customer, post.image_url, conversation)
     if not delivered:
         return {"ok": False, "detail": detail or "send_failed"}
-    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"post_image_result": {"social_post_id": post.id, "image_url": post.image_url, "detail": detail}})
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"post_image_result": {"social_post_id": post.id, "image_url": post.image_url, "detail": detail, "sent": sent}})
     return {"ok": True, "image_sent": True, "social_post_id": post.id, "title": post.title_uz, "price_text": f"{money_uz(post.price)} so'm" if post.price else ""}
 
 
@@ -1599,16 +1651,32 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             # (mahsulotni "same_product" deb, ayni paytda rangini mos emas deb).
             # Bunday holatda mijozga "aynan yo'q" deyish yolg'on bo'lardi.
             close = similar[0]["score"] >= CLOSE_MATCH_SCORE
+            if close:
+                return media_match_result(conversation, dict(common, **{
+                    "ok": True,
+                    "allow_send": False,
+                    "allow_group": True,
+                    "detail": "close_matches",
+                    "matches": [],
+                    "group_matches": [as_row(row) for row in similar],
+                    "near_matches": [],
+                    "no_match_reason": "",
+                    "instruction_uz": MEDIA_MATCH_CLOSE_INSTRUCTION,
+                }))
+            # Uzoqdan o'xshagan ikki-uchta mahsulotni ko'rsatish mijozni ishontirmaydi.
+            # Butun katalogni ko'rsatib, tanlash imkonini berish va aynan o'sha gul
+            # kerak bo'lsa operatorga uzatish ancha halol va foydali.
             return media_match_result(conversation, dict(common, **{
                 "ok": True,
                 "allow_send": False,
                 "allow_group": True,
-                "detail": "close_matches" if close else "similar_only",
+                "show_whole_catalog": True,
+                "detail": "similar_only",
                 "matches": [],
-                "group_matches": [as_row(row) for row in similar],
-                "near_matches": [],
-                "no_match_reason": "" if close else "Aynan shu mahsulot yo'q, o'xshaydiganlari ko'rsatilyapti.",
-                "instruction_uz": MEDIA_MATCH_CLOSE_INSTRUCTION if close else MEDIA_MATCH_SIMILAR_INSTRUCTION,
+                "group_matches": [],
+                "near_matches": [as_row(row) for row in similar],
+                "no_match_reason": "Aynan shu mahsulot yo'q, butun katalog ko'rsatilyapti.",
+                "instruction_uz": MEDIA_MATCH_SIMILAR_INSTRUCTION,
             }))
         return media_match_result(conversation, dict(common, **{
             "ok": False,
@@ -1907,6 +1975,7 @@ def send_image_to_customer(customer, image_url, conversation=None):
         return False, "send_failed", None
     if isinstance(result, dict) and result.get("mocked"):
         return True, "mocked", result
+    remember_sent_instagram_message(result)
     return True, "sent", result
 
 
@@ -2038,6 +2107,24 @@ def ai_catalog_album_result(result):
     return trimmed
 
 
+SENT_INSTAGRAM_MESSAGE_IDS = []
+
+
+def remember_sent_instagram_message(result):
+    """Biz yuborgan Instagram xabar id sini eslab qolamiz.
+
+    Faqat bitta so'rov davomida kerak: albom yuborilgach uning echo'si darhol
+    keladi va o'sha paytda bazada hali hech narsa yozilmagan bo'ladi.
+    """
+    if not isinstance(result, dict):
+        return
+    message_id = result.get("message_id") or ""
+    if not message_id:
+        return
+    SENT_INSTAGRAM_MESSAGE_IDS.append(message_id)
+    del SENT_INSTAGRAM_MESSAGE_IDS[:-200]
+
+
 def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=None):
     """Bitta albom xabarini yuboradi. (delivered, detail) qaytaradi, exception ko'tarmaydi.
 
@@ -2061,6 +2148,10 @@ def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=No
     if isinstance(result, dict) and result.get("ok") is False:
         print(f"CATALOG_ALBUM_REJECTED customer={customer.id} platform={platform} result={result}", flush=True)
         return False, "album_rejected"
+    # Instagram yuborilgan xabarni webhook orqali bizga qaytaradi. Uning id sini
+    # eslab qolmasak, o'z albomimiz "operator javob yozdi" deb hisoblanadi va AI
+    # o'zini o'n besh daqiqaga to'xtatib qo'yadi.
+    remember_sent_instagram_message(result)
     return True, "album"
 
 
@@ -2341,6 +2432,7 @@ def ai_reply(conversation):
             "previous_orders_count": customer.leads.count(),
             "is_returning": bool(valid_customer_name(customer.name) and customer.phone),
             "last_delivery_address": (customer.leads.exclude(delivery_address="").order_by("-created_at", "-id").values_list("delivery_address", flat=True).first() or ""),
+            **previous_visit_context(conversation, history_messages),
         },
         "conversation": {
             "source": "telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",

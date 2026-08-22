@@ -7008,13 +7008,15 @@ class OperatorHandoffTests(TestCase):
         conversation = media_conversation("ig-similar-only")
         with patch_vision(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"), {item.id: verdict_payload(verdict="similar_only", color_match=False, differences="katalogda sariq")}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
-        # Aynan o'shasi emas: rasm yuborilmaydi va "topdim" deyilmaydi. Lekin mijoz
-        # quruq qaytmasin — bir xil turdagi savat o'xshashi sifatida ko'rsatiladi.
+        # Aynan o'shasi emas: rasm yuborilmaydi va "topdim" deyilmaydi. Mijoz quruq
+        # qaytmasin — butun katalog ko'rsatiladi va telefon so'raladi.
         self.assertFalse(result["allow_send"])
         self.assertEqual(result["matches"], [])
         self.assertEqual(result["detail"], "similar_only")
-        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [item.id])
-        self.assertIn("o'xshaydiganlari", result["instruction_uz"])
+        self.assertTrue(result["show_whole_catalog"])
+        self.assertEqual(result["group_matches"], [])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
+        self.assertIn("telefon", result["instruction_uz"])
         self.assertIn("topdim", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7206,8 +7208,11 @@ class OperatorHandoffTests(TestCase):
         self.assertFalse(result["allow_send"])
         self.assertTrue(result["allow_group"])
         self.assertEqual(result["detail"], "similar_only")
-        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [close.id])
-        self.assertLess(result["group_matches"][0]["score"], services.CLOSE_MATCH_SCORE)
+        # Uzoqdan o'xshagan ikkitasini ko'rsatish o'rniga butun katalog yuboriladi.
+        self.assertTrue(result["show_whole_catalog"])
+        self.assertEqual(result["group_matches"], [])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [close.id])
+        self.assertIn("telefon", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_the_same_arrangement_in_another_colour_counts_as_similar(self):
@@ -7220,7 +7225,69 @@ class OperatorHandoffTests(TestCase):
         self.assertFalse(result["allow_send"])
         self.assertTrue(result["allow_group"])
         self.assertEqual(result["detail"], "similar_only")
-        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [basket.id])
+        self.assertTrue(result["show_whole_catalog"])
+        self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [basket.id])
+
+    def test_a_customer_returning_the_next_day_brings_their_history(self):
+        """Ertaga qaytgan mijozni birinchi marta ko'rgandek kutib olmaslik uchun."""
+        from datetime import timedelta as _timedelta
+        customer = Customer.objects.create(instagram_user_id="ig-returning", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        old = conversation.messages.create(sender="ai", text="Rahmat, kuningiz xayrli o'tsin.")
+        conversation.messages.filter(id=old.id).update(created_at=timezone.now() - _timedelta(days=2))
+        conversation.messages.create(sender="customer", text="salom")
+        history = list(conversation.messages.order_by("created_at", "id"))
+        row = services.previous_visit_context(conversation, history)
+        self.assertEqual(row["days_since_previous_message"], 2)
+        self.assertEqual(row["previous_message_date"], (timezone.localdate() - _timedelta(days=2)).isoformat())
+
+    def test_a_first_message_has_no_previous_visit(self):
+        customer = Customer.objects.create(instagram_user_id="ig-brand-new")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="salom")
+        history = list(conversation.messages.order_by("created_at", "id"))
+        row = services.previous_visit_context(conversation, history)
+        self.assertIsNone(row["days_since_previous_message"])
+
+    def test_our_own_album_echo_does_not_pause_the_ai(self):
+        """Instagram yuborgan albomni bizga qaytaradi — u operator javobi emas."""
+        from .webhook_services import instagram_sent_message_exists
+        customer = Customer.objects.create(instagram_user_id="ig-echo")
+        conversation = Conversation.objects.create(customer=customer)
+        services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
+        services.remember_sent_instagram_message({"message_id": "mid-album-1", "recipient_id": "x"})
+        self.assertTrue(instagram_sent_message_exists(conversation, "mid-album-1"))
+        self.assertFalse(instagram_sent_message_exists(conversation, "mid-operator-typed"))
+
+    def test_a_story_photo_echo_is_recognised_from_the_saved_result(self):
+        from .webhook_services import instagram_sent_message_exists
+        customer = Customer.objects.create(instagram_user_id="ig-echo-story")
+        conversation = Conversation.objects.create(customer=customer)
+        services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
+        conversation.messages.create(sender="system", text="", metadata={"post_image_result": {"social_post_id": 1, "sent": {"message_id": "mid-story-9"}}})
+        self.assertTrue(instagram_sent_message_exists(conversation, "mid-story-9"))
+
+    def test_an_ad_banner_is_not_treated_as_a_photo_the_customer_sent(self):
+        """Reklama banneri mijozning har bir xabariga o'zi qo'shiladi."""
+        customer = Customer.objects.create(instagram_user_id="ig-ad-banner")
+        conversation = Conversation.objects.create(customer=customer)
+        ad_one = "https://www.facebook.com/ads/image/?d=AQJNuJz-first"
+        ad_two = "https://www.facebook.com/ads/image/?d=AQJNuJz-second"
+        conversation.messages.create(sender="customer", text="salom", metadata={"attachments": [{"kind": "photo", "url": ad_one}]})
+        conversation.messages.create(sender="ai", text="Assalomu alaykum")
+        conversation.messages.create(sender="customer", text="Adres qayerda", metadata={"attachments": [{"kind": "photo", "url": ad_two}]})
+        rows = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
+        self.assertEqual([row["url"] for row in rows], [ad_one])
+        self.assertEqual(rows[0]["kind"], "ad")
+        self.assertFalse(services.unanswered_customer_media(conversation))
+
+    def test_a_real_photo_after_an_ad_banner_still_counts(self):
+        customer = Customer.objects.create(instagram_user_id="ig-ad-then-photo")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="salom", metadata={"attachments": [{"kind": "photo", "url": "https://www.facebook.com/ads/image/?d=AQJ-banner"}]})
+        conversation.messages.create(sender="ai", text="Assalomu alaykum")
+        conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/real.jpg"}]})
+        self.assertTrue(services.unanswered_customer_media(conversation))
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_the_same_catalog_photo_is_not_sent_twice(self):
