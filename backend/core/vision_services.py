@@ -92,6 +92,21 @@ def container_family(fingerprint, arrangement_type=""):
         return family
     return CONTAINER_FAMILIES.get((fingerprint or {}).get("container") or "", "")
 
+
+def families_can_match(source_family, target_family):
+    """Ikki mahsulot bir xil turdagi idishdami.
+
+    Savat, quticha, vaza va qo'ldagi buket rasmda aniq farq qiladi. Faqat quticha
+    bilan buket chalkashadi — o'ram burchagiga qarab model ikkalasini ham aytishi
+    mumkin, shuning uchun ular bir-biriga qo'shni hisoblanadi.
+    """
+    if not source_family or not target_family:
+        return True
+    if source_family == target_family:
+        return True
+    return target_family in CONTAINER_FAMILY_NEIGHBOURS.get(source_family, set())
+
+
 COLOR_PATTERNS = ["solid", "two_tone", "multi_color", "gradient"]
 SIZES = ["small", "medium", "large", "extra_large"]
 COUNT_BUCKETS = ["under_25", "25_to_50", "50_to_100", "over_100"]

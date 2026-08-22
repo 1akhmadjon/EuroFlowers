@@ -1157,6 +1157,10 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
 
     verdicts = vision_services.verify_candidates(media_url, source, shortlist, customer_text=text, api_key=api_key)
 
+    # Mijoz rasmidagi idish savatmi, buketmi, quticha yoki vazami. Model bir savatni
+    # qo'ldagi buketga "same_product" deb qo'yishi mumkin, shu yerda to'xtatiladi.
+    source_family = vision_services.container_family(source)
+
     passed = []
     rejected = []
     for row in shortlist:
@@ -1166,12 +1170,14 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         # idishi mos kelmasa yoki fingerprint bali chegaradan past bo'lsa o'tmaydi.
         row["verdict"] = judgement.get("verdict") or "different"
         row["differences"] = judgement.get("differences") or ""
+        row["family"] = vision_services.container_family(row["fingerprint"], item.arrangement_type)
         row["passed"] = (
             row["verdict"] == "same_product"
             and bool(judgement.get("flower_form_match"))
             and bool(judgement.get("color_match"))
             and bool(judgement.get("container_match"))
             and row["score"] >= vision_services.min_match_score()
+            and vision_services.families_can_match(source_family, row["family"])
         )
         (passed if row["passed"] else rejected).append(row)
 
@@ -1204,6 +1210,9 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     # narx aytish xato bo'ladi — hammasini ko'rsatib mijozning o'zidan so'raymiz.
     twins = [row for row in vision_services.indistinguishable_items(winner, shortlist) if row["verdict"] in {"same_product", "similar_only"}]
     twins += [row for row in passed if row is not winner and row not in twins]
+    # Savat bilan buketni yonma-yon qo'yib "qaysi biri" deb so'rash ma'nosiz — ular
+    # rasmda aniq farq qiladi, mijoz allaqachon birini ko'rsatgan.
+    twins = [row for row in twins if row["family"] == winner["family"]]
     # Narxi g'olib bilan bir xil bo'lgan egizakni so'rashning ma'nosi yo'q — mijoz
     # qaysi birini tanlasa ham javob o'zgarmaydi.
     twins = [row for row in twins if row["item"].price != winner["item"].price]

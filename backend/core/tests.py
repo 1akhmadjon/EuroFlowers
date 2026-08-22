@@ -6990,6 +6990,29 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_basket_photo_never_matches_a_hand_held_bouquet(self):
+        """Model savatni buketga "same_product" desa ham idishi boshqa — o'tmaydi."""
+        bouquet = AICatalogItem.objects.create(name="Buket Bambastic", arrangement_type="bouquet", price=900000, quantity=1, image_url="https://cdn.example.com/bouquet.jpg", **catalog_fingerprint_fields("https://cdn.example.com/bouquet.jpg", flower_form="spray_rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet"))
+        conversation = media_conversation("ig-basket-vs-bouquet")
+        source = vision_fingerprint(flower_form="spray_rose", dominant_colors=["cream", "pink"], container="basket")
+        with patch_vision(source, {bouquet.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertFalse(result["allow_group"])
+        self.assertEqual(result["detail"], "not_confident")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_wrapped_bouquet_still_matches_a_hat_box(self):
+        """Quticha bilan o'ralgan buketni model ikki xil ataydi, ular qo'shni bo'lib qoladi."""
+        box = AICatalogItem.objects.create(name="Qizil Atir Gul", arrangement_type="", price=400000, quantity=1, image_url="https://cdn.example.com/box.jpg", **catalog_fingerprint_fields("https://cdn.example.com/box.jpg", flower_form="rose", dominant_colors=["red"], container="hat_box"))
+        conversation = media_conversation("ig-box-vs-wrap")
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["red"], container="wrapped_bouquet")
+        with patch_vision(source, {box.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [box.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_look_alike_with_the_same_price_is_not_worth_asking_about(self):
         """Narxi bir xil bo'lsa mijoz qaysi birini tanlasa ham javob o'zgarmaydi."""
         winner = AICatalogItem.objects.create(name="Savat Jumila", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/jumila-a.jpg", **catalog_fingerprint_fields("https://cdn.example.com/jumila-a.jpg", flower_form="rose", dominant_colors=["cream", "peach"], container="basket"))
