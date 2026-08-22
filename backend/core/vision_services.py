@@ -17,6 +17,7 @@ Noto'g'ri katalog yuborgandan ko'ra hech narsa yubormaslik afzal.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from django.conf import settings
 from django.utils import timezone
@@ -97,6 +98,10 @@ COUNT_BUCKETS = ["under_25", "25_to_50", "50_to_100", "over_100"]
 
 VERDICTS = ["same_product", "similar_only", "different"]
 
+# Ikki katalog mahsulotining rasmi shu balldan yuqori o'xshasa ularni bir-biridan
+# rasm orqali ajratib bo'lmaydi.
+TWIN_SCORE = 85
+
 FINGERPRINT_VERSION = 2
 
 
@@ -116,7 +121,7 @@ def vision_reasoning():
 
 
 def shortlist_size():
-    return max(2, min(int(getattr(settings, "AI_CATALOG_MATCH_SHORTLIST", 5) or 5), 8))
+    return max(2, min(int(getattr(settings, "AI_CATALOG_MATCH_SHORTLIST", 4) or 4), 6))
 
 
 def min_match_score():
@@ -150,29 +155,17 @@ def fingerprint_schema(with_region=False):
 
 
 def verification_schema():
+    """Bitta nomzod uchun. Har nomzod alohida so'ralgani uchun catalog_id kerak emas."""
     return {
         "type": "object",
         "properties": {
-            "source_summary": {"type": "string"},
-            "candidates": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "catalog_id": {"type": "integer"},
-                        "verdict": {"type": "string", "enum": VERDICTS},
-                        "flower_form_match": {"type": "boolean"},
-                        "color_match": {"type": "boolean"},
-                        "container_match": {"type": "boolean"},
-                        "differences": {"type": "string"},
-                    },
-                    "required": ["catalog_id", "verdict", "flower_form_match", "color_match", "container_match", "differences"],
-                    "additionalProperties": False,
-                },
-            },
-            "best_catalog_id": {"type": "integer", "description": "0 = mos keladigani yo'q"},
+            "verdict": {"type": "string", "enum": VERDICTS},
+            "flower_form_match": {"type": "boolean"},
+            "color_match": {"type": "boolean"},
+            "container_match": {"type": "boolean"},
+            "differences": {"type": "string"},
         },
-        "required": ["source_summary", "candidates", "best_catalog_id"],
+        "required": ["verdict", "flower_form_match", "color_match", "container_match", "differences"],
         "additionalProperties": False,
     }
 
@@ -428,38 +421,81 @@ def shortlist_candidates(source, items, api_key="", lazy_limit=6):
     return scored
 
 
-def verify_candidates(source_url, source, rows, customer_text="", api_key=""):
-    """Qisqa ro'yxatdagi rasmlarni mijoz rasmi bilan yonma-yon solishtiradi.
+def verify_candidate(source_url, item, source, customer_text="", api_key=""):
+    """Bitta katalog rasmini mijoz rasmi bilan yonma-yon solishtiradi.
 
-    Bu yerda rasm soni 3-4 ta bo'lgani uchun model qaysi rasm qaysi catalog_id ekanini
-    adashtirmaydi. 40 ta rasmda esa adashtirib yuborardi.
+    Har nomzod alohida so'raladi. Bitta so'rovga 5-6 ta rasm tiqilganda model qaysi
+    rasm qaysi mahsulot ekanini adashtiradi va o'z rasmini ham "boshqa" deb ataydi.
+    Ikkita rasmda esa chalkashadigan narsa qolmaydi.
+    """
+    payload = {
+        "task": "Decide whether these two photos show the SAME product from a flower shop catalog.",
+        "customer_text": customer_text or "",
+        "catalog_item": {"name": item.name, "type": item.get_arrangement_type_display(), "volume": item.volume},
+        "customer_fingerprint": {key: source.get(key) for key in ("flower_form", "dominant_colors", "color_pattern", "container", "region_description")},
+        "rules": [
+            "The two photos may be the very same photograph, or the same product shot from another angle. Both count as same_product.",
+            "Compare the flowers first: petal form and flower colour decide the verdict.",
+            "same_product needs flower form, dominant flower colours and container type to match.",
+            "A different rose variety or a different dominant colour is never same_product.",
+            "Similar shape, similar density, a person holding it, similar wrapping or similar overall style alone is similar_only.",
+            "Wrapping paper being folded differently or the photo being cropped differently does not make it a different product.",
+        ],
+    }
+    content = [
+        {"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)},
+        {"type": "input_text", "text": "PHOTO 1 — the customer's photo:"},
+        {"type": "input_image", "image_url": source_url, "detail": vision_detail()},
+        {"type": "input_text", "text": f"PHOTO 2 — catalog product {item.name}:"},
+        {"type": "input_image", "image_url": item.image_url, "detail": vision_detail()},
+    ]
+    return vision_json(
+        OpenAI(api_key=api_key or openai_api_key()),
+        schema_name="catalog_verification",
+        schema=verification_schema(),
+        instructions="You are a strict flower identification checker for a flower shop. You compare exactly two photos and decide whether they show the same catalog product. Prefer 'different' over a wrong match. Return JSON only.",
+        content=content,
+        max_output_tokens=2500,
+    )
+
+
+def verify_candidates(source_url, source, rows, customer_text="", api_key=""):
+    """Qisqa ro'yxatdagi har bir nomzodni alohida tekshiradi.
+
+    So'rovlar tarmoq kutishidan iborat, shuning uchun parallel yuboriladi — 4 ta
+    nomzod bitta nomzodcha vaqt oladi.
     """
     api_key = api_key or openai_api_key()
     if not api_key or not rows:
         return {}
-    payload = {
-        "task": "Decide whether the customer photo shows the SAME product as one of the numbered catalog photos.",
-        "customer_text": customer_text or "",
-        "customer_fingerprint": {key: source.get(key) for key in ("flower_form", "dominant_colors", "color_pattern", "container", "size", "count_bucket", "region_description")},
-        "rules": [
-            "Compare the flowers first: petal form and flower colour decide the verdict.",
-            "same_product only when flower form, dominant flower colours and container all match. A different rose variety or a different dominant colour is never same_product.",
-            "Similar basket shape, similar density, a person holding it, similar wrapping or similar overall style is NOT enough. That is similar_only.",
-            "best_catalog_id must be 0 unless exactly one candidate is same_product.",
-        ],
-    }
-    content = [{"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)}]
-    content.append({"type": "input_text", "text": "CUSTOMER PHOTO:"})
-    content.append({"type": "input_image", "image_url": source_url, "detail": vision_detail()})
+    def check(row):
+        try:
+            return row["item"].id, verify_candidate(source_url, row["item"], source, customer_text=customer_text, api_key=api_key)
+        except Exception as error:
+            print(f"AI_CATALOG_VERIFY_FAILED catalog_id={row['item'].id} error={error}", flush=True)
+            return row["item"].id, {}
+    with ThreadPoolExecutor(max_workers=min(len(rows), 5)) as pool:
+        return {catalog_id: judgement for catalog_id, judgement in pool.map(check, rows)}
+
+
+def indistinguishable_items(winner_row, rows):
+    """G'olibdan rasmda ajratib bo'lmaydigan boshqa katalog mahsulotlari.
+
+    Do'konda bir xil guldan turli o'lchamdagi mahsulotlar bor: 199 000, 400 000,
+    900 000 va 1 000 000 so'mlik buketlar bir xil ko'rinadi, farqi gul sonida.
+    Rasmdan qaysi biri ekanini aytib bo'lmaydi — taxmin qilib narx aytishdan ko'ra
+    hammasini ko'rsatib, mijozning o'zidan so'ragan to'g'ri.
+    """
+    twins = []
     for row in rows:
-        item = row["item"]
-        content.append({"type": "input_text", "text": f"CATALOG PHOTO catalog_id={item.id} name={item.name} type={item.get_arrangement_type_display()}"})
-        content.append({"type": "input_image", "image_url": item.image_url, "detail": vision_detail()})
-    return vision_json(
-        OpenAI(api_key=api_key),
-        schema_name="catalog_verification",
-        schema=verification_schema(),
-        instructions="You are a strict flower identification checker for a flower shop. You decide only whether two photos show the same catalog product. Prefer 'different' over a wrong match. Return JSON only.",
-        content=content,
-        max_output_tokens=4000,
-    )
+        if row["item"].id == winner_row["item"].id:
+            continue
+        score = fingerprint_score(
+            winner_row["fingerprint"],
+            row["fingerprint"],
+            catalog_item_context(row["item"]),
+            target_arrangement_type=row["item"].arrangement_type,
+        )
+        if score >= TWIN_SCORE:
+            twins.append(row)
+    return twins

@@ -44,6 +44,12 @@ MEDIA_MATCH_FOUND_INSTRUCTION = (
     "Aynan shu mahsulot topildi. send_catalog_image ni shu catalog_id bilan chaqir, "
     "keyin nomi va narxini yozib bitta savol ber."
 )
+MEDIA_MATCH_GROUP_INSTRUCTION = (
+    "Katalogda bu rasmga o'xshaydigan bir nechta mahsulot bor, farqi hajmi va gul "
+    "sonida — rasmdan qaysi biri ekanini aytib bo'lmaydi. group_matches dagi "
+    "catalog_id larni send_catalog_album bilan yubor va mijozdan qaysi biri "
+    "kerakligini so'ra. Bittasini tanlab narx aytma."
+)
 MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "Aynan mos mahsulot topilmadi. Katalogdan hech qanday rasm YUBORMA va taxmin qilib "
     "mahsulot nomi yoki narxini aytma. Mijozdan telefon raqamini so'ra va "
@@ -56,7 +62,8 @@ If REAL_CONTEXT_JSON.conversation.customer_attachments has any customer image, s
 Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
 The tool result field allow_send is the only thing that decides what you may do next.
 allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id, then write that item name and price and ask one next question.
-allow_send false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
+allow_group true: several catalog items look the same in a photo and differ only in size and stem count. Call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price.
+allow_send false and allow_group false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -999,18 +1006,23 @@ def media_match_outcome(tool_results):
     model mos kelmagan bo'lsa ham ikkita katalog rasmini yuborib, ustidan
     "operatorlarimiz aniq javob berishadi" deb yozgan.
     """
-    outcome = {"ran": False, "allow_send": False, "allowed_ids": set(), "candidate_ids": set()}
+    outcome = {"ran": False, "allow_send": False, "allow_group": False, "allowed_ids": set(), "group_ids": set(), "candidate_ids": set()}
     for row in tool_results or []:
         if row.get("name") != "match_ai_catalog_by_media":
             continue
         output = row.get("output") or {}
         outcome["ran"] = True
-        allowed = {match.get("catalog_id") for match in (output.get("matches") or []) if match.get("catalog_id")}
+        def ids(key):
+            return {match.get("catalog_id") for match in (output.get(key) or []) if match.get("catalog_id")}
+        allowed = ids("matches")
+        group = ids("group_matches")
         if output.get("allow_send") and allowed:
             outcome["allow_send"] = True
             outcome["allowed_ids"] |= allowed
-        outcome["candidate_ids"] |= allowed
-        outcome["candidate_ids"] |= {match.get("catalog_id") for match in (output.get("near_matches") or []) if match.get("catalog_id")}
+        if output.get("allow_group") and group:
+            outcome["allow_group"] = True
+            outcome["group_ids"] |= group
+        outcome["candidate_ids"] |= allowed | group | ids("near_matches")
     return outcome
 
 
@@ -1023,6 +1035,12 @@ def media_match_send_block(tool_results, name, catalog_ids):
     outcome = media_match_outcome(tool_results)
     if not outcome["ran"] or outcome["allow_send"]:
         return None
+    if outcome["allow_group"]:
+        # Bir nechta mahsulot bir xil ko'rinadi: albom bo'lib hammasi ketadi, lekin
+        # bittasini ajratib "mana sizniki" deb yuborib bo'lmaydi.
+        if name == "send_catalog_album" and set(catalog_ids or []) <= outcome["group_ids"]:
+            return None
+        return {"ok": False, "detail": "media_match_needs_a_group", "group_ids": sorted(outcome["group_ids"]), "instruction_uz": MEDIA_MATCH_GROUP_INSTRUCTION}
     if name == "send_catalog_image":
         blocked = True
     else:
@@ -1081,10 +1099,10 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     """
     attachment = latest_customer_media_attachment(conversation, source_url)
     if not attachment or not attachment.get("url"):
-        return {"ok": False, "allow_send": False, "detail": "no_customer_media", "matches": [], "near_matches": []}
+        return {"ok": False, "allow_send": False, "allow_group": False, "detail": "no_customer_media", "matches": [], "group_matches": [], "near_matches": []}
     items = ai_catalog_match_items(max(1, min(int(limit or MAX_AI_CATALOG_MATCH_CANDIDATES), MAX_AI_CATALOG_MATCH_CANDIDATES)))
     if not items:
-        return {"ok": False, "allow_send": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": [], "near_matches": []}
+        return {"ok": False, "allow_send": False, "allow_group": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
     media_url = attachment["url"]
 
     linked = direct_ai_catalog_link_matches(items, media_url)
@@ -1092,19 +1110,21 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         return media_match_result(conversation, {
             "ok": True,
             "allow_send": True,
+            "allow_group": False,
             "detail": "instagram_link_matched",
             "source": attachment,
             "source_description": "Mijoz yuborgan Instagram linki katalogdagi mahsulot bilan aynan mos keldi.",
             "matches": [catalog_match_row(item, reason="instagram_link matched") for item in linked[:MAX_LINK_MATCHES]],
+            "group_matches": [],
             "near_matches": [],
             "no_match_reason": "",
         })
 
     if not vision_compatible_media_url(media_url, attachment.get("kind")):
-        return {"ok": False, "allow_send": False, "detail": "media_url_not_image", "source": attachment, "matches": [], "near_matches": []}
+        return {"ok": False, "allow_send": False, "allow_group": False, "detail": "media_url_not_image", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
     api_key = openai_api_key()
     if not api_key:
-        return {"ok": False, "allow_send": False, "detail": "openai_api_key_missing", "source": attachment, "matches": [], "near_matches": []}
+        return {"ok": False, "allow_send": False, "allow_group": False, "detail": "openai_api_key_missing", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
 
     text = (user_text or "").strip()
     if not text:
@@ -1114,9 +1134,9 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         source = vision_services.analyze_image(media_url, context_text=text, with_region=True, api_key=api_key)
     except Exception as error:
         print(f"AI_CATALOG_MEDIA_SOURCE_FAILED conversation={conversation.id} error={error}", flush=True)
-        return {"ok": False, "allow_send": False, "detail": "source_analysis_failed", "source": attachment, "error": str(error)[:400], "matches": [], "near_matches": []}
+        return {"ok": False, "allow_send": False, "allow_group": False, "detail": "source_analysis_failed", "source": attachment, "error": str(error)[:400], "matches": [], "group_matches": [], "near_matches": []}
     if not source:
-        return {"ok": False, "allow_send": False, "detail": "source_analysis_empty", "source": attachment, "matches": [], "near_matches": []}
+        return {"ok": False, "allow_send": False, "allow_group": False, "detail": "source_analysis_empty", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
 
     scored = vision_services.shortlist_candidates(source, items, api_key=api_key)
     shortlist = [row for row in scored[:vision_services.shortlist_size()] if row["score"] >= AI_CATALOG_SHORTLIST_FLOOR]
@@ -1124,78 +1144,92 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         return media_match_result(conversation, {
             "ok": False,
             "allow_send": False,
+            "allow_group": False,
             "detail": "no_similar_catalog_item",
             "source": attachment,
             "source_description": source.get("summary", ""),
             "region_description": source.get("region_description", ""),
             "matches": [],
+            "group_matches": [],
             "near_matches": [],
             "no_match_reason": "Katalogda bu rasmga o'xshash mahsulot topilmadi.",
         })
 
-    try:
-        verification = vision_services.verify_candidates(media_url, source, shortlist, customer_text=text, api_key=api_key)
-    except Exception as error:
-        print(f"AI_CATALOG_MEDIA_VERIFY_FAILED conversation={conversation.id} error={error}", flush=True)
-        verification = {}
-    verdicts = {}
-    for row in (verification.get("candidates") or []):
-        try:
-            verdicts[int(row.get("catalog_id"))] = row
-        except (TypeError, ValueError):
-            continue
-    try:
-        best_id = int(verification.get("best_catalog_id") or 0)
-    except (TypeError, ValueError):
-        best_id = 0
+    verdicts = vision_services.verify_candidates(media_url, source, shortlist, customer_text=text, api_key=api_key)
 
     passed = []
-    near_matches = []
+    rejected = []
     for row in shortlist:
         item = row["item"]
         judgement = verdicts.get(item.id) or {}
-        verdict = judgement.get("verdict") or "different"
         # Yakuniy shart backendda: model "same_product" desa ham gul shakli, rangi va
         # idishi mos kelmasa yoki fingerprint bali chegaradan past bo'lsa o'tmaydi.
-        # Model ba'zan bir xil izohni ikkita nomzodga ko'chirib qo'yadi, ball esa
-        # buni ushlab qoladi.
-        ok = (
-            verdict == "same_product"
+        row["verdict"] = judgement.get("verdict") or "different"
+        row["differences"] = judgement.get("differences") or ""
+        row["passed"] = (
+            row["verdict"] == "same_product"
             and bool(judgement.get("flower_form_match"))
             and bool(judgement.get("color_match"))
             and bool(judgement.get("container_match"))
             and row["score"] >= vision_services.min_match_score()
         )
-        catalog_row = catalog_match_row(item, score=row["score"], fingerprint=row["fingerprint"], verdict=verdict, differences=judgement.get("differences") or "")
-        if ok:
-            passed.append(catalog_row)
-        elif verdict in {"same_product", "similar_only"}:
-            near_matches.append(catalog_row)
+        (passed if row["passed"] else rejected).append(row)
 
-    # Bitta mahsulot o'tsa — o'sha. Bir nechtasi o'tsa modelning tanlovi hal qiladi;
-    # u ham tanlamagan bo'lsa hech biri yuborilmaydi. Noto'g'ri gul yuborgandan ko'ra
-    # so'rab aniqlagan yaxshi.
-    if len(passed) == 1:
-        matches = passed
-    else:
-        chosen = [row for row in passed if row["catalog_id"] == best_id]
-        matches = chosen if len(chosen) == 1 else []
-        near_matches = [row for row in passed if row not in matches] + near_matches
-    payload = {
-        "ok": bool(matches),
-        "allow_send": bool(matches),
-        "detail": "matched" if matches else "not_confident",
+    def as_row(row):
+        return catalog_match_row(row["item"], score=row["score"], fingerprint=row["fingerprint"], verdict=row["verdict"], differences=row["differences"])
+
+    common = {
         "source": attachment,
         "source_description": source.get("summary", ""),
         "region_requested": bool(source.get("region_requested")),
         "region_description": source.get("region_description", ""),
         "multiple_products_visible": bool(source.get("multiple_products_visible")),
-        "matches": matches,
-        "near_matches": near_matches[:3],
-        "no_match_reason": "" if matches else (verification.get("source_summary") or "Katalogdagi mahsulotlar bilan aynan mos kelmadi."),
-        "instruction_uz": MEDIA_MATCH_FOUND_INSTRUCTION if matches else MEDIA_MATCH_NOT_FOUND_INSTRUCTION,
     }
-    return media_match_result(conversation, payload)
+    near = [as_row(row) for row in rejected if row["verdict"] in {"same_product", "similar_only"}]
+    winner = max(passed, key=lambda row: row["score"], default=None)
+    if not winner:
+        return media_match_result(conversation, dict(common, **{
+            "ok": False,
+            "allow_send": False,
+            "allow_group": False,
+            "detail": "not_confident",
+            "matches": [],
+            "group_matches": [],
+            "near_matches": near[:3],
+            "no_match_reason": "Katalogdagi mahsulotlar bilan aynan mos kelmadi.",
+            "instruction_uz": MEDIA_MATCH_NOT_FOUND_INSTRUCTION,
+        }))
+
+    # G'olibdan rasmda ajratib bo'lmaydigan mahsulotlar bormi. Bo'lsa bittasini tanlab
+    # narx aytish xato bo'ladi — hammasini ko'rsatib mijozning o'zidan so'raymiz.
+    twins = [row for row in vision_services.indistinguishable_items(winner, shortlist) if row["verdict"] in {"same_product", "similar_only"}]
+    twins += [row for row in passed if row is not winner and row not in twins]
+    if twins:
+        group = [as_row(row) for row in [winner] + sorted(twins, key=lambda row: row["score"], reverse=True)][:4]
+        group_ids = {row["catalog_id"] for row in group}
+        return media_match_result(conversation, dict(common, **{
+            "ok": True,
+            "allow_send": False,
+            "allow_group": True,
+            "detail": "several_look_the_same",
+            "matches": [],
+            "group_matches": group,
+            "near_matches": [row for row in near if row["catalog_id"] not in group_ids][:3],
+            "no_match_reason": "",
+            "instruction_uz": MEDIA_MATCH_GROUP_INSTRUCTION,
+        }))
+
+    return media_match_result(conversation, dict(common, **{
+        "ok": True,
+        "allow_send": True,
+        "allow_group": False,
+        "detail": "matched",
+        "matches": [as_row(winner)],
+        "group_matches": [],
+        "near_matches": near[:3],
+        "no_match_reason": "",
+        "instruction_uz": MEDIA_MATCH_FOUND_INSTRUCTION,
+    }))
 
 
 def lead_summary_text(lead):
@@ -1337,7 +1371,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_send=false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
+            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. Ikkalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
             "parameters": {
                 "type": "object",
                 "properties": {
