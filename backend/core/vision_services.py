@@ -41,6 +41,26 @@ FLOWER_FORM_NEIGHBOURS = {
     "eustoma": {"rose"},
 }
 
+# Ball berishda "yaqin shakl" kengroq, chunki u faqat tartiblash uchun. Yakuniy
+# tekshiruvda esa qattiqroq: shoxli gul (spray_rose) bir novdada ko'p kichik gul,
+# klassik atir gul bitta yirik bosh — ular rasmda aniq farq qiladi. Pionavidniy
+# esa ikkalasiga ham o'xshab ketadi, model uni ikkala nom bilan ataydi.
+FORM_GATE_NEIGHBOURS = {
+    "rose": {"peony_rose"},
+    "peony_rose": {"rose", "spray_rose", "peony"},
+    "spray_rose": {"peony_rose"},
+    "peony": {"peony_rose"},
+}
+
+
+def forms_can_match(source_form, target_form):
+    """Ikki mahsulotning guli bir turdami."""
+    if not source_form or not target_form:
+        return True
+    if source_form == target_form:
+        return True
+    return target_form in FORM_GATE_NEIGHBOURS.get(source_form, set())
+
 COLORS = [
     "white", "cream", "pink", "hot_pink", "red", "burgundy", "peach", "orange",
     "yellow", "lavender", "purple", "blue", "green", "brown", "black", "mixed",
@@ -574,6 +594,10 @@ def indistinguishable_items(winner_row, rows):
             catalog_item_context(row["item"]),
             target_arrangement_type=row["item"].arrangement_type,
         )
-        if score >= TWIN_SCORE and sizes_can_match(winner_row["fingerprint"], row["fingerprint"]):
+        if (
+            score >= TWIN_SCORE
+            and sizes_can_match(winner_row["fingerprint"], row["fingerprint"])
+            and forms_can_match(winner_row["fingerprint"].get("flower_form"), row["fingerprint"].get("flower_form"))
+        ):
             twins.append(row)
     return twins

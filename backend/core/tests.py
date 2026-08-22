@@ -6990,6 +6990,29 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_spray_rose_bouquet_is_not_offered_for_a_classic_rose_photo(self):
+        """Shoxli gul bir novdada ko'p kichik gul, klassik atir gul bitta yirik bosh."""
+        classic = AICatalogItem.objects.create(name="Oq Jumila 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/classic.jpg", **catalog_fingerprint_fields("https://cdn.example.com/classic.jpg", flower_form="rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet", size="large"))
+        spray = AICatalogItem.objects.create(name="Buket Shoxli Bambastic", arrangement_type="bouquet", price=900000, quantity=1, image_url="https://cdn.example.com/spray.jpg", **catalog_fingerprint_fields("https://cdn.example.com/spray.jpg", flower_form="spray_rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet", size="large"))
+        conversation = media_conversation("ig-spray-vs-classic")
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet", size="large")
+        with patch_vision(source, {classic.id: verdict_payload(), spray.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shundan bormi"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [classic.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_peony_rose_still_matches_when_the_model_calls_it_a_spray_rose(self):
+        """Pionavidniy gulni model bir safar shoxli, bir safar pionavidniy deb ataydi."""
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"))
+        conversation = media_conversation("ig-peony-called-spray")
+        source = vision_fingerprint(flower_form="spray_rose", dominant_colors=["yellow"], container="basket")
+        with patch_vision(source, {item.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "sariq savat qancha"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [item.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_25_stem_bouquet_is_not_offered_for_a_100_stem_photo(self):
         """Production xatosi: 199 000 lik buket 1 000 000 lik rasmga qo'shib yuborilgan edi."""
         big = AICatalogItem.objects.create(name="Oq Jumila 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/big.jpg", **catalog_fingerprint_fields("https://cdn.example.com/big.jpg", flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="extra_large", count_bucket="over_100"))

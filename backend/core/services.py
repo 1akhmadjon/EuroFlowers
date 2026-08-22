@@ -1179,6 +1179,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             and row["score"] >= vision_services.min_match_score()
             and vision_services.families_can_match(source_family, row["family"])
             and vision_services.sizes_can_match(source, row["fingerprint"])
+            and vision_services.forms_can_match(source.get("flower_form"), row["fingerprint"].get("flower_form"))
         )
         (passed if row["passed"] else rejected).append(row)
 
@@ -1217,6 +1218,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     # rasmda aniq farq qiladi, mijoz allaqachon birini ko'rsatgan.
     twins = [row for row in twins if row["family"] == winner["family"]]
     twins = [row for row in twins if vision_services.sizes_can_match(winner["fingerprint"], row["fingerprint"])]
+    twins = [row for row in twins if vision_services.forms_can_match(winner["fingerprint"].get("flower_form"), row["fingerprint"].get("flower_form"))]
     # Narxi g'olib bilan bir xil bo'lgan egizakni so'rashning ma'nosi yo'q — mijoz
     # qaysi birini tanlasa ham javob o'zgarmaydi.
     twins = [row for row in twins if row["item"].price != winner["item"].price]
