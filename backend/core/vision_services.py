@@ -158,6 +158,22 @@ def fingerprint_schema(with_region=False):
     }
     if with_region:
         # Mijoz "tepadan 2-chisi" yoki chizib ko'rsatgan bo'lsa, shu joy tahlil qilinadi.
+        # Model avval rasmdagi hamma mahsulotni sanab chiqadi, keyin bittasini tanlaydi.
+        # Sanamasdan tanlaganda "eng pastdagisi" o'rniga o'rtadagini tasvirlab qo'yardi.
+        properties["visible_products"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "position": {"type": "integer"},
+                    "where": {"type": "string"},
+                    "short_description": {"type": "string"},
+                },
+                "required": ["position", "where", "short_description"],
+                "additionalProperties": False,
+            },
+        }
+        properties["chosen_position"] = {"type": "integer"}
         properties["region_requested"] = {"type": "boolean"}
         properties["region_description"] = {"type": "string"}
         properties["multiple_products_visible"] = {"type": "boolean"}
@@ -214,6 +230,18 @@ def clean_fingerprint(raw):
         "region_requested": bool(raw.get("region_requested")),
         "region_description": str(raw.get("region_description") or "")[:300],
         "multiple_products_visible": bool(raw.get("multiple_products_visible")),
+        # Solishtirishda ishlatilmaydi, lekin operator "nega shuni tanladi" deb
+        # so'raganda javob shu ikki maydonda turadi.
+        "visible_products": [
+            {
+                "position": int(row.get("position") or 0),
+                "where": str(row.get("where") or "")[:60],
+                "short_description": str(row.get("short_description") or "")[:160],
+            }
+            for row in (raw.get("visible_products") or [])[:8]
+            if isinstance(row, dict)
+        ],
+        "chosen_position": int(raw.get("chosen_position") or 0),
     }
 
 
@@ -334,10 +362,14 @@ def analyze_image(image_url, context_text="", instructions="", with_region=False
     }
     if with_region:
         payload["pointing_rules"] = [
-            "The customer text may point at one specific arrangement in the photo: a circle or arrow drawn on the image, 'tepadan 2chisi' (second from top), 'chapdagi' (the left one), 'qizili' (the red one).",
-            "If it points at one item, set region_requested=true, describe it in region_description and describe ONLY that item in the fingerprint.",
-            "If no pointing is present, describe the main arrangement in the photo.",
-            "Set multiple_products_visible=true when the photo shows several different arrangements.",
+            "First fill visible_products: list EVERY distinct flower arrangement you can see in the photo, numbered from 1, reading top to bottom and then left to right. Put the reading order in position and say where it sits in where ('top', 'second from top', 'bottom', 'left', 'centre').",
+            "A photo of a single product still gets exactly one entry in visible_products.",
+            "Then read the customer text. It may point at one of them: a circle or arrow drawn on the image, 'tepadan 2chisi' (second from top), 'eng pastdagisi' (the bottom one), 'chapdagi' (the left one), 'qizili' (the red one).",
+            "Put the position number of the item the customer means into chosen_position, and describe THAT item in the fingerprint fields. Nothing else in the photo may leak into the fingerprint.",
+            "A drawn circle, arrow or highlight beats every word in the text. If something is circled, chosen_position is the circled item.",
+            "If the text points at nothing, set region_requested=false, chosen_position=1 and describe the largest, most central arrangement.",
+            "Set region_requested=true only when the customer actually pointed at one item.",
+            "Set multiple_products_visible=true when visible_products has more than one entry.",
         ]
     content = [
         {"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)},
@@ -349,7 +381,7 @@ def analyze_image(image_url, context_text="", instructions="", with_region=False
         schema=fingerprint_schema(with_region=with_region),
         instructions=instructions or "You describe flower arrangements for a flower shop catalog. Be literal and precise about flower form and flower colour. Return JSON only.",
         content=content,
-        max_output_tokens=3000,
+        max_output_tokens=4000 if with_region else 3000,
     )
     return clean_fingerprint(raw)
 

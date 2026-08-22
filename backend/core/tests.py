@@ -6990,6 +6990,31 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_photo_inventory_reaches_the_tool_result(self):
+        """Operator "nega shuni tanladi" deb so'raganda javob shu maydonlarda turadi."""
+        item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow", "cream"], container="basket"))
+        conversation = media_conversation("ig-photo-inventory")
+        source = vision_fingerprint(
+            flower_form="peony_rose",
+            dominant_colors=["yellow", "cream"],
+            container="basket",
+            region_requested=True,
+            region_description="Second from the top",
+            multiple_products_visible=True,
+            visible_products=[
+                {"position": 1, "where": "top", "short_description": "red roses in a hat box"},
+                {"position": 2, "where": "second from top", "short_description": "yellow basket"},
+            ],
+            chosen_position=2,
+        )
+        with patch_vision(source, {item.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "tepadan 2chisi qancha"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertTrue(result["region_requested"])
+        self.assertEqual(result["chosen_position"], 2)
+        self.assertEqual([row["where"] for row in result["visible_products"]], ["top", "second from top"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_basket_photo_never_matches_a_hand_held_bouquet(self):
         """Model savatni buketga "same_product" desa ham idishi boshqa — o'tmaydi."""
         bouquet = AICatalogItem.objects.create(name="Buket Bambastic", arrangement_type="bouquet", price=900000, quantity=1, image_url="https://cdn.example.com/bouquet.jpg", **catalog_fingerprint_fields("https://cdn.example.com/bouquet.jpg", flower_form="spray_rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet"))

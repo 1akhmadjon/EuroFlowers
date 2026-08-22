@@ -1190,6 +1190,8 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         "region_requested": bool(source.get("region_requested")),
         "region_description": source.get("region_description", ""),
         "multiple_products_visible": bool(source.get("multiple_products_visible")),
+        "visible_products": source.get("visible_products") or [],
+        "chosen_position": source.get("chosen_position") or 0,
     }
     near = [as_row(row) for row in rejected if row["verdict"] in {"same_product", "similar_only"}]
     winner = max(passed, key=lambda row: row["score"], default=None)
