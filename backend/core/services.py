@@ -41,8 +41,10 @@ MAX_LINK_MATCHES = 5
 AI_CATALOG_SHORTLIST_FLOOR = 30
 
 MEDIA_MATCH_FOUND_INSTRUCTION = (
-    "Aynan shu mahsulot topildi. send_catalog_image ni shu catalog_id bilan chaqir, "
-    "keyin nomi va narxini yozib bitta savol ber."
+    "Aynan shu mahsulot topildi. send_catalog_image ni shu catalog_id bilan chaqir. "
+    "Javobni \"Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:\" degan mazmundagi "
+    "bitta jumla bilan boshla, keyin yangi qatordan mahsulot nomi, narxi va bitta savol. "
+    "Mijoz qaysi tilda yozgan bo'lsa shu tilda yoz."
 )
 MEDIA_MATCH_GROUP_INSTRUCTION = (
     "Katalogda bu rasmga o'xshaydigan bir nechta mahsulot bor, farqi hajmi va gul "
@@ -55,15 +57,23 @@ MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "mahsulot nomi yoki narxini aytma. Mijozdan telefon raqamini so'ra va "
     "handoff_media_to_operator bilan operatorga uzat."
 )
+MEDIA_MATCH_CROP_INSTRUCTION = (
+    "Rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini "
+    "aniq ayta olmadik. Katalogdan hech qanday rasm YUBORMA, narx aytma va hozircha "
+    "operatorga ham uzatma. Mijozdan aynan o'sha gulni rasmdan kesib (crop qilib) "
+    "qayta yuborishini iltimos qil — kesilgan rasmdan aniq topamiz. Bu iltimosni "
+    "faqat bir marta qil."
+)
 
 MEDIA_MATCHING_PRIORITY_INSTRUCTION = """
 MEDIA MATCHING FIRST:
 If REAL_CONTEXT_JSON.conversation.customer_attachments has any customer image, story, post or reel media and the customer asks about that media, call match_ai_catalog_by_media before asking for phone or handing off to an operator.
 Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
 The tool result field allow_send is the only thing that decides what you may do next.
-allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id, then write that item name and price and ask one next question.
+allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id. Open the reply with one line saying this is what the shop has that looks like what they showed ("Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:"), then the item name, the price, and one next question, in the customer's own language.
 allow_group true: several catalog items look the same in a photo and differ only in size and stem count. Call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price.
-allow_send false and allow_group false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
+ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
+allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -993,6 +1003,26 @@ def direct_ai_catalog_link_matches(items, source_url):
     return matched
 
 
+def crop_would_help(conversation, source):
+    """Kesilgan rasm so'rashning ma'nosi bormi.
+
+    Faqat mijoz kadrdagi bitta gulni ko'rsatgan va kadrda boshqa gullar ham
+    turgan holatda. Bitta gul turgan rasmni kesib berish hech narsani o'zgartirmaydi.
+    Bir suhbatda bu iltimos bir marta qilinadi — mijoz kesa olmasa yoki kesilgani
+    ham topilmasa, ikkinchi marta so'rash o'rniga operatorga uzatiladi.
+    """
+    if not source.get("region_requested"):
+        return False
+    if not source.get("multiple_products_visible") and len(source.get("visible_products") or []) < 2:
+        return False
+    asked = Message.objects.filter(
+        conversation=conversation,
+        sender="system",
+        metadata__ai_catalog_media_match__detail="ask_for_crop",
+    ).exists()
+    return not asked
+
+
 def media_match_result(conversation, payload):
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"ai_catalog_media_match": payload})
     return payload
@@ -1006,7 +1036,7 @@ def media_match_outcome(tool_results):
     model mos kelmagan bo'lsa ham ikkita katalog rasmini yuborib, ustidan
     "operatorlarimiz aniq javob berishadi" deb yozgan.
     """
-    outcome = {"ran": False, "allow_send": False, "allow_group": False, "allowed_ids": set(), "group_ids": set(), "candidate_ids": set()}
+    outcome = {"ran": False, "allow_send": False, "allow_group": False, "ask_for_crop": False, "allowed_ids": set(), "group_ids": set(), "candidate_ids": set()}
     for row in tool_results or []:
         if row.get("name") != "match_ai_catalog_by_media":
             continue
@@ -1022,6 +1052,8 @@ def media_match_outcome(tool_results):
         if output.get("allow_group") and group:
             outcome["allow_group"] = True
             outcome["group_ids"] |= group
+        if output.get("ask_for_crop"):
+            outcome["ask_for_crop"] = True
         outcome["candidate_ids"] |= allowed | group | ids("near_matches")
     return outcome
 
@@ -1047,6 +1079,8 @@ def media_match_send_block(tool_results, name, catalog_ids):
         blocked = bool(set(catalog_ids or []) & outcome["candidate_ids"])
     if not blocked:
         return None
+    if outcome["ask_for_crop"]:
+        return {"ok": False, "detail": "media_match_needs_a_crop", "instruction_uz": MEDIA_MATCH_CROP_INSTRUCTION}
     return {
         "ok": False,
         "detail": "media_match_not_confident",
@@ -1198,6 +1232,22 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     near = [as_row(row) for row in rejected if row["verdict"] in {"same_product", "similar_only"}]
     winner = max(passed, key=lambda row: row["score"], default=None)
     if not winner:
+        # Mijoz ko'p gulli rasmda bittasini chizib ko'rsatgan bo'lsa, aybdor ko'pincha
+        # rasmning o'zi: qolgan gullar ham kadrda turadi va tahlilga aralashadi.
+        # Operatorga uzatishdan oldin o'sha gulni kesib yuborishini so'raymiz.
+        if crop_would_help(conversation, source):
+            return media_match_result(conversation, dict(common, **{
+                "ok": True,
+                "allow_send": False,
+                "allow_group": False,
+                "ask_for_crop": True,
+                "detail": "ask_for_crop",
+                "matches": [],
+                "group_matches": [],
+                "near_matches": near[:3],
+                "no_match_reason": "Rasmda bir nechta gul bor, ko'rsatilganini aniq ajratib bo'lmadi.",
+                "instruction_uz": MEDIA_MATCH_CROP_INSTRUCTION,
+            }))
         return media_match_result(conversation, dict(common, **{
             "ok": False,
             "allow_send": False,
@@ -1389,7 +1439,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. Ikkalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
+            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
             "parameters": {
                 "type": "object",
                 "properties": {

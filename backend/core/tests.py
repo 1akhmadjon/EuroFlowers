@@ -6990,6 +6990,73 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_pointed_at_flower_in_a_crowded_photo_gets_a_crop_request(self):
+        """Ko'p gulli rasmdan bittasi ko'rsatilib topilmasa, kesib yuborishni so'raymiz."""
+        AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"))
+        conversation = media_conversation("ig-needs-crop")
+        source = vision_fingerprint(
+            flower_form="rose",
+            dominant_colors=["red"],
+            container="wrapped_bouquet",
+            region_requested=True,
+            multiple_products_visible=True,
+            visible_products=[
+                {"position": 1, "where": "top", "short_description": "red roses"},
+                {"position": 2, "where": "bottom", "short_description": "yellow basket"},
+            ],
+            chosen_position=1,
+        )
+        with patch_vision(source, {}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "chizib belgilaganim qancha"}, conversation)
+        self.assertEqual(result["detail"], "ask_for_crop")
+        self.assertTrue(result["ask_for_crop"])
+        self.assertFalse(result["allow_send"])
+        self.assertFalse(result["allow_group"])
+        self.assertIn("kesib", result["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_crop_is_asked_for_only_once_in_a_conversation(self):
+        """Mijoz kesa olmasa ikkinchi marta qiynamaymiz — operatorga uzatiladi."""
+        conversation = media_conversation("ig-crop-once")
+        source = vision_fingerprint(
+            flower_form="rose",
+            dominant_colors=["red"],
+            container="wrapped_bouquet",
+            region_requested=True,
+            multiple_products_visible=True,
+            chosen_position=1,
+        )
+        AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"))
+        with patch_vision(source, {}):
+            first = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "chizganim qancha"}, conversation)
+            second = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "chizganim qancha"}, conversation)
+        self.assertEqual(first["detail"], "ask_for_crop")
+        self.assertEqual(second["detail"], "not_confident")
+        self.assertIn("handoff_media_to_operator", second["instruction_uz"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_single_product_photo_never_gets_a_crop_request(self):
+        """Bitta gul turgan rasmni kesib berish hech narsani o'zgartirmaydi."""
+        AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"))
+        conversation = media_conversation("ig-single-no-crop")
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["red"], container="wrapped_bouquet", region_requested=True, multiple_products_visible=False)
+        with patch_vision(source, {}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertEqual(result["detail"], "not_confident")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_catalog_image_is_still_blocked_while_a_crop_is_being_asked_for(self):
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg")
+        conversation = media_conversation("ig-crop-gate")
+        tool_results = [{"name": "match_ai_catalog_by_media", "arguments": {}, "output": {"ok": True, "allow_send": False, "allow_group": False, "ask_for_crop": True, "matches": [], "group_matches": [], "near_matches": [{"catalog_id": item.id}]}}]
+        with patch("core.services.send_image_to_customer") as send_mock:
+            result = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation, tool_results=tool_results)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "media_match_needs_a_crop")
+        send_mock.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_spray_rose_bouquet_is_not_offered_for_a_classic_rose_photo(self):
         """Shoxli gul bir novdada ko'p kichik gul, klassik atir gul bitta yirik bosh."""
         classic = AICatalogItem.objects.create(name="Oq Jumila 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/classic.jpg", **catalog_fingerprint_fields("https://cdn.example.com/classic.jpg", flower_form="rose", dominant_colors=["cream", "pink"], container="unwrapped_bouquet", size="large"))
