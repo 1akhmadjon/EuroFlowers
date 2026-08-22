@@ -118,6 +118,8 @@ def apply_volume_rate(item):
         return item
     if not item.florist_id:
         return item
+    if item.florist.staff_type != "florist":
+        return item
     rate = FloristVolumeRate.objects.filter(florist=item.florist, arrangement_type=item.arrangement_type, volume=item.volume, is_active=True).first()
     if rate:
         item.florist_salary_amount = rate.florist_fee
@@ -149,7 +151,7 @@ def sync_catalog_financials(item):
 
 def sync_catalog_florist_salary(item, user):
     item = CatalogItem.objects.select_related("florist").get(pk=item.pk)
-    if not item.florist_id or not item.florist_salary_amount:
+    if not item.florist_id or item.florist.staff_type != "florist" or not item.florist_salary_amount:
         FloristSalaryEntry.objects.filter(catalog_item=item, source__in=["catalog", "custom_catalog"]).delete()
         return None
     source = "custom_catalog" if item.catalog_kind == "custom" else "catalog"

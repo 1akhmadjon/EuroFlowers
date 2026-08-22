@@ -1413,6 +1413,10 @@ def apply_volume_rate_to_attrs(attrs, initial_data=None, default_kind="standard"
     arrangement_type = attrs.get("arrangement_type")
     volume = attrs.get("volume")
     florist = attrs.get("florist")
+    if florist and florist.staff_type != "florist":
+        attrs["florist_salary_amount"] = Decimal("0")
+        attrs.pop("_volume_default_stems", None)
+        return attrs
     if arrangement_type and volume and florist:
         rate = FloristVolumeRate.objects.filter(florist=florist, arrangement_type=arrangement_type, volume=volume, is_active=True).first()
         if rate:
@@ -1991,7 +1995,7 @@ class CatalogItemSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"volume": "Florist katalogida hajmni tanlash kerak — gul shu bo‘yicha taqsimlanadi"})
             if not composition:
                 raise serializers.ValidationError({"composition": "Floristga chiqarilgan qaysi guldan yasalganini tanlang"})
-        if kind == "standard" and florist_value:
+        if kind == "standard" and florist_value and florist_value.staff_type == "florist":
             arrangement_type = attrs.get("arrangement_type") or getattr(self.instance, "arrangement_type", None)
             volume = attrs.get("volume") or getattr(self.instance, "volume", None)
             if arrangement_type and volume and not FloristVolumeRate.objects.filter(

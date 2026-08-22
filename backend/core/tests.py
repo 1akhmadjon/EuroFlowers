@@ -617,6 +617,28 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(salary.florist, florist)
         self.assertFalse(CatalogHistory.objects.filter(catalog_item=item, action="sold").exists())
 
+    def test_catalog_for_apprentice_does_not_create_salary_entry(self):
+        apprentice_user = User.objects.create_user("catalog-apprentice", password="password", first_name="Vali")
+        apprentice = FloristProfile.objects.create(user=apprentice_user, staff_type="apprentice", daily_pay=100000)
+        FloristVolumeRate.objects.create(florist=apprentice, arrangement_type="bouquet", volume="small", default_stems=10, florist_fee=70000)
+        from .inventory_services import issue_stock_to_florist
+        issue_stock_to_florist(apprentice, self.batch, 10, "test", self.user)
+        serializer = CatalogItemSerializer(data={
+            "name_uz": "Shogird buketi",
+            "arrangement_type": "bouquet",
+            "catalog_kind": "standard",
+            "volume": "small",
+            "florist": apprentice.id,
+            "price": "250000.00",
+            "quantity_total": 1,
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10, "quantity_bunches": "0.50"}],
+        }, context={"request": SimpleNamespace(user=self.user)})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        item = serializer.save()
+        item.refresh_from_db()
+        self.assertEqual(item.florist_salary_amount, Decimal("0.00"))
+        self.assertFalse(FloristSalaryEntry.objects.filter(catalog_item=item).exists())
+
     def test_custom_catalog_accepts_custom_volume_and_manual_salary_amount(self):
         florist_user = User.objects.create_user("custom-florist", password="password", first_name="Ali")
         florist = FloristProfile.objects.create(user=florist_user, staff_type="florist")
