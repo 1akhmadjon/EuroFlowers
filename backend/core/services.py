@@ -2260,8 +2260,11 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                 "catalog_id": item.id,
                 "instruction_uz": (
                     f"{item.name} rasmi bu suhbatda allaqachon yuborilgan. Uni qayta yuborma. "
-                    "Mijoz boshqa variantlarni so'rayotgan bo'lsa send_catalog_album chaqirib "
-                    "katalogni ko'rsat, aks holda shunchaki savoliga javob yoz."
+                    "Mijoz boshqa variantlarni so'rayotgan bo'lsa send_catalog_album ni "
+                    "catalog_ids BO'SH massiv bilan chaqir — shunda butun katalog ketadi. "
+                    "Bitta-ikkita mahsulotni tanlab albom qilib yuborib, keyin "
+                    "\"katalogimiz shu\" deb yozish xato bo'ladi. Mijoz boshqa narsa "
+                    "so'rayotgan bo'lsa shunchaki savoliga javob yoz."
                 ),
             }
         return send_catalog_item_image(conversation, item)
