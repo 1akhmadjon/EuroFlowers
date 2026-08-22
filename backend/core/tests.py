@@ -7120,6 +7120,13 @@ class OperatorHandoffTests(TestCase):
         self.assertGreater(vision_services.fingerprint_score(source, same), 85)
         self.assertLessEqual(vision_services.fingerprint_score(source, smaller), vision_services.DIFFERENT_SIZE_CEILING)
 
+    def test_a_low_basket_full_of_flowers_still_matches_its_own_photo(self):
+        """Savat katalogda "medium" (bo'yi past), rasmda esa model uni "extra_large" deydi."""
+        catalog = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket", size="medium", count_bucket="over_100")
+        photo = vision_fingerprint(flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket", size="extra_large", count_bucket="over_100")
+        self.assertTrue(vision_services.sizes_can_match(photo, catalog))
+        self.assertGreater(vision_services.fingerprint_score(photo, catalog), vision_services.DIFFERENT_SIZE_CEILING)
+
     def test_one_size_step_apart_is_still_the_same_product(self):
         """Rasmdan hajmni aniq o'lchab bo'lmaydi, bir pog'ona farq jazolanmaydi."""
         source = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="large", count_bucket="50_to_100")

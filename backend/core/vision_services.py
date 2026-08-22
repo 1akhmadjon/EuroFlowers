@@ -339,20 +339,25 @@ def fingerprint_score(source, target, item_text="", target_arrangement_type=""):
     score = min(round(score), 100)
     if not colours and source.get("dominant_colors") and target.get("dominant_colors"):
         score = min(score, DIFFERENT_COLOUR_CEILING)
-    if size_gap is not None and size_gap >= 2 or count_gap is not None and count_gap >= 2:
+    if not sizes_can_match(source, target):
         score = min(score, DIFFERENT_SIZE_CEILING)
     return int(score)
 
 
 def sizes_can_match(source, target):
-    """Ikki mahsulotning hajmi va gul soni bir-biriga yaqinmi.
+    """Ikki mahsulotning kattaligi bir-biriga yaqinmi.
 
     25 talik buket bilan 100 talik kompozitsiyani rasmda ajratib bo'ladi va narxi
     besh barobar farq qiladi — ularni "qaysi biri" deb yonma-yon qo'yish xato.
+
+    Asosiy o'lchov gul soni: u izohda yozilgan va ikkala tomonda bir narsani
+    anglatadi. size esa ishonchsiz — savatning bo'yi past bo'lgani uchun katalogda
+    "medium" turadi, o'sha savatning rasmini ko'rgan model esa uni "extra_large"
+    deydi. Shuning uchun size faqat uchta pog'ona farq qilganda hisobga olinadi.
     """
     size_gap = ordered_gap(SIZES, source.get("size"), target.get("size"))
     count_gap = ordered_gap(COUNT_BUCKETS, source.get("count_bucket"), target.get("count_bucket"))
-    if size_gap is not None and size_gap >= 2:
+    if size_gap is not None and size_gap >= 3:
         return False
     if count_gap is not None and count_gap >= 2:
         return False
