@@ -1109,14 +1109,18 @@ SIMILAR_ENOUGH_SCORE = 42
 def similar_enough_rows(rejected, source, limit=3):
     """Aynan o'shasi bo'lmasa, katalogdagi eng yaqin mahsulotlar.
 
-    Gul turi va idishi mos kelishi shart — pushti savat so'ralganda qizil quti
-    ko'rsatish "o'xshash" emas. Bal bo'yicha eng yaxshi uchtasi olinadi.
+    Model bu mahsulotlarni "different" deb belgilagan bo'lishi mumkin va u haq —
+    biz ham mijozga aynan o'shasi emasligini aytamiz. Shuning uchun bu yerda
+    modelning hukmi emas, fingerprint o'xshashligi hal qiladi.
+
+    Gul turi va idishi mos kelishi shart: pushti savat so'ralganda qizil quti
+    ko'rsatish o'xshashlik emas. Rangi boshqa bo'lishi mumkin — binafsha savat
+    yo'q bo'lsa, savatlarimizni ko'rsatish mijozni quruq qaytarishdan yaxshi.
     """
     source_family = vision_services.container_family(source)
     rows = [
         row for row in rejected
-        if row["verdict"] in {"same_product", "similar_only"}
-        and row["score"] >= SIMILAR_ENOUGH_SCORE
+        if row["score"] >= SIMILAR_ENOUGH_SCORE
         and vision_services.families_can_match(source_family, row["family"])
         and vision_services.forms_can_match(source.get("flower_form"), row["fingerprint"].get("flower_form"))
     ]

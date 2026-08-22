@@ -7111,6 +7111,19 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [close.id])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_same_arrangement_in_another_colour_counts_as_similar(self):
+        """Binafsha savat katalogda yo'q — savatlarimizni ko'rsatish kerak."""
+        basket = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg", **catalog_fingerprint_fields("https://cdn.example.com/london.jpg", flower_form="peony_rose", dominant_colors=["pink", "peach"], container="basket"))
+        conversation = media_conversation("ig-violet-basket")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["purple", "lavender"], container="basket")
+        with patch_vision(source, {basket.id: verdict_payload(verdict="different", color_match=False, differences="rangi butunlay boshqa")}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shunaqasi bormi"}, conversation)
+        self.assertFalse(result["allow_send"])
+        self.assertTrue(result["allow_group"])
+        self.assertEqual(result["detail"], "similar_only")
+        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [basket.id])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_nothing_close_enough_still_goes_to_the_operator(self):
         item = AICatalogItem.objects.create(name="Qizil Quti", arrangement_type="", price=400000, quantity=1, image_url="https://cdn.example.com/red.jpg", **catalog_fingerprint_fields("https://cdn.example.com/red.jpg", flower_form="rose", dominant_colors=["red"], container="hat_box"))
         conversation = media_conversation("ig-nothing-close")
