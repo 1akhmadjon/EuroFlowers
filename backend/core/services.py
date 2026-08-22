@@ -35,7 +35,9 @@ MAX_LEAD_PHOTO_URLS = 5
 MAX_CONTEXT_ATTACHMENTS = 6
 MAX_OPERATOR_HANDOFF_MEDIA = 10
 MAX_AI_CATALOG_MATCH_CANDIDATES = 40
-MAX_LINK_MATCHES = 5
+# Instagram bitta karusel xabariga 10 ta rasm sig'adi. Bitta reelga do'kon ettita
+# mahsulot qo'yishi mumkin va mijoz ularning hammasini ko'rishi kerak.
+MAX_LINK_MATCHES = 10
 # Fingerprint bali shundan past bo'lsa mahsulot qisqa ro'yxatga ham tushmaydi —
 # modelga umuman aloqasi yo'q rasmni ko'rsatib o'tirishning hojati yo'q.
 AI_CATALOG_SHORTLIST_FLOOR = 30
