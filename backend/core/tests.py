@@ -6990,6 +6990,31 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_25_stem_bouquet_is_not_offered_for_a_100_stem_photo(self):
+        """Production xatosi: 199 000 lik buket 1 000 000 lik rasmga qo'shib yuborilgan edi."""
+        big = AICatalogItem.objects.create(name="Oq Jumila 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/big.jpg", **catalog_fingerprint_fields("https://cdn.example.com/big.jpg", flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="extra_large", count_bucket="over_100"))
+        small = AICatalogItem.objects.create(name="Buket Jumila", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/small.jpg", **catalog_fingerprint_fields("https://cdn.example.com/small.jpg", flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="small", count_bucket="25_to_50"))
+        conversation = media_conversation("ig-stem-count")
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="extra_large", count_bucket="over_100")
+        with patch_vision(source, {big.id: verdict_payload(), small.id: verdict_payload()}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shundan bormi"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [big.id])
+
+    def test_a_much_smaller_product_cannot_reach_a_confident_score(self):
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="extra_large", count_bucket="over_100")
+        same = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="extra_large", count_bucket="over_100")
+        smaller = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="small", count_bucket="25_to_50")
+        self.assertGreater(vision_services.fingerprint_score(source, same), 85)
+        self.assertLessEqual(vision_services.fingerprint_score(source, smaller), vision_services.DIFFERENT_SIZE_CEILING)
+
+    def test_one_size_step_apart_is_still_the_same_product(self):
+        """Rasmdan hajmni aniq o'lchab bo'lmaydi, bir pog'ona farq jazolanmaydi."""
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="large", count_bucket="50_to_100")
+        target = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "pink"], container="wrapped_bouquet", size="extra_large", count_bucket="over_100")
+        self.assertGreater(vision_services.fingerprint_score(source, target), vision_services.DIFFERENT_SIZE_CEILING)
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_the_photo_inventory_reaches_the_tool_result(self):
         """Operator "nega shuni tanladi" deb so'raganda javob shu maydonlarda turadi."""
         item = AICatalogItem.objects.create(name="Katalina Savat", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow", "cream"], container="basket"))

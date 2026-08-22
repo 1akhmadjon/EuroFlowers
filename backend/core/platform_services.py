@@ -211,6 +211,9 @@ def instagram_send_carousel(recipient_id, elements, account_id=None):
     }
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
     response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=40)
+    if response.status_code >= 400:
+        # Instagram sababni faqat javob tanasida yozadi, status kodda emas.
+        print(f"INSTAGRAM_CAROUSEL_REJECTED account={account_id} status={response.status_code} body={response.text[:600]}", flush=True)
     response.raise_for_status()
     return response.json()
 

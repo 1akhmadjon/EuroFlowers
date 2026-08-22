@@ -1178,6 +1178,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             and bool(judgement.get("container_match"))
             and row["score"] >= vision_services.min_match_score()
             and vision_services.families_can_match(source_family, row["family"])
+            and vision_services.sizes_can_match(source, row["fingerprint"])
         )
         (passed if row["passed"] else rejected).append(row)
 
@@ -1215,6 +1216,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     # Savat bilan buketni yonma-yon qo'yib "qaysi biri" deb so'rash ma'nosiz — ular
     # rasmda aniq farq qiladi, mijoz allaqachon birini ko'rsatgan.
     twins = [row for row in twins if row["family"] == winner["family"]]
+    twins = [row for row in twins if vision_services.sizes_can_match(winner["fingerprint"], row["fingerprint"])]
     # Narxi g'olib bilan bir xil bo'lgan egizakni so'rashning ma'nosi yo'q — mijoz
     # qaysi birini tanlasa ham javob o'zgarmaydi.
     twins = [row for row in twins if row["item"].price != winner["item"].price]
@@ -1532,7 +1534,7 @@ def send_catalog_album(conversation, items):
     fallback_chunks = 0
     for start in range(0, len(rows), CATALOG_ALBUM_MAX_PER_MESSAGE):
         chunk = rows[start:start + CATALOG_ALBUM_MAX_PER_MESSAGE]
-        delivered, detail = send_catalog_album_chunk(customer, platform, chat_id, chunk)
+        delivered, detail = send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=conversation)
         if delivered:
             messages_sent += 1
             album_chunks += 1
@@ -1593,8 +1595,13 @@ def ai_catalog_album_result(result):
     return trimmed
 
 
-def send_catalog_album_chunk(customer, platform, chat_id, chunk):
-    """Bitta albom xabarini yuboradi. (delivered, detail) qaytaradi, exception ko'tarmaydi."""
+def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=None):
+    """Bitta albom xabarini yuboradi. (delivered, detail) qaytaradi, exception ko'tarmaydi.
+
+    Do'konning bir nechta Instagram akkaunti bor. Mijoz qaysi akkauntga yozgan bo'lsa,
+    javob ham o'sha akkauntdan ketishi kerak — bo'lmasa Instagram 400 qaytaradi.
+    """
+    account_id = conversation_instagram_account_id(conversation) if conversation else None
     try:
         if platform == "telegram":
             if len(chunk) == 1:
@@ -1602,7 +1609,7 @@ def send_catalog_album_chunk(customer, platform, chat_id, chunk):
             else:
                 result = telegram_send_media_group(chat_id, [{"image_url": row["image_url"], "caption": row["caption"]} for row in chunk])
         else:
-            result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk])
+            result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk], account_id)
     except Exception as error:
         print(f"CATALOG_ALBUM_FAILED customer={customer.id} platform={platform} count={len(chunk)} error={error}", flush=True)
         return False, "album_failed"

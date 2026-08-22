@@ -277,6 +277,12 @@ def variety_bonus(source, item_text):
 # bo'lishi hech narsani anglatmaydi — do'kondagi hamma savat bir-biriga o'xshaydi.
 DIFFERENT_COLOUR_CEILING = 45
 
+# Do'konda bir gulning 25 talik, 50 talik va 100 talik varianti bor va narxi 199 000
+# dan 1 000 000 gacha farq qiladi. Rangi va guli bir xil bo'lgani uchun ular deyarli
+# to'liq ball olardi, natijada 199 000 lik buket 1 000 000 lik rasmga mos kelib qolardi.
+# Ikki pog'onadan ortiq hajm yoki gul soni farqi bo'lsa ball shu yerda to'xtaydi.
+DIFFERENT_SIZE_CEILING = 55
+
 
 def fingerprint_score(source, target, item_text="", target_arrangement_type=""):
     """0-100 oralig'idagi ball. Bu qisqa ro'yxat uchun tartiblash, yakuniy qaror emas."""
@@ -313,7 +319,24 @@ def fingerprint_score(source, target, item_text="", target_arrangement_type=""):
     score = min(round(score), 100)
     if not colours and source.get("dominant_colors") and target.get("dominant_colors"):
         score = min(score, DIFFERENT_COLOUR_CEILING)
+    if size_gap is not None and size_gap >= 2 or count_gap is not None and count_gap >= 2:
+        score = min(score, DIFFERENT_SIZE_CEILING)
     return int(score)
+
+
+def sizes_can_match(source, target):
+    """Ikki mahsulotning hajmi va gul soni bir-biriga yaqinmi.
+
+    25 talik buket bilan 100 talik kompozitsiyani rasmda ajratib bo'ladi va narxi
+    besh barobar farq qiladi — ularni "qaysi biri" deb yonma-yon qo'yish xato.
+    """
+    size_gap = ordered_gap(SIZES, source.get("size"), target.get("size"))
+    count_gap = ordered_gap(COUNT_BUCKETS, source.get("count_bucket"), target.get("count_bucket"))
+    if size_gap is not None and size_gap >= 2:
+        return False
+    if count_gap is not None and count_gap >= 2:
+        return False
+    return True
 
 
 def vision_json(client, *, schema_name, schema, instructions, content, max_output_tokens):
@@ -402,7 +425,15 @@ def build_catalog_fingerprint(item, api_key=""):
     return analyze_image(
         item.image_url,
         context_text=catalog_item_context(item),
-        instructions="You describe a flower shop's own catalog product photo. The shop's own name and note for the product are given as context — trust them for the variety name, but read the colours and the flower form from the image itself. Return JSON only.",
+        instructions=(
+            "You describe a flower shop's own catalog product photo. The shop's own name and note "
+            "for the product are given as context — trust them for the variety name, but read the "
+            "colours and the flower form from the image itself. "
+            "The note often states the stem count and the height ('25 tacha guli', '100 ta guldan', "
+            "'boyi 60 sm'). When it does, set count_bucket and size from those numbers, not from "
+            "how big the bouquet looks in the photo — the shop sells the same flower as a 25-stem "
+            "and a 100-stem product and the photos look alike. Return JSON only."
+        ),
         api_key=api_key,
     )
 
@@ -543,6 +574,6 @@ def indistinguishable_items(winner_row, rows):
             catalog_item_context(row["item"]),
             target_arrangement_type=row["item"].arrangement_type,
         )
-        if score >= TWIN_SCORE:
+        if score >= TWIN_SCORE and sizes_can_match(winner_row["fingerprint"], row["fingerprint"]):
             twins.append(row)
     return twins
