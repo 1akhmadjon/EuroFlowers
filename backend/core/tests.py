@@ -6978,6 +6978,19 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(sorted(row["catalog_id"] for row in result["group_matches"]), sorted([small.id, big.id]))
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_look_alike_with_the_same_price_is_not_worth_asking_about(self):
+        """Narxi bir xil bo'lsa mijoz qaysi birini tanlasa ham javob o'zgarmaydi."""
+        winner = AICatalogItem.objects.create(name="Savat Jumila", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/jumila-a.jpg", **catalog_fingerprint_fields("https://cdn.example.com/jumila-a.jpg", flower_form="rose", dominant_colors=["cream", "peach"], container="basket"))
+        twin = AICatalogItem.objects.create(name="Savat Jumila 100 Tali", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/jumila-b.jpg", **catalog_fingerprint_fields("https://cdn.example.com/jumila-b.jpg", flower_form="rose", dominant_colors=["cream", "peach"], container="basket"))
+        conversation = media_conversation("ig-same-price-twin")
+        source = vision_fingerprint(flower_form="rose", dominant_colors=["cream", "peach"], container="basket")
+        with patch_vision(source, {winner.id: verdict_payload(), twin.id: verdict_payload(verdict="similar_only")}):
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
+        self.assertTrue(result["allow_send"])
+        self.assertFalse(result["allow_group"])
+        self.assertEqual([row["catalog_id"] for row in result["matches"]], [winner.id])
+
     def test_the_album_of_look_alike_items_is_allowed_but_a_single_image_is_not(self):
         from unittest.mock import patch
         first = AICatalogItem.objects.create(name="Buket Bir", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/one.jpg")

@@ -1204,6 +1204,9 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     # narx aytish xato bo'ladi — hammasini ko'rsatib mijozning o'zidan so'raymiz.
     twins = [row for row in vision_services.indistinguishable_items(winner, shortlist) if row["verdict"] in {"same_product", "similar_only"}]
     twins += [row for row in passed if row is not winner and row not in twins]
+    # Narxi g'olib bilan bir xil bo'lgan egizakni so'rashning ma'nosi yo'q — mijoz
+    # qaysi birini tanlasa ham javob o'zgarmaydi.
+    twins = [row for row in twins if row["item"].price != winner["item"].price]
     if twins:
         group = [as_row(row) for row in [winner] + sorted(twins, key=lambda row: row["score"], reverse=True)][:4]
         group_ids = {row["catalog_id"] for row in group}
