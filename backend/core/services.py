@@ -1358,6 +1358,15 @@ def media_match_send_block(tool_results, name, catalog_ids):
     }
 
 
+def whole_catalog_already_sent(conversation, minimum=6):
+    """Butun katalog bu suhbatda allaqachon albom bo'lib ketganmi."""
+    for message in conversation.messages.filter(sender="system").order_by("-created_at", "-id")[:40]:
+        rows = ((message.metadata or {}).get("catalog_album_result") or {}).get("items") or []
+        if len([row for row in rows if row.get("delivered")]) >= minimum:
+            return True
+    return False
+
+
 def catalog_image_already_sent(conversation, catalog_id):
     """Shu katalog rasmi bu suhbatda allaqachon yuborilganmi."""
     if not catalog_id:
@@ -2212,6 +2221,19 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         items = catalog_album_items(catalog_ids)
         if not items:
             return {"ok": False, "detail": "catalog_empty", "items": [], "not_sent": []}
+        if not catalog_ids and whole_catalog_already_sent(conversation):
+            # Butun katalogni ikkinchi marta yuborish mijozga yangi hech narsa
+            # bermaydi — u allaqachon hammasini ko'rgan.
+            return {
+                "ok": False,
+                "detail": "catalog_already_sent",
+                "instruction_uz": (
+                    "Butun katalog bu suhbatda allaqachon yuborilgan, qayta yuborma. "
+                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa telefon raqamini so'ra "
+                    "va bergach handoff_media_to_operator chaqir. Raqam berishni xohlamasa "
+                    "bahslashma, operatorlar chat orqali ko'rib chiqishini qisqa ayt."
+                ),
+            }
         return send_catalog_album(conversation, items)
     if name == "send_catalog_image":
         query = arguments.get("query") or ""

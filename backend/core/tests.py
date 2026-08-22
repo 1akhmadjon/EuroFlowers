@@ -7307,6 +7307,34 @@ class OperatorHandoffTests(TestCase):
         send_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_whole_catalog_is_not_sent_twice(self):
+        """Mijoz katalogni allaqachon ko'rgan — qayta yuborish yangi hech narsa bermaydi."""
+        from unittest.mock import patch
+        for index in range(7):
+            AICatalogItem.objects.create(name=f"Buket {index}", arrangement_type="bouquet", price=200000, quantity=1, image_url=f"https://cdn.example.com/{index}.jpg")
+        conversation = media_conversation("ig-catalog-twice")
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked")):
+            first = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertTrue(first["ok"])
+        with patch("core.services.send_catalog_album_chunk") as album_mock:
+            second = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["detail"], "catalog_already_sent")
+        self.assertIn("handoff_media_to_operator", second["instruction_uz"])
+        album_mock.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_a_named_group_album_is_still_allowed_after_the_whole_catalog(self):
+        """Butun katalogdan keyin ham aniq ikkita mahsulotni ko'rsatish mumkin."""
+        from unittest.mock import patch
+        items = [AICatalogItem.objects.create(name=f"Buket {i}", arrangement_type="bouquet", price=200000, quantity=1, image_url=f"https://cdn.example.com/{i}.jpg") for i in range(7)]
+        conversation = media_conversation("ig-group-after-catalog")
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked")):
+            execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": [items[0].id, items[1].id]}, conversation)
+        self.assertTrue(result["ok"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_photo_already_seen_in_an_album_is_not_sent_again(self):
         from unittest.mock import patch
         item = AICatalogItem.objects.create(name="Savat London", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/london.jpg")
