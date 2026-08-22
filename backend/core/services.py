@@ -110,6 +110,7 @@ Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "story
 The tool result field allow_send is the only thing that decides what you may do next.
 allow_send true: matches has exactly one item. Call send_catalog_image with that catalog_id, then give the item name, the price, and one next question, in the customer's own language. How you open that reply depends on own_post: when own_post is false, lead with one line saying this is what the shop has that looks like what they showed ("Bizda hozirda bor, siz ko'rsatganga o'xshagan variant:"). When own_post is true the customer sent one of our own stories or reels, so the flower is not a resemblance, it is that exact product — never say "o'xshagan" or "similar", just name it and price it.
 Never invent a product name or a price. Every name and every price you write must come from a tool result in this turn. If you have not called a tool, you do not know what the shop sells.
+Once a flower has been identified this turn, asking "what else do you have like it" is a request for the catalog, not for that same flower again: call send_catalog_album, do not call match_ai_catalog_by_media a second time on the same picture.
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" means the exact flower is NOT in the catalog and these merely resemble it, so say so plainly and never claim you found it.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
@@ -2365,7 +2366,8 @@ def ai_reply(conversation):
             # shunday bo'lgan: mijoz story yuborgan, model "Alfalob 200 tali, 1 600 000
             # so'm" deb javob bergan — katalogda bunday mahsulot ham, bunday narx ham
             # yo'q. Toolni o'zimiz chaqirib, natijasi bilan javobni qayta yozdiramiz.
-            if not forced_media_match and unanswered_customer_media(conversation):
+            already_matched = any(row.get("name") == "match_ai_catalog_by_media" for row in tool_results)
+            if not forced_media_match and not already_matched and unanswered_customer_media(conversation):
                 forced_media_match = True
                 output = execute_ai_tool(
                     "match_ai_catalog_by_media",

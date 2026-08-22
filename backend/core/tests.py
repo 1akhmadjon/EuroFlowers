@@ -7057,6 +7057,42 @@ class OperatorHandoffTests(TestCase):
         self.assertIn("send_catalog_album", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_media_tool_is_not_forced_when_the_model_already_called_it(self):
+        """Ikki marta chaqirish har javobga o'ttiz soniya va bir so'rov qo'shardi."""
+        from unittest.mock import patch
+        item = AICatalogItem.objects.create(name="Savat Katalina", arrangement_type="basket", price=800000, quantity=1, image_url="https://cdn.example.com/katalina.jpg", **catalog_fingerprint_fields("https://cdn.example.com/katalina.jpg", flower_form="peony_rose", dominant_colors=["yellow"], container="basket"))
+        conversation = media_conversation("ig-no-double-call")
+        source = vision_fingerprint(flower_form="peony_rose", dominant_colors=["yellow"], container="basket")
+        calls = []
+
+        class Response:
+            def __init__(self, output, text=""):
+                self.output = output
+                self.id = "resp-%s" % len(calls)
+                self.output_text = text
+
+        class Call:
+            type = "function_call"
+            name = "match_ai_catalog_by_media"
+            call_id = "call-1"
+            arguments = '{"source_url": null, "user_text": "shu nechpul"}'
+
+        def fake_create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return Response([Call()])
+            return Response([], json.dumps({"reply": "Savat Katalina, 800 000 so'm", "handoff": False, "lead_ready": False, "phone": None, "customer_name": None, "detected_language": "uz", "estimated_price": None, "arrangement_type": None, "lead_request": None, "catalog_items": [], "stock_items": []}))
+
+        with patch_vision(source, {item.id: verdict_payload()}):
+            with patch("core.services.OpenAI") as client_cls:
+                client_cls.return_value.responses.create.side_effect = fake_create
+                with patch("core.services.send_image_to_customer", return_value=(True, "mocked", {})):
+                    result = ai_reply(conversation)
+        matched = [row for row in result["tool_results"] if row["name"] == "match_ai_catalog_by_media"]
+        self.assertEqual(len(matched), 1)
+        self.assertNotIn("forced_by_backend", matched[0]["arguments"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
     def test_a_story_answers_from_what_the_shop_wrote_on_it(self):
         """Storyda nomi va narxi turibdi — rasmni tahlil qilish faqat xato qo'shadi."""
         AICatalogItem.objects.create(name="Alfalob 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/alfalob.jpg", **catalog_fingerprint_fields("https://cdn.example.com/alfalob.jpg", flower_form="peony_rose", dominant_colors=["hot_pink"], container="unwrapped_bouquet"))
