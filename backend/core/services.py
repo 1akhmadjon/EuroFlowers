@@ -999,6 +999,137 @@ def operator_chat_url(conversation):
     return f"{template}{separator}conversation_id={conversation.id}"
 
 
+def lead_fulfillment_line(lead):
+    if lead.fulfillment == "delivery":
+        address = lead.delivery_address or "manzil aytilmagan"
+        return f"🚚 Yetkazib berish — {address}"
+    if lead.fulfillment == "pickup":
+        return "🏬 O'zi kelib olib ketadi"
+    return ""
+
+
+def lead_when_line(lead):
+    parts = [value for value in [lead.desired_date.isoformat() if lead.desired_date else "", lead.desired_time] if value]
+    return f"📅 {' · '.join(parts)}" if parts else ""
+
+
+def lead_catalog_lines(lead):
+    """Mijoz tanlagan AI katalog mahsulotlari, narxi va operator izohi bilan."""
+    rows = []
+    for row in (lead.details or {}).get("catalog_items") or []:
+        item = AICatalogItem.objects.filter(id=row.get("ai_catalog_item")).first()
+        name = row.get("catalog_name") or (item.name if item else "")
+        if not name:
+            continue
+        price = row.get("price") or (str(item.price) if item else "")
+        quantity = int(row.get("quantity") or 1)
+        title = f"{name} × {quantity}" if quantity > 1 else name
+        rows.append({
+            "text": f"{title} — {money_uz(price)} so'm" if price else title,
+            "note": (item.note or "")[:300] if item else "",
+            "image_url": item.image_url if item and item.image_url else "",
+        })
+    return rows
+
+
+def lead_operator_media(lead, conversation):
+    """Operator ko'radigan rasmlar: tanlangan katalog rasmi va mijoz yuborgan media."""
+    urls = []
+    for row in lead_catalog_lines(lead):
+        if row["image_url"] and row["image_url"] not in urls:
+            urls.append(row["image_url"])
+    for row in customer_attachment_rows(conversation.messages.order_by("created_at", "id")):
+        url = row.get("url")
+        if url and url not in urls and row.get("kind") != "ad":
+            urls.append(url)
+    return [{"kind": "photo", "url": url} for url in urls[:MAX_OPERATOR_HANDOFF_MEDIA]]
+
+
+def operator_lead_rich_message(lead, conversation):
+    """Telegram operatorlar guruhiga ketadigan «Yangi lead» xabari."""
+    customer = conversation.customer
+    platform = "Telegram" if customer.instagram_user_id.startswith("telegram:") else "Instagram"
+    username = f" · @{customer.instagram_username}" if customer.instagram_username else ""
+    catalog_rows = lead_catalog_lines(lead)
+    details = lead.details or {}
+    media_items = []
+    blocks = []
+    for index, row in enumerate(lead_operator_media(lead, conversation), start=1):
+        media_id = f"lead_{index}"
+        blocks.append(f'<img src="tg://photo?id={media_id}"/>')
+        media_items.append({"id": media_id, "media": {"type": "photo", "media": row["url"]}})
+    html = []
+    if blocks:
+        html.append("<tg-slideshow>")
+        html.extend(blocks)
+        html.append("</tg-slideshow>")
+    html.append(f"<h3>🌸 Yangi lead #{lead.id}</h3>")
+    html.append(f"<p>👤 {escape(customer.name or 'Ism yozilmagan')}<br/>📞 {escape(customer.phone or 'raqam berilmagan')}<br/>📍 {escape(platform + username)}</p>")
+    if catalog_rows:
+        html.append("<p>🛍 Tanlagan mahsuloti</p><ul>")
+        for row in catalog_rows:
+            line = escape(row["text"])
+            if row["note"]:
+                line += f"<br/><i>{escape(row['note'])}</i>"
+            html.append(f"<li>{line}</li>")
+        html.append("</ul>")
+    if details.get("flowers_text") or details.get("size_text"):
+        wanted = " · ".join(value for value in [details.get("flowers_text"), details.get("size_text")] if value)
+        html.append(f"<p>🌷 So'ragan guli<br/>{escape(wanted)}</p>")
+    extra = [line for line in [lead_fulfillment_line(lead), lead_when_line(lead)] if line]
+    if lead.estimated_price is not None:
+        extra.append(f"💰 Taxminan {money_uz(lead.estimated_price)} so'm")
+    if extra:
+        html.append("<p>" + "<br/>".join(escape(line) for line in extra) + "</p>")
+    if lead.request_uz:
+        html.append(f"<p>🧠 So'rov<br/>{escape(lead.request_uz[:1200])}</p>")
+    links = [row["url"] for row in lead_operator_media(lead, conversation)]
+    if links:
+        html.append("<p>🔗 Media havolalar</p><ul>")
+        for url in links:
+            html.append(f'<li><a href="{escape(url)}">{escape(url)}</a></li>')
+        html.append("</ul>")
+    return {"html": "\n".join(html), "media": media_items}
+
+
+def operator_lead_plain_message(lead, conversation):
+    """Rich xabar o'tmasa yuboriladigan oddiy matn."""
+    customer = conversation.customer
+    lines = [f"🌸 Yangi lead #{lead.id}", "", f"👤 {customer.name or 'Ism yozilmagan'}", f"📞 {customer.phone or 'raqam berilmagan'}"]
+    for row in lead_catalog_lines(lead):
+        lines.append(f"🛍 {row['text']}")
+    for line in [lead_fulfillment_line(lead), lead_when_line(lead)]:
+        if line:
+            lines.append(line)
+    if lead.request_uz:
+        lines.extend(["", lead.request_uz[:1200]])
+    return "\n".join(lines)
+
+
+def notify_operators_about_lead(lead, conversation):
+    """Yangi leadni operatorlar Telegram guruhiga yuboradi.
+
+    Bu AI javobiga tegmaydi — lead bazaga yozilgach ishlaydigan yetkazish qadami,
+    xuddi ichki Notification kabi. Xatolik bo'lsa lead baribir saqlanib qoladi.
+    """
+    token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
+    chat_id = settings.AI_OPERATOR_HANDOFF_GROUP_ID
+    if not token or not chat_id:
+        return {"ok": False, "detail": "operator_group_not_configured"}
+    reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
+    try:
+        sent = telegram_send_rich_message_with(token, chat_id, operator_lead_rich_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+    except Exception as error:
+        print(f"AI_LEAD_RICH_NOTIFY_FAILED lead={lead.id} error={error}", flush=True)
+        try:
+            sent = telegram_send_with(token, chat_id, operator_lead_plain_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+        except Exception as fallback_error:
+            print(f"AI_LEAD_NOTIFY_FAILED lead={lead.id} error={fallback_error}", flush=True)
+            return {"ok": False, "detail": "telegram_send_failed"}
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"operator_lead_notified": {"lead_id": lead.id, "telegram_result": sent}})
+    return {"ok": True, "lead_id": lead.id}
+
+
 def latest_customer_media_attachment(conversation, source_url=""):
     attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
     if source_url:
