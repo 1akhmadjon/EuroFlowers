@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import requests
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -235,6 +236,32 @@ def story_share_id_from_url(url):
     return ""
 
 
+def social_post_upsert(media_id, defaults):
+    """media_id bo'yicha yozuvni topadi yoki yaratadi.
+
+    Instagram bitta media_send hodisasini bir necha marta yuboradi va celery ularni
+    parallel ishlaydi. Ikkala jarayon ham "yo'q ekan" deb ko'rib, ikkalasi ham yaratmoqchi
+    bo'ladi — ikkinchisi unique constraint ga urilib butun webhookni yiqitadi. O'shanda
+    mijozning reeli umuman qabul qilinmaydi: typing ham chiqmaydi, javob ham yozilmaydi.
+    """
+    post = SocialPost.objects.filter(media_id=media_id).first()
+    if not post:
+        try:
+            with transaction.atomic():
+                return SocialPost.objects.create(media_id=media_id, **defaults)
+        except IntegrityError:
+            # Poygada yutqazdik — yozuvni raqib jarayon yaratib bo'lgan.
+            post = SocialPost.objects.filter(media_id=media_id).first()
+            if not post:
+                raise
+    for key, value in defaults.items():
+        if key in ["webhook_story_id", "webhook_story_url"] and not value:
+            continue
+        setattr(post, key, value)
+    post.save()
+    return post
+
+
 def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
     if not item:
         return None
@@ -245,9 +272,8 @@ def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
     if not media_id or SocialPost.objects.filter(media_id=media_id).exists():
         media_id = f"catalog-item-{item.id}"
     post_type = social_post_type_from_url(permalink, "story" if webhook_event and webhook_event.event_type in ["story_reply", "story_send"] else "post")
-    post = SocialPost.objects.create(
+    post = social_post_upsert(media_id, dict(
         post_type=post_type,
-        media_id=media_id,
         permalink=permalink,
         story_share_id=story_share_id_from_url(permalink),
         webhook_story_id=(webhook_event.story_id or webhook_event.media_id) if webhook_event and post_type == "story" else "",
@@ -259,7 +285,7 @@ def social_post_from_catalog_item(item, webhook_event=None, permalink=""):
         price=item.price,
         image_url=item.image_url,
         is_active=True,
-    )
+    ))
     item.social_post = post
     item.save(update_fields=["social_post", "updated_at"])
     return post
@@ -274,7 +300,6 @@ def social_post_from_ai_catalog_item(item, webhook_event=None, permalink=""):
     media_id = (webhook_event.media_id or webhook_event.story_id) if webhook_event else ""
     if not media_id:
         media_id = f"ai-catalog-item-{item.id}"
-    post = SocialPost.objects.filter(media_id=media_id).first()
     post_type = social_post_type_from_url(permalink, "story" if webhook_event and webhook_event.event_type in ["story_reply", "story_send"] else "post")
     defaults = dict(
         post_type=post_type,
@@ -290,14 +315,7 @@ def social_post_from_ai_catalog_item(item, webhook_event=None, permalink=""):
         image_url=item.image_url,
         is_active=True,
     )
-    if post:
-        for key, value in defaults.items():
-            if key in ["webhook_story_id", "webhook_story_url"] and not value:
-                continue
-            setattr(post, key, value)
-        post.save()
-        return post
-    return SocialPost.objects.create(media_id=media_id, **defaults)
+    return social_post_upsert(media_id, defaults)
 
 
 def append_story_webhook_id(post, story_id):

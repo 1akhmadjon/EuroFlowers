@@ -8283,3 +8283,52 @@ class AlbumEchoIsRecognisedAcrossProcessesTests(TestCase):
         from .webhook_services import instagram_sent_message_exists
         services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
         self.assertFalse(instagram_sent_message_exists(self.conversation, "mid-from-a-human"))
+
+
+class SocialPostRaceTests(TestCase):
+    """Instagram bitta reelni bir necha marta yuboradi, celery ularni parallel ishlaydi."""
+
+    def test_a_concurrent_duplicate_does_not_break_the_webhook(self):
+        from .webhook_services import social_post_upsert
+        defaults = {"post_type": "reel", "permalink": "https://www.instagram.com/reel/AAA/", "title_uz": "Reel", "title_ru": "Reel", "is_active": True}
+        first = social_post_upsert("media-race-1", defaults)
+        second = social_post_upsert("media-race-1", dict(defaults, title_uz="Yangilangan"))
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(SocialPost.objects.filter(media_id="media-race-1").count(), 1)
+        self.assertEqual(second.title_uz, "Yangilangan")
+
+    def test_an_inactive_post_with_the_same_media_id_is_reused_not_recreated(self):
+        from .webhook_services import social_post_upsert
+        SocialPost.objects.create(media_id="media-race-2", post_type="post", title_uz="Eski", title_ru="Eski", is_active=False)
+        post = social_post_upsert("media-race-2", {"post_type": "reel", "permalink": "https://www.instagram.com/reel/BBB/", "title_uz": "Yangi", "title_ru": "Yangi", "is_active": True})
+        self.assertEqual(SocialPost.objects.filter(media_id="media-race-2").count(), 1)
+        self.assertTrue(post.is_active)
+
+    def test_a_reel_share_survives_a_duplicate_delivery(self):
+        """Avval shu yerda IntegrityError chiqib, mijozning reeli umuman qabul qilinmasdi."""
+        from .webhook_services import social_post_from_ai_catalog_item
+        item = AICatalogItem.objects.create(name="London Savat", arrangement_type="basket", price=1000000, quantity=1, instagram_link="https://www.instagram.com/reel/CCC/")
+        event = SimpleNamespace(media_id="18424627252193879", story_id="", story_url="https://www.instagram.com/reel/CCC/", event_type="media_send")
+        first = social_post_from_ai_catalog_item(item, event, "https://www.instagram.com/reel/CCC/")
+        second = social_post_from_ai_catalog_item(item, event, "https://www.instagram.com/reel/CCC/")
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(SocialPost.objects.filter(media_id="18424627252193879").count(), 1)
+
+
+class SayFlowerNotProductTests(TestCase):
+    def test_the_prompt_bans_the_internal_word(self):
+        migration = importlib.import_module("core.migrations.0137_ai_prompt_say_gul_not_mahsulot")
+        self.assertIn('MIJOZGA "MAHSULOT" DEMA', migration.INSERT)
+        self.assertIn("Qaysi gulni nazarda tutyapsiz", migration.INSERT)
+        self.assertIn("товар", migration.INSERT)
+
+    def test_it_is_inserted_once_at_the_top(self):
+        from django.apps import apps as installed_apps
+        migration = importlib.import_module("core.migrations.0137_ai_prompt_say_gul_not_mahsulot")
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = migration.ANCHOR + "\n════════════════════════════════════\nqolgan matn"
+        row.save()
+        for _ in range(2):
+            migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count('MIJOZGA "MAHSULOT" DEMA'), 1)
