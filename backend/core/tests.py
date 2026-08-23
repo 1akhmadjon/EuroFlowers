@@ -7982,7 +7982,8 @@ class NaturalSalesFlowTests(TestCase):
         result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None, "min_price": 200000, "max_price": 500000}, self.conversation)
         self.assertEqual([row["name_uz"] for row in result["catalog"]], ["Jumila Gulidan Kompazitsia"])
         self.assertTrue(result["budget"]["exact_match"])
-        self.assertEqual(result["budget"]["cheapest_price"], "199000.00")
+        # Budjetga mos mahsulot bor — arzonrog'ini eslatib mijozni pastga tortmaymiz.
+        self.assertNotIn("cheapest_price", result["budget"])
 
     def test_budget_below_everything_still_shows_the_cheapest_and_says_so(self):
         """«250 mingga bomi» — bunday narx yo'q, lekin quruq «yo'q» deyish savdoni yopadi."""
