@@ -608,6 +608,18 @@ def ai_catalog_result(query="", limit=24, arrangement_type="", min_price=None, m
     rows = ai_catalog_rows(query, limit=limit, arrangement_type=arrangement_type, min_price=min_price, max_price=max_price)
     low, high = catalog_price_bounds(min_price, max_price)
     result = {"catalog": rows}
+    if (query or "").strip() and not rows:
+        # Qidiruv so'zi topilmagani "bunday mahsulot yo'q" degani EMAS. Katalog nomlari
+        # lotinda yozilgan, mijoz esa "букет" yoki "цветы" deb so'raydi va ro'yxat bo'sh
+        # qaytadi. Production'da AI shundan keyin "hozir tayyor buket yo'q" deb yozgan —
+        # katalogda o'n to'qqizta mahsulot turgan holda.
+        rows = ai_catalog_rows("", limit=limit, arrangement_type=arrangement_type, min_price=min_price, max_price=max_price)
+        result["catalog"] = rows
+        result["query_matched"] = False
+        result["instruction_uz"] = (
+            "Qidiruv so'zi katalog nomlariga mos kelmadi, lekin katalog bo'sh emas. "
+            "Mijozga tayyor mahsulot yo'q deb AYTMA — quyidagilar hozir sotuvda turibdi."
+        )
     if low is None and high is None:
         return result
     within = [row for row in rows if (low is None or Decimal(row["price"]) >= low) and (high is None or Decimal(row["price"]) <= high)]
@@ -2130,7 +2142,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi. Mijoz budjet aytsa (\"250 mingga bormi\", \"200 mingdan 500 minggacha\", \"1 millionlik\", \"arzonrog'i\") min_price va max_price ber. Natijadagi budget.exact_match false bo'lsa o'sha narxda mahsulot yo'q, qatorlar eng yaqinlari — budget.cheapest_price eng arzon mahsulot narxi.",
+            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi. Mijoz budjet aytsa (\"250 mingga bormi\", \"200 mingdan 500 minggacha\", \"1 millionlik\", \"arzonrog'i\") min_price va max_price ber. Natijadagi budget.exact_match false bo'lsa o'sha narxda mahsulot yo'q, qatorlar eng yaqinlari — budget.cheapest_price eng arzon mahsulot narxi. query_matched false bo'lsa qidiruv so'zi nomlarga mos kelmagan, lekin qaytgan qatorlar sotuvdagi haqiqiy mahsulotlar — mijozga tayyor mahsulot yo'q deb aytma.",
             "parameters": {
                 "type": "object",
                 "properties": {

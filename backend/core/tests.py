@@ -8103,3 +8103,30 @@ class NaturalSalesPromptTests(TestCase):
         self.assertEqual(settings_row.system_prompt.count("00. QANDAY GAPIRASAN"), 1)
         self.assertIn(self.migration.CONTACT_BLOCK_NEW, settings_row.system_prompt)
         self.assertNotIn("sen BIRINCHI marta ism va telefon so'raganingda", settings_row.system_prompt)
+
+
+class CatalogNeverLooksEmptyTests(TestCase):
+    """Qidiruv so'zi topilmagani «bunday mahsulot yo'q» degani emas."""
+
+    def setUp(self):
+        self.conversation = Conversation.objects.create(customer=Customer.objects.create(instagram_user_id="ig-empty"))
+        AICatalogItem.objects.create(name="Buket Bambastic", arrangement_type="bouquet", price=900000, quantity=1, image_url="https://cdn.example.com/b.jpg")
+        AICatalogItem.objects.create(name="London Gulidan Savat", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/l.jpg")
+
+    def test_a_russian_word_does_not_empty_the_catalog(self):
+        """Katalog nomlari lotinda, mijoz esa «букет» deb so'raydi."""
+        result = execute_ai_tool("get_catalog", {"query": "букет", "arrangement_type": None, "min_price": None, "max_price": None}, self.conversation)
+        self.assertEqual(len(result["catalog"]), 2)
+        self.assertFalse(result["query_matched"])
+        self.assertIn("yo'q deb AYTMA", result["instruction_uz"])
+
+    def test_a_matching_word_keeps_the_narrow_result(self):
+        result = execute_ai_tool("get_catalog", {"query": "savat", "arrangement_type": None, "min_price": None, "max_price": None}, self.conversation)
+        self.assertEqual([row["name_uz"] for row in result["catalog"]], ["London Gulidan Savat"])
+        self.assertNotIn("query_matched", result)
+
+    def test_an_arrangement_type_with_nothing_in_it_stays_empty(self):
+        """Qutimiz yo'q bo'lsa «yo'q» deyish rost, buni yashirmaymiz."""
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": "box", "min_price": None, "max_price": None}, self.conversation)
+        self.assertEqual(result["catalog"], [])
+        self.assertNotIn("query_matched", result)
