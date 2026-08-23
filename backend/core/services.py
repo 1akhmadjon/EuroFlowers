@@ -124,7 +124,7 @@ MEDIA_MATCH_CROP_INSTRUCTION = (
 
 MEDIA_MATCHING_PRIORITY_INSTRUCTION = """
 MEDIA MATCHING FIRST:
-If REAL_CONTEXT_JSON.conversation.customer_attachments has any customer image, story, post or reel media and the customer asks about that media, call match_ai_catalog_by_media before asking for phone or handing off to an operator.
+Before writing a single word of a reply, look at REAL_CONTEXT_JSON.conversation.customer_attachments. If it holds any customer image, story, post or reel whose kind is not "ad", and the customer's latest message is about that media, you MUST call match_ai_catalog_by_media first. Nothing in the backend will call it for you, and no reply you write without it can be trusted: naming a flower or a price you did not get from that tool is the worst mistake you can make here. When in doubt, call it — calling it needlessly costs nothing, skipping it invents a product the shop does not sell.
 An attachment whose kind is "ad" is the banner of the Instagram ad this conversation started from. The customer did not send it. Never run the photo matcher because of it.
 A question about the address, opening hours, delivery or payment is not a question about the photo. Answer it, and leave the matcher alone even when a photo is sitting in the conversation.
 Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
@@ -1516,27 +1516,6 @@ def similar_enough_rows(rejected, source, limit=3):
     return sorted(rows, key=lambda row: row["score"], reverse=True)[:limit]
 
 
-def unanswered_customer_media(conversation):
-    """Oxirgi AI javobidan keyin mijoz rasm/story/reel yuborganmi.
-
-    Faqat yangi media uchun. Eski rasm haqida mijoz keyinroq savol bersa, model
-    o'zi qaror qiladi — u yerda majburlash suhbatni orqaga tortib yuborardi.
-    Reklama banneri media hisoblanmaydi: u mijozning har bir xabariga o'zi
-    qo'shiladi, mijoz uni yubormagan.
-    """
-    messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:12])
-    for message in messages:
-        if message.sender == "ai":
-            return False
-        if message.sender != "customer":
-            continue
-        for attachment in (message.metadata or {}).get("attachments") or []:
-            url = attachment.get("url")
-            if url and not is_ad_attachment(url):
-                return True
-    return False
-
-
 def crop_would_help(conversation, source):
     """Kesilgan rasm so'rashning ma'nosi bormi.
 
@@ -2171,7 +2150,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "Majburiy media matching tool. Conversation.customer_attachments bo'lsa va mijoz yuborgan rasm/story/post/reel haqida narx, bor-yo'qlik yoki aynan qaysi gul ekanini so'rasa, telefon so'rash yoki handoff qilishdan oldin doim shu toolni chaqir. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
+            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Telefon so'rash yoki handoff qilishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2838,49 +2817,12 @@ def ai_reply(conversation):
     }
     response = client.responses.create(**response_kwargs)
     tool_results = []
-    forced_media_match = False
     for _ in range(10):
         calls = []
         for item in getattr(response, "output", []) or []:
             if getattr(item, "type", "") == "function_call":
                 calls.append(item)
         if not calls:
-            # Model media matching toolini chaqirmasdan javob yozib qo'yishi mumkin va
-            # o'shanda katalogda yo'q mahsulotni o'ylab topadi. Production'da aynan
-            # shunday bo'lgan: mijoz story yuborgan, model "Alfalob 200 tali, 1 600 000
-            # so'm" deb javob bergan — katalogda bunday mahsulot ham, bunday narx ham
-            # yo'q. Toolni o'zimiz chaqirib, natijasi bilan javobni qayta yozdiramiz.
-            already_matched = any(row.get("name") == "match_ai_catalog_by_media" for row in tool_results)
-            if not forced_media_match and not already_matched and unanswered_customer_media(conversation):
-                forced_media_match = True
-                output = execute_ai_tool(
-                    "match_ai_catalog_by_media",
-                    {"source_url": None, "user_text": latest_customer_text},
-                    conversation,
-                    tool_results=tool_results,
-                )
-                tool_results.append({"name": "match_ai_catalog_by_media", "arguments": {"source_url": None, "user_text": latest_customer_text, "forced_by_backend": True}, "output": output})
-                response = client.responses.create(
-                    model=ai_settings.openai_model or settings.OPENAI_MODEL,
-                    instructions=effective_instructions,
-                    previous_response_id=response.id,
-                    input=[{
-                        "role": "user",
-                        "content": (
-                            "SYSTEM: Mijoz media yuborgan, lekin sen match_ai_catalog_by_media ni chaqirmading. "
-                            "Tool sening o'rningga chaqirildi, natijasi quyida. Javobingni shu natija asosida "
-                            "qayta yoz va instruction_uz da yozilganini bajar. Katalogda yo'q mahsulot nomini "
-                            "yoki narxini yozish qat'iy taqiqlanadi.\n\nMATCH_AI_CATALOG_BY_MEDIA natijasi:\n"
-                            + json.dumps(output, ensure_ascii=False, default=str)
-                        ),
-                    }],
-                    max_output_tokens=8000,
-                    reasoning={"effort": ai_settings.reasoning_effort or "low"},
-                    tools=ai_tool_definitions(),
-                    parallel_tool_calls=False,
-                    text={"format": {"type": "json_schema", "name": "sales_reply", "strict": True, "schema": ai_response_schema()}},
-                )
-                continue
             break
         tool_outputs = []
         for call in calls:

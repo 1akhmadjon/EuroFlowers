@@ -7309,7 +7309,6 @@ class OperatorHandoffTests(TestCase):
         rows = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
         self.assertEqual([row["url"] for row in rows], [ad_one])
         self.assertEqual(rows[0]["kind"], "ad")
-        self.assertFalse(services.unanswered_customer_media(conversation))
 
     def test_a_real_photo_after_an_ad_banner_still_counts(self):
         customer = Customer.objects.create(instagram_user_id="ig-ad-then-photo")
@@ -7317,7 +7316,10 @@ class OperatorHandoffTests(TestCase):
         conversation.messages.create(sender="customer", text="salom", metadata={"attachments": [{"kind": "photo", "url": "https://www.facebook.com/ads/image/?d=AQJ-banner"}]})
         conversation.messages.create(sender="ai", text="Assalomu alaykum")
         conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/real.jpg"}]})
-        self.assertTrue(services.unanswered_customer_media(conversation))
+        rows = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
+        # Reklama banneri "ad" bo'lib qoladi, mijoz yuborgan rasm esa oddiy media.
+        self.assertEqual([row["kind"] for row in rows], ["ad", "photo"])
+        self.assertEqual(rows[-1]["url"], "https://cdn.example.com/real.jpg")
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_the_same_catalog_photo_is_not_sent_twice(self):
@@ -8332,3 +8334,23 @@ class SayFlowerNotProductTests(TestCase):
             migration.apply_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt.count('MIJOZGA "MAHSULOT" DEMA'), 1)
+
+
+class NoBackendTriggersTests(TestCase):
+    """AI faqat mijoz xabari, suhbat, system prompt va function natijalari bilan ishlaydi."""
+
+    def test_the_backend_never_calls_a_tool_the_model_did_not_ask_for(self):
+        source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
+        for marker in ["forced_media_match", "forced_by_backend", "SYSTEM: Mijoz media yuborgan", "unanswered_customer_media"]:
+            self.assertNotIn(marker, source, f"backend trigger qaytib kelgan: {marker}")
+
+    def test_the_backend_never_rewrites_the_reply_text(self):
+        source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
+        rewrites = [line.strip() for line in source.splitlines() if 'result["reply"]' in line and "=" in line.split('result["reply"]')[1][:3]]
+        # Yagona ruxsat etilgani — kirill suhbatda javobni kirillga qaytarish.
+        self.assertEqual(rewrites, ['result["reply"] = latin_to_cyrillic(result["reply"])'])
+
+    def test_the_tool_description_carries_the_obligation_instead(self):
+        media_tool = next(tool for tool in ai_tool_definitions() if tool["name"] == "match_ai_catalog_by_media")
+        self.assertIn("MAJBURIY", media_tool["description"])
+        self.assertIn("Shubhalansang chaqir", media_tool["description"])
