@@ -85,7 +85,10 @@ def instagram_sent_message_exists(conversation, instagram_message_id):
         return True
     return Message.objects.filter(
         Q(metadata__image_tool_result__sent__message_id=instagram_message_id)
-        | Q(metadata__post_image_result__sent__message_id=instagram_message_id),
+        | Q(metadata__post_image_result__sent__message_id=instagram_message_id)
+        # Albom boshqa celery jarayonidan yuborilgan bo'lishi mumkin va o'shanda
+        # xotiradagi ro'yxat bo'sh bo'ladi. Bazadagi yozuv har ikkalasida ham bor.
+        | Q(metadata__catalog_album_result__sent_message_ids__contains=instagram_message_id),
         conversation=conversation,
         sender="system",
     ).exists()

@@ -8253,3 +8253,33 @@ class MediaHandoffAlsoLandsInTheCrmTests(TestCase):
         self.assertIsNotNone(first["lead_id"])
         self.assertIsNone(second["lead_id"])
         self.assertEqual(Lead.objects.filter(conversation=self.conversation).count(), 1)
+
+
+class AlbumEchoIsRecognisedAcrossProcessesTests(TestCase):
+    """Albomni bir celery jarayoni yuboradi, echo'ni boshqasi qabul qiladi."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_user_id="ig-echo")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.item = AICatalogItem.objects.create(name="Buket", arrangement_type="bouquet", price=500000, quantity=1, image_url="https://cdn.example.com/e.jpg")
+
+    def test_the_album_message_ids_are_written_to_the_database(self):
+        from unittest.mock import patch
+        with patch("core.services.instagram_send_carousel", return_value={"message_id": "mid-album-1"}):
+            services.send_catalog_album(self.conversation, [self.item], whole_catalog=True)
+        stored = self.conversation.messages.filter(sender="system").last().metadata["catalog_album_result"]
+        self.assertEqual(stored["sent_message_ids"], ["mid-album-1"])
+
+    def test_our_own_album_echo_is_not_filed_as_an_operator_reply(self):
+        from unittest.mock import patch
+        from .webhook_services import instagram_sent_message_exists
+        with patch("core.services.instagram_send_carousel", return_value={"message_id": "mid-album-2"}):
+            services.send_catalog_album(self.conversation, [self.item], whole_catalog=True)
+        # Boshqa jarayon: xotiradagi ro'yxat bo'sh, faqat baza qoladi.
+        services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
+        self.assertTrue(instagram_sent_message_exists(self.conversation, "mid-album-2"))
+
+    def test_a_real_operator_message_is_still_recognised_as_inbound(self):
+        from .webhook_services import instagram_sent_message_exists
+        services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
+        self.assertFalse(instagram_sent_message_exists(self.conversation, "mid-from-a-human"))

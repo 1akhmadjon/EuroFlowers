@@ -2330,12 +2330,15 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         row["position"] = position
         row["caption"] = f"{row['position']}. {row['item'].name} — {money_uz(row['item'].price)} so'm"
     sent_items = []
+    sent_message_ids = []
     messages_sent = 0
     album_chunks = 0
     fallback_chunks = 0
     for start in range(0, len(rows), CATALOG_ALBUM_MAX_PER_MESSAGE):
         chunk = rows[start:start + CATALOG_ALBUM_MAX_PER_MESSAGE]
-        delivered, detail = send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=conversation)
+        delivered, detail, sent = send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=conversation)
+        if isinstance(sent, dict) and sent.get("message_id"):
+            sent_message_ids.append(sent["message_id"])
         if delivered:
             messages_sent += 1
             album_chunks += 1
@@ -2365,6 +2368,9 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         "whole_catalog": bool(whole_catalog),
         "items": sent_items,
         "not_sent": not_sent,
+        # Instagram yuborgan albomimizni webhook orqali qaytaradi. Id lar bazada tursa
+        # echo tanilib, o'z albomimiz "operator javob yozdi" deb hisoblanmaydi.
+        "sent_message_ids": sent_message_ids,
     }
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"catalog_album_result": result})
     return ai_catalog_album_result(result)
@@ -2416,7 +2422,7 @@ def remember_sent_instagram_message(result):
 
 
 def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=None):
-    """Bitta albom xabarini yuboradi. (delivered, detail) qaytaradi, exception ko'tarmaydi.
+    """Bitta albom xabarini yuboradi. (delivered, detail, result) qaytaradi, exception ko'tarmaydi.
 
     Do'konning bir nechta Instagram akkaunti bor. Mijoz qaysi akkauntga yozgan bo'lsa,
     javob ham o'sha akkauntdan ketishi kerak — bo'lmasa Instagram 400 qaytaradi.
@@ -2432,17 +2438,17 @@ def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=No
             result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk], account_id)
     except Exception as error:
         print(f"CATALOG_ALBUM_FAILED customer={customer.id} platform={platform} count={len(chunk)} error={error}", flush=True)
-        return False, "album_failed"
+        return False, "album_failed", None
     if isinstance(result, dict) and result.get("mocked"):
-        return True, "mocked"
+        return True, "mocked", result
     if isinstance(result, dict) and result.get("ok") is False:
         print(f"CATALOG_ALBUM_REJECTED customer={customer.id} platform={platform} result={result}", flush=True)
-        return False, "album_rejected"
+        return False, "album_rejected", result
     # Instagram yuborilgan xabarni webhook orqali bizga qaytaradi. Uning id sini
     # eslab qolmasak, o'z albomimiz "operator javob yozdi" deb hisoblanadi va AI
     # o'zini o'n besh daqiqaga to'xtatib qo'yadi.
     remember_sent_instagram_message(result)
-    return True, "album"
+    return True, "album", result
 
 
 def _stock_batch_for_ai(query="", batch_id=None):
