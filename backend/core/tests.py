@@ -8216,47 +8216,6 @@ class BargainingPromptTests(TestCase):
         self.assertLess(row.system_prompt.index("SAVDOLASHUV JAVOBIDA"), row.system_prompt.index(migration.ANCHOR))
 
 
-class MediaHandoffAlsoLandsInTheCrmTests(TestCase):
-    """Operator guruhga xabar tushdi-yu, CRM da mijoz yo'q qolmasin."""
-
-    def setUp(self):
-        self.customer = Customer.objects.create(instagram_user_id="ig-handoff", instagram_username="mijoz")
-        self.conversation = Conversation.objects.create(customer=self.customer)
-        self.conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": "https://cdn.example.com/p.jpg"}]})
-
-    def _handoff(self, **kwargs):
-        from unittest.mock import patch
-        arguments = {"summary": "Mijoz rasm yubordi, narxini so'rayapti", "phone": "+998901112233", "customer_refused_phone": False}
-        arguments.update(kwargs)
-        with patch("core.services.telegram_send_rich_message_with", return_value={"ok": True}):
-            return execute_ai_tool("handoff_media_to_operator", arguments, self.conversation)
-
-    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
-    def test_a_phone_number_turns_the_handoff_into_a_lead(self):
-        result = self._handoff()
-        lead = Lead.objects.get(id=result["lead_id"])
-        self.assertEqual(lead.customer, self.customer)
-        self.assertEqual(lead.details["topic"], "photo_request")
-        self.assertEqual(lead.details["photo_urls"], ["https://cdn.example.com/p.jpg"])
-        self.assertIn("narxini so'rayapti", lead.request_uz)
-        self.assertTrue(Notification.objects.filter(notification_type="lead", reference_id=lead.id).exists())
-
-    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
-    def test_without_a_number_the_handoff_still_goes_out_but_no_lead_is_invented(self):
-        result = self._handoff(phone=None, customer_refused_phone=True)
-        self.assertTrue(result["ok"])
-        self.assertIsNone(result["lead_id"])
-        self.assertFalse(Lead.objects.filter(customer=self.customer).exists())
-
-    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
-    def test_a_second_handoff_does_not_open_a_second_lead(self):
-        first = self._handoff()
-        second = self._handoff()
-        self.assertIsNotNone(first["lead_id"])
-        self.assertIsNone(second["lead_id"])
-        self.assertEqual(Lead.objects.filter(conversation=self.conversation).count(), 1)
-
-
 class AlbumEchoIsRecognisedAcrossProcessesTests(TestCase):
     """Albomni bir celery jarayoni yuboradi, echo'ni boshqasi qabul qiladi."""
 
@@ -8448,3 +8407,69 @@ class CustomOrderPromptTests(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.system_prompt.count("MIJOZ NIMA DEMOQCHILIGINI"), 1)
         self.assertEqual(row.system_prompt.count("00C. YASATMA BUYURTMA"), 1)
+
+
+class NoOperatorHandoffToolTests(TestCase):
+    """Operatorga uzatish olib tashlandi. Mijoz Telegram akkauntga yo'naltiriladi."""
+
+    def test_the_handoff_tool_is_gone(self):
+        names = [tool["name"] for tool in ai_tool_definitions()]
+        self.assertNotIn("handoff_media_to_operator", names)
+        self.assertEqual(sorted(names), sorted([
+            "client_leads_get", "client_lead_create", "client_lead_edit",
+            "match_ai_catalog_by_media", "get_catalog", "send_catalog_image",
+            "send_post_image", "send_catalog_album",
+        ]))
+
+    def test_calling_it_anyway_is_refused(self):
+        conversation = Conversation.objects.create(customer=Customer.objects.create(instagram_user_id="ig-no-handoff"))
+        result = execute_ai_tool("handoff_media_to_operator", {"summary": "x", "phone": None, "customer_refused_phone": True}, conversation)
+        self.assertEqual(result, {"ok": False, "detail": "unknown_tool"})
+
+    def test_the_unmatched_photo_instruction_points_at_telegram(self):
+        from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION
+        for text in [MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION]:
+            self.assertIn("operator_telegram", text)
+            self.assertIn("SO'RAMA", text)
+            self.assertNotIn("handoff_media_to_operator", text)
+
+    def test_the_telegram_account_reaches_the_model_from_the_database(self):
+        from unittest.mock import patch
+        settings_row = BusinessSettings.objects.get_or_create(pk=1)[0]
+        settings_row.operator_telegram = "@euroflowerspremium"
+        settings_row.save()
+        customer = Customer.objects.create(instagram_user_id="ig-ctx")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="salom")
+        with patch("core.services.OpenAI") as openai_class, patch("core.services.openai_api_key", return_value="k"):
+            openai_class.return_value.responses.create.return_value = SimpleNamespace(id="r", output=[], output_text=json.dumps({"reply": "ok", "detected_language": "uz", "customer_name": None, "phone": None, "handoff": False, "lead_ready": False, "lead_request": "", "estimated_price": None, "arrangement_type": None}))
+            ai_reply(conversation)
+        context = json.loads(openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
+        self.assertEqual(context["business"]["operator_telegram"], "@euroflowerspremium")
+
+
+class LeadOnlyForOrdersPromptTests(TestCase):
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0140_ai_prompt_telegram_instead_of_handoff")
+
+    def test_contact_details_are_only_for_an_order(self):
+        self.assertIn("ISM VA TELEFON FAQAT BUYURTMA UCHUN", self.migration.TOP_RULE)
+        self.assertIn("Lead — buyurtma, savol emas", self.migration.TOP_RULE)
+
+    def test_the_question_flow_no_longer_takes_a_number_or_opens_a_lead(self):
+        block = self.migration.NEW_BLOCK
+        self.assertIn("TELEFON RAQAMI SO'RALMAYDI VA LEAD YARATILMAYDI", block)
+        self.assertIn("business.operator_telegram", block)
+        self.assertNotIn("client_lead_create chaqir, topic ga question", block)
+
+    def test_it_replaces_the_old_block_once(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = self.migration.ANCHOR + "\n" + "═" * 36 + "\nbosh\n" + self.migration.OLD_BLOCK + "\noxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertNotIn(self.migration.OLD_BLOCK, row.system_prompt)
+        self.assertEqual(row.system_prompt.count("TELEFON RAQAMI SO'RALMAYDI"), 1)
+        self.assertEqual(row.system_prompt.count("ISM VA TELEFON FAQAT BUYURTMA UCHUN"), 1)

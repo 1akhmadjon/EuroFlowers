@@ -77,11 +77,9 @@ MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "qilib mahsulot nomi yoki narxini aytma. Buning o'rniga send_catalog_album ni "
     "catalog_ids BO'SH massiv bilan chaqirib butun katalogni yubor va shu mazmunda yoz: "
     "hozirda bizda bor gullar shular, shulardan tanlasangiz ham bo'ladi; yoki o'zingiz "
-    "yuborganingiz kerak bo'lsa raqamingizni yuboring, operatorlarimiz siz yuborgan gul "
-    "haqida batafsil ma'lumot berishadi. Mijoz ism va raqamini bergach client_lead_create "
-    "ni topic=photo_request bilan chaqir va photo_urls ga mijoz yuborgan havolani yoz — "
-    "shunda lead operatorlar guruhiga o'sha rasm/reel bilan birga tushadi. Raqam berishdan "
-    "bosh tortsa handoff_media_to_operator ni customer_refused_phone=true bilan chaqir."
+    "yuborgan gul kerak bo'lsa business.operator_telegram dagi Telegram akkauntimizga "
+    "yozing, operatorlarimiz siz yuborgan gul haqida aniq javob berishadi. Telefon "
+    "raqami SO'RAMA va lead yaratma — mijoz katalogdan gul tanlasagina buyurtma bo'ladi."
 )
 MEDIA_MATCH_LINK_GROUP_INSTRUCTION = (
     "Mijoz yuborgan post/reelga bir nechta katalog mahsuloti qo'yilgan, qaysi birini "
@@ -100,10 +98,9 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "o'tirma — send_catalog_album ni catalog_ids BO'SH massiv bilan chaqirib butun "
     "katalogni yubor. Keyin shu mazmunda yoz: hozirda bizda bor gullar shular, "
     "shulardan tanlasangiz ham bo'ladi; yoki siz yuborgan gul ko'proq qiziq bo'lsa "
-    "telefon raqamingizni yuboring, operatorlarimiz aloqaga chiqib aniq narxini "
-    "aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Mijoz ism va raqamini bergach "
-    "client_lead_create ni topic=photo_request va photo_urls bilan chaqir, raqam bermasa "
-    "handoff_media_to_operator ni customer_refused_phone=true bilan chaqir."
+    "business.operator_telegram dagi Telegram akkauntimizga yozing, operatorlarimiz "
+    "aniq narxini aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Telefon raqami "
+    "SO'RAMA va lead yaratma."
 )
 MEDIA_MATCH_CLOSE_INSTRUCTION = (
     "Rasmdagi gul katalogimizdagi bir nechta mahsulotga juda yaqin, lekin qaysi biri "
@@ -136,7 +133,7 @@ When the flower under discussion came from one of our own stories, "send me the 
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" (with show_whole_catalog) means the exact flower is NOT in the catalog and nothing on the shelf is close enough to offer as a substitute: call send_catalog_album with an empty catalog_ids to send the whole catalog, say these are the flowers available and they are welcome to pick one, and offer to have an operator price the flower they actually sent if they leave a number; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
-allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and offer to have an operator give them exact details about the flower they sent if they leave a name and number. When they leave it, call client_lead_create with topic "photo_request" and put the media link in photo_urls, so the lead reaches the operators' group together with their photo or reel. If they refuse the number, call handoff_media_to_operator with customer_refused_phone true.
+allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent they should write to the shop's Telegram account in business.operator_telegram, where an operator will answer them precisely. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -1002,299 +999,6 @@ def operator_chat_url(conversation):
     return f"{template}{separator}conversation_id={conversation.id}"
 
 
-def operator_handoff_media_type(url, kind=""):
-    text = f"{url} {kind}".lower()
-    if any(text.split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".webm"]) or "video" in text:
-        return "video"
-    if any(text.split("?")[0].endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]) or "photo" in text or "image" in text:
-        return "photo"
-    return ""
-
-
-def operator_handoff_attachment_payload(attachments):
-    media = []
-    links = []
-    for row in attachments:
-        url = row.get("url")
-        if not url:
-            continue
-        media_type = operator_handoff_media_type(url, row.get("kind") or row.get("type") or "")
-        if media_type and len(media) < MAX_OPERATOR_HANDOFF_MEDIA:
-            media.append({"type": media_type, "url": url})
-        else:
-            links.append(url)
-    return media, links
-
-
-def operator_handoff_message(conversation, summary, phone, attachments, links):
-    customer = conversation.customer
-    lines = [
-        "🌸 EuroFlowers media so‘rovi",
-        "",
-        f"👤 Mijoz: {customer.name or customer.instagram_username or customer.instagram_user_id}",
-        f"📞 Telefon: {phone or customer.phone or 'raqam berilmagan'}",
-        f"📍 Platforma: {'Telegram' if customer.instagram_user_id.startswith('telegram:') else 'Instagram'}",
-        "",
-        "🧠 AI xulosa",
-        (summary or "Mijoz yuborgan rasm/reels bo‘yicha operator aniq javob berishi kerak.")[:1500],
-    ]
-    all_links = [row.get("url") for row in attachments if row.get("url")]
-    if all_links:
-        lines.extend(["", "🔗 Media havolalar"])
-        lines.extend(f"{index}. {url}" for index, url in enumerate(all_links[:10], start=1))
-    if links and not all_links:
-        lines.extend(["", "🔗 Media havolalar"])
-        lines.extend(f"{index}. {url}" for index, url in enumerate(links[:10], start=1))
-    return "\n".join(lines)
-
-
-def operator_handoff_rich_message(conversation, summary, phone, attachments, media, links):
-    customer = conversation.customer
-    platform = "Telegram" if customer.instagram_user_id.startswith("telegram:") else "Instagram"
-    all_links = [row.get("url") for row in attachments if row.get("url")]
-    display_links = all_links or links
-    media_items = []
-    blocks = []
-    for index, row in enumerate(media[:MAX_OPERATOR_HANDOFF_MEDIA], start=1):
-        media_id = f"handoff_{index}"
-        media_type = row.get("type") or "photo"
-        if media_type == "video":
-            blocks.append(f'<video src="tg://video?id={media_id}"/>')
-            media_payload = {"type": "video", "media": row.get("url") or ""}
-        else:
-            blocks.append(f'<img src="tg://photo?id={media_id}"/>')
-            media_payload = {"type": "photo", "media": row.get("url") or ""}
-        media_items.append({"id": media_id, "media": media_payload})
-    summary_text = (summary or "Mijoz yuborgan media bo'yicha operator aniq javob berishi kerak.")[:1500]
-    html_parts = []
-    if blocks:
-        html_parts.append("<tg-slideshow>")
-        html_parts.extend(blocks)
-        html_parts.append("</tg-slideshow>")
-    customer_name = customer.name or customer.instagram_username or customer.instagram_user_id or "Nomalum"
-    html_parts.extend([
-        "<h3>🌸 EuroFlowers media so'rovi</h3>",
-        f"<p>👤 Mijoz<br/>{escape(customer_name)}</p>",
-        f"<p>📞 Telefon<br/>{escape(phone or customer.phone or 'raqam berilmagan')}</p>",
-        f"<p>📍 Platforma<br/>{escape(platform)}</p>",
-        f"<p>🧠 AI xulosa<br/>{escape(summary_text)}</p>",
-    ])
-    if display_links:
-        html_parts.append("<p>🔗 Media havolalar</p>")
-        html_parts.append("<ul>")
-        for url in display_links[:10]:
-            safe_url = escape(url)
-            html_parts.append(f'<li><a href="{safe_url}">{safe_url}</a></li>')
-        html_parts.append("</ul>")
-    return {"html": "\n".join(html_parts), "media": media_items}
-
-
-def lead_fulfillment_line(lead):
-    if lead.fulfillment == "delivery":
-        address = lead.delivery_address or "manzil aytilmagan"
-        return f"🚚 Yetkazib berish — {address}"
-    if lead.fulfillment == "pickup":
-        return "🏬 O'zi kelib olib ketadi"
-    return ""
-
-
-def lead_when_line(lead):
-    parts = [value for value in [lead.desired_date.isoformat() if lead.desired_date else "", lead.desired_time] if value]
-    return f"📅 {' · '.join(parts)}" if parts else ""
-
-
-def lead_catalog_lines(lead):
-    """Mijoz tanlagan AI katalog mahsulotlari, narxi va operator izohi bilan."""
-    rows = []
-    for row in (lead.details or {}).get("catalog_items") or []:
-        item = AICatalogItem.objects.filter(id=row.get("ai_catalog_item")).first()
-        name = row.get("catalog_name") or (item.name if item else "")
-        if not name:
-            continue
-        price = row.get("price") or (str(item.price) if item else "")
-        quantity = int(row.get("quantity") or 1)
-        title = f"{name} × {quantity}" if quantity > 1 else name
-        rows.append({
-            "text": f"{title} — {money_uz(price)} so'm" if price else title,
-            "note": (item.note or "")[:300] if item else "",
-            "image_url": item.image_url if item and item.image_url else "",
-        })
-    return rows
-
-
-def lead_operator_media(lead, conversation):
-    """Operator ko'radigan rasmlar: tanlangan katalog rasmi va mijoz yuborgan media."""
-    urls = []
-    for row in lead_catalog_lines(lead):
-        if row["image_url"] and row["image_url"] not in urls:
-            urls.append(row["image_url"])
-    for row in customer_attachment_rows(conversation.messages.order_by("created_at", "id")):
-        url = row.get("url")
-        if url and url not in urls and row.get("kind") != "ad":
-            urls.append(url)
-    return [{"kind": "photo", "url": url} for url in urls[:MAX_OPERATOR_HANDOFF_MEDIA]]
-
-
-def operator_lead_rich_message(lead, conversation):
-    """Telegram operatorlar guruhiga ketadigan «Yangi lead» xabari."""
-    customer = conversation.customer
-    platform = "Telegram" if customer.instagram_user_id.startswith("telegram:") else "Instagram"
-    username = f" · @{customer.instagram_username}" if customer.instagram_username else ""
-    catalog_rows = lead_catalog_lines(lead)
-    details = lead.details or {}
-    media_items = []
-    blocks = []
-    for index, row in enumerate(lead_operator_media(lead, conversation), start=1):
-        media_id = f"lead_{index}"
-        blocks.append(f'<img src="tg://photo?id={media_id}"/>')
-        media_items.append({"id": media_id, "media": {"type": "photo", "media": row["url"]}})
-    html = []
-    if blocks:
-        html.append("<tg-slideshow>")
-        html.extend(blocks)
-        html.append("</tg-slideshow>")
-    html.append(f"<h3>🌸 Yangi lead #{lead.id}</h3>")
-    html.append(f"<p>👤 {escape(customer.name or 'Ism yozilmagan')}<br/>📞 {escape(customer.phone or 'raqam berilmagan')}<br/>📍 {escape(platform + username)}</p>")
-    if catalog_rows:
-        html.append("<p>🛍 Tanlagan mahsuloti</p><ul>")
-        for row in catalog_rows:
-            line = escape(row["text"])
-            if row["note"]:
-                line += f"<br/><i>{escape(row['note'])}</i>"
-            html.append(f"<li>{line}</li>")
-        html.append("</ul>")
-    if details.get("flowers_text") or details.get("size_text"):
-        wanted = " · ".join(value for value in [details.get("flowers_text"), details.get("size_text")] if value)
-        html.append(f"<p>🌷 So'ragan guli<br/>{escape(wanted)}</p>")
-    extra = [line for line in [lead_fulfillment_line(lead), lead_when_line(lead)] if line]
-    if lead.estimated_price is not None:
-        extra.append(f"💰 Taxminan {money_uz(lead.estimated_price)} so'm")
-    if extra:
-        html.append("<p>" + "<br/>".join(escape(line) for line in extra) + "</p>")
-    if lead.request_uz:
-        html.append(f"<p>🧠 So'rov<br/>{escape(lead.request_uz[:1200])}</p>")
-    links = [row["url"] for row in lead_operator_media(lead, conversation)]
-    if links:
-        html.append("<p>🔗 Media havolalar</p><ul>")
-        for url in links:
-            html.append(f'<li><a href="{escape(url)}">{escape(url)}</a></li>')
-        html.append("</ul>")
-    return {"html": "\n".join(html), "media": media_items}
-
-
-def operator_lead_plain_message(lead, conversation):
-    """Rich xabar o'tmasa yuboriladigan oddiy matn."""
-    customer = conversation.customer
-    lines = [f"🌸 Yangi lead #{lead.id}", "", f"👤 {customer.name or 'Ism yozilmagan'}", f"📞 {customer.phone or 'raqam berilmagan'}"]
-    for row in lead_catalog_lines(lead):
-        lines.append(f"🛍 {row['text']}")
-    for line in [lead_fulfillment_line(lead), lead_when_line(lead)]:
-        if line:
-            lines.append(line)
-    if lead.request_uz:
-        lines.extend(["", lead.request_uz[:1200]])
-    return "\n".join(lines)
-
-
-def notify_operators_about_lead(lead, conversation):
-    """Yangi leadni operatorlar Telegram guruhiga yuboradi.
-
-    Bu AI javobiga tegmaydi — lead bazaga yozilgach ishlaydigan yetkazish qadami,
-    xuddi ichki Notification kabi. Xatolik bo'lsa lead baribir saqlanib qoladi.
-    """
-    token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
-    chat_id = settings.AI_OPERATOR_HANDOFF_GROUP_ID
-    if not token or not chat_id:
-        return {"ok": False, "detail": "operator_group_not_configured"}
-    reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
-    try:
-        sent = telegram_send_rich_message_with(token, chat_id, operator_lead_rich_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
-    except Exception as error:
-        print(f"AI_LEAD_RICH_NOTIFY_FAILED lead={lead.id} error={error}", flush=True)
-        try:
-            sent = telegram_send_with(token, chat_id, operator_lead_plain_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
-        except Exception as fallback_error:
-            print(f"AI_LEAD_NOTIFY_FAILED lead={lead.id} error={fallback_error}", flush=True)
-            return {"ok": False, "detail": "telegram_send_failed"}
-    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"operator_lead_notified": {"lead_id": lead.id, "telegram_result": sent}})
-    return {"ok": True, "lead_id": lead.id}
-
-
-def lead_for_media_handoff(conversation, summary, attachments):
-    """Media so'rovi ham CRM da lead bo'lib qolsin.
-
-    Operator guruhga xabar tushadi, lekin telefon bor bo'lsa buyurtma CRM da ham
-    yozilib turishi kerak — bo'lmasa mijoz ro'yxatga tushmay qoladi va keyin uni
-    hech kim topa olmaydi. Suhbatda lead allaqachon bo'lsa yangisi ochilmaydi.
-    """
-    customer = conversation.customer
-    if not customer.phone or conversation.leads.exists():
-        return None
-    lead = Lead.objects.create(
-        customer=customer,
-        conversation=conversation,
-        social_post=conversation.social_post,
-        request_uz=(summary or "Mijoz yuborgan rasm bo'yicha so'rov")[:2000],
-        details={
-            "topic": "photo_request",
-            "flowers_text": "",
-            "size_text": "",
-            "photo_urls": customer_photo_urls([row.get("url") for row in attachments]),
-            "catalog_items": [],
-            "created_by": "ai_media_handoff",
-        },
-        source="telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
-    )
-    Notification.objects.create(notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=lead.request_uz, body_ru=lead.request_uz, reference_type="lead", reference_id=lead.id)
-    save_conversation_ai_summary(conversation, lead)
-    return lead
-
-
-def handoff_media_to_operator(conversation, summary="", phone="", customer_refused_phone=False):
-    attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
-    if not attachments:
-        return {"ok": False, "detail": "no_customer_attachments"}
-    token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
-    chat_id = settings.AI_OPERATOR_HANDOFF_GROUP_ID
-    if not token or not chat_id:
-        return {"ok": False, "detail": "operator_group_not_configured"}
-    normalized_phone = normalize_phone(phone) or conversation.customer.phone
-    if normalized_phone and normalized_phone != conversation.customer.phone:
-        conversation.customer.phone = normalized_phone
-        conversation.customer.save(update_fields=["phone", "updated_at"])
-    media, links = operator_handoff_attachment_payload(attachments)
-    media_sent = False
-    media_error = ""
-    reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
-    rich_message = operator_handoff_rich_message(conversation, summary, normalized_phone, attachments, media, links)
-    try:
-        sent = telegram_send_rich_message_with(token, chat_id, rich_message, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
-        media_sent = bool(media)
-    except Exception as exc:
-        media_error = str(exc)
-        print(f"AI_OPERATOR_RICH_HANDOFF_FAILED conversation={conversation.id} error={exc}", flush=True)
-        try:
-            text = operator_handoff_message(conversation, summary, normalized_phone, attachments, links)
-            sent = telegram_send_with(token, chat_id, text, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
-        except Exception as fallback_exc:
-            print(f"AI_OPERATOR_HANDOFF_FAILED conversation={conversation.id} error={fallback_exc}", flush=True)
-            return {"ok": False, "detail": "telegram_send_failed", "error": str(fallback_exc), "media_sent": media_sent, "media_error": media_error}
-    Message.objects.create(conversation=conversation, sender="system", text="", metadata={
-        "operator_media_handoff": {
-            "summary": summary,
-            "phone": normalized_phone,
-            "customer_refused_phone": customer_refused_phone,
-            "attachments": attachments,
-            "media_sent": media_sent,
-            "media_error": media_error,
-            "chat_url": operator_chat_url(conversation),
-            "telegram_result": sent,
-        }
-    })
-    lead = lead_for_media_handoff(conversation, summary, attachments)
-    return {"ok": True, "media_sent": media_sent, "attachments_count": len(attachments), "chat_url": operator_chat_url(conversation), "lead_id": lead.id if lead else None}
-
-
 def latest_customer_media_attachment(conversation, source_url=""):
     attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
     if source_url:
@@ -2133,24 +1837,8 @@ def ai_tool_definitions():
         },
         {
             "type": "function",
-            "name": "handoff_media_to_operator",
-            "description": "Mijoz yuborgan rasm, reels, post yoki media bo‘yicha AI aniq tushunmasa operator guruhiga yuborish. Avval telefon so‘ra; telefon berilsa phone bilan chaqir, telefon berishdan bosh tortsa customer_refused_phone=true qilib raqamsiz chaqir. Media linklari suhbat metadata sidan olinadi, argumentga media URL yozma.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {"type": "string", "description": "Operator uchun aniq xulosa. Mijoz nimani so‘radi, rasm/reelsda nimani bilmoqchi, qanday javob kerak."},
-                    "phone": {"type": ["string", "null"], "description": "Mijoz bergan telefon raqami. Bermasa null."},
-                    "customer_refused_phone": {"type": "boolean", "description": "Mijoz telefon berishni rad etsa true."},
-                },
-                "required": ["summary", "phone", "customer_refused_phone"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-        {
-            "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Telefon so'rash yoki handoff qilishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun), telefon so'rab handoff_media_to_operator chaqiriladi.",
+            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va mijoz business.operator_telegram dagi Telegram akkauntga yo'naltiriladi. Telefon so'ralmaydi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2515,9 +2203,9 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                 "detail": "catalog_already_sent",
                 "instruction_uz": (
                     "Butun katalog bu suhbatda allaqachon yuborilgan, qayta yuborma. "
-                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa telefon raqamini so'ra "
-                    "va bergach handoff_media_to_operator chaqir. Raqam berishni xohlamasa "
-                    "bahslashma, operatorlar chat orqali ko'rib chiqishini qisqa ayt."
+                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa business.operator_telegram "
+                    "dagi Telegram akkauntimizga yozishini ayt, operatorlar u yerda aniq javob berishadi. "
+                    "Telefon raqami so'rama."
                 ),
             }
         return send_catalog_album(conversation, items, whole_catalog=not catalog_ids)
@@ -2545,8 +2233,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                     "catalog_id": item.id,
                     "instruction_uz": (
                         f"{item.name} rasmi ham, butun katalog ham bu suhbatda allaqachon "
-                        "yuborilgan. Hech narsa yuborma. Mijozdan telefon raqamini so'ra va "
-                        "bergach handoff_media_to_operator chaqir."
+                        "yuborilgan. Hech narsa yuborma. Mijozga business.operator_telegram dagi "
+                        "Telegram akkauntimizga yozishini ayt."
                     ),
                 }
             album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
@@ -2564,13 +2252,6 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         return send_catalog_item_image(conversation, item)
     if name == "send_post_image":
         return send_social_post_image(conversation, arguments.get("social_post_id"), tool_results=tool_results)
-    if name == "handoff_media_to_operator":
-        return handoff_media_to_operator(
-            conversation,
-            summary=arguments.get("summary") or "",
-            phone=arguments.get("phone") or "",
-            customer_refused_phone=bool(arguments.get("customer_refused_phone")),
-        )
     if name == "match_ai_catalog_by_media":
         return match_ai_catalog_by_media(
             conversation,
@@ -2810,6 +2491,8 @@ def ai_reply(conversation):
             "shop_location_link": business_settings.shop_location_link,
             "shop_phone": business_settings.shop_phone,
             "operator_phone": business_settings.operator_phone or business_settings.shop_phone,
+            # AI javob berolmaydigan savol yoki aniqlanmagan gul shu akkauntga yo'naltiriladi.
+            "operator_telegram": business_settings.operator_telegram,
             "operator_hours_uz": business_settings.operator_hours,
             "operator_hours_ru": business_settings.operator_hours_ru,
         },

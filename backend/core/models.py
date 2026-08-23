@@ -992,6 +992,9 @@ class BusinessSettings(TimeStampedModel):
     operator_phone = models.CharField(max_length=64, blank=True, default="+998 88 009 33 30")
     operator_hours = models.CharField(max_length=64, blank=True, default="08:00 dan 00:00 gacha")
     operator_hours_ru = models.CharField(max_length=64, blank=True, default="с 08:00 до 00:00")
+    # Mijoz AI javob berolmaydigan savol bersa yoki gulini aniqlab bo'lmasa shu
+    # akkauntga yo'naltiriladi. Telefon raqami so'ralmaydi.
+    operator_telegram = models.CharField(max_length=120, blank=True, default="@euroflowerspremium")
     delivery_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("50000"))
     delivery_area_uz = models.CharField(max_length=255, blank=True, default="Toshkent shahri ichida")
     delivery_area_ru = models.CharField(max_length=255, blank=True, default="в пределах города Ташкента")
