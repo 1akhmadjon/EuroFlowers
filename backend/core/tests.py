@@ -8130,3 +8130,38 @@ class CatalogNeverLooksEmptyTests(TestCase):
         result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": "box", "min_price": None, "max_price": None}, self.conversation)
         self.assertEqual(result["catalog"], [])
         self.assertNotIn("query_matched", result)
+
+
+class BudgetAndContactTimingPromptTests(TestCase):
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0135_ai_prompt_budget_and_contact_timing")
+        self.earlier = importlib.import_module("core.migrations.0134_ai_prompt_natural_sales")
+
+    def test_a_budget_that_exists_never_mentions_the_cheapest_item(self):
+        """«1 millionlik savatingiz bormi» ga «eng arzoni 199 000» deb javob berilmasin."""
+        self.assertIn("cheapest_price ni MUTLAQO tilga olma", self.migration.BUDGET_NEW)
+        self.assertIn("FAQAT SHU HOLATDA", self.migration.BUDGET_NEW)
+
+    def test_a_product_type_in_the_budget_question_is_passed_through(self):
+        self.assertIn("arrangement_type basket", self.migration.BUDGET_NEW)
+
+    def test_contact_is_asked_only_after_the_customer_picks_something(self):
+        block = self.migration.CONTACT_TIMING
+        self.assertIn("Mijoz hali savol berayotgan bo'lsa SO'RAMA", block)
+        self.assertIn("chegirma so'radi", block)
+
+    def test_it_rewrites_the_block_the_previous_migration_installed(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = ""
+        row.save()
+        self.earlier.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertIn(self.migration.BUDGET_OLD, row.system_prompt)
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertNotIn(self.migration.BUDGET_OLD, row.system_prompt)
+        self.assertIn(self.migration.BUDGET_NEW, row.system_prompt)
+        self.assertEqual(row.system_prompt.count("ISM VA TELEFONNI QACHON SO'RAYSAN"), 1)
+        self.assertLess(row.system_prompt.index("ISM VA TELEFONNI QACHON SO'RAYSAN"), row.system_prompt.index("00A. BUDJET AYTILSA"))
