@@ -8096,8 +8096,9 @@ class NaturalSalesPromptTests(TestCase):
         settings_row = AISettings.objects.get_or_create(pk=1)[0]
         settings_row.system_prompt = "boshlanish\n" + self.migration.CONTACT_BLOCK_OLD + "\noxiri"
         settings_row.save()
+        from django.apps import apps as installed_apps
         for _ in range(2):
-            self.migration.apply_prompt(None, None)
+            self.migration.apply_prompt(installed_apps, None)
         settings_row.refresh_from_db()
         self.assertEqual(settings_row.system_prompt.count("00. QANDAY GAPIRASAN"), 1)
         self.assertIn(self.migration.CONTACT_BLOCK_NEW, settings_row.system_prompt)
