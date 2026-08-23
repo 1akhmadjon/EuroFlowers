@@ -73,9 +73,15 @@ MEDIA_MATCH_GROUP_INSTRUCTION = (
     "kerakligini so'ra. Bittasini tanlab narx aytma."
 )
 MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
-    "Aynan mos mahsulot topilmadi. Katalogdan hech qanday rasm YUBORMA va taxmin qilib "
-    "mahsulot nomi yoki narxini aytma. Mijozdan telefon raqamini so'ra va "
-    "handoff_media_to_operator bilan operatorga uzat."
+    "Aynan mos mahsulot topilmadi. Bitta ham katalog rasmini alohida YUBORMA va taxmin "
+    "qilib mahsulot nomi yoki narxini aytma. Buning o'rniga send_catalog_album ni "
+    "catalog_ids BO'SH massiv bilan chaqirib butun katalogni yubor va shu mazmunda yoz: "
+    "hozirda bizda bor gullar shular, shulardan tanlasangiz ham bo'ladi; yoki o'zingiz "
+    "yuborganingiz kerak bo'lsa raqamingizni yuboring, operatorlarimiz siz yuborgan gul "
+    "haqida batafsil ma'lumot berishadi. Mijoz ism va raqamini bergach client_lead_create "
+    "ni topic=photo_request bilan chaqir va photo_urls ga mijoz yuborgan havolani yoz — "
+    "shunda lead operatorlar guruhiga o'sha rasm/reel bilan birga tushadi. Raqam berishdan "
+    "bosh tortsa handoff_media_to_operator ni customer_refused_phone=true bilan chaqir."
 )
 MEDIA_MATCH_LINK_GROUP_INSTRUCTION = (
     "Mijoz yuborgan post/reelga bir nechta katalog mahsuloti qo'yilgan, qaysi birini "
@@ -95,8 +101,9 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "katalogni yubor. Keyin shu mazmunda yoz: hozirda bizda bor gullar shular, "
     "shulardan tanlasangiz ham bo'ladi; yoki siz yuborgan gul ko'proq qiziq bo'lsa "
     "telefon raqamingizni yuboring, operatorlarimiz aloqaga chiqib aniq narxini "
-    "aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Mijoz raqamini bergach "
-    "handoff_media_to_operator chaqir."
+    "aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Mijoz ism va raqamini bergach "
+    "client_lead_create ni topic=photo_request va photo_urls bilan chaqir, raqam bermasa "
+    "handoff_media_to_operator ni customer_refused_phone=true bilan chaqir."
 )
 MEDIA_MATCH_CLOSE_INSTRUCTION = (
     "Rasmdagi gul katalogimizdagi bir nechta mahsulotga juda yaqin, lekin qaysi biri "
@@ -129,7 +136,7 @@ When the flower under discussion came from one of our own stories, "send me the 
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" (with show_whole_catalog) means the exact flower is NOT in the catalog and nothing on the shelf is close enough to offer as a substitute: call send_catalog_album with an empty catalog_ids to send the whole catalog, say these are the flowers available and they are welcome to pick one, and offer to have an operator price the flower they actually sent if they leave a number; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
-allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send any catalog image, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer. near_matches is internal information for the operator only. Ask for the phone number and call handoff_media_to_operator.
+allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and offer to have an operator give them exact details about the flower they sent if they leave a name and number. When they leave it, call client_lead_create with topic "photo_request" and put the media link in photo_urls, so the lead reaches the operators' group together with their photo or reel. If they refuse the number, call handoff_media_to_operator with customer_refused_phone true.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -311,18 +318,34 @@ def latin_to_cyrillic(text):
 
 
 RU_MARKERS = re.compile(r"\b(цветы|цветов|какие|сколько|стоит|есть|адрес|где|здравствуйте|спасибо|доставка|нужен|нужна|хочу|работаете|дорого|букет из|привет|можно|пожалуйста|заказ|цена|день|это|вы|мне|для)\b", re.IGNORECASE)
-UZ_CYRIL_MARKERS = re.compile(r"[ўқғҳЎҚҒҲ]|\b(гул|гулла|гуллар|бор|борми|бормиди|керак|кере|канака|қанақа|нечпул|неч|манзил|каерда|қаерда|ассалом|ассалому|раҳмат|рахмат|сават|яса|ясаймиз|ясанг|олиб|беринг|сизда|бизда|ишлайсизми|нархи|дона|сўм|киммат|қиммат|арзон|яхши|ҳам|учун|билан)\b", re.IGNORECASE)
+UZ_CYRIL_LETTERS = re.compile(r"[ўқғҳЎҚҒҲ]")
+# O'zbekcha qo'shimchalar. Rus tilida bunday tugaydigan so'z deyarli yo'q, shuning
+# uchun bitta so'zdan iborat xabarda ham tilni aniqlashga yetadi: "бермокчиман",
+# "келади", "яхшимисиз", "билмайман".
+UZ_CYRIL_SUFFIXES = re.compile(r"мокчи|моқчи|япти|вотти|вотки|моқда|мисиз|сизми|сангиз|ганман|гандим|[а-я]йман\b|[а-я]аман\b|лади\b|майди\b", re.IGNORECASE)
+UZ_CYRIL_MARKERS = re.compile(r"\b(гул|гулла|гуллар|бор|борми|бормиди|булади|бўлади|керак|кере|канака|қанақа|нечпул|неч|манзил|каерда|қаерда|ассалом|ассалому|алекум|алайкум|раҳмат|рахмат|сават|яса|ясаймиз|ясанг|ясаб|олиб|беринг|берин|бервор|сизда|бизда|сиз|биз|ишлайсизми|нархи|дона|сўм|сум|киммат|қиммат|арзон|яхши|ҳам|хам|учун|билан|мумкинми|деган|қилиб|килиб|хохлайман|хохласангиз|менга|сизга|уйга|эди|экан|бўлса|булса|нима|нечта|качон|қачон|канча|қанча|кани|қани|нечада|таер|тайёр|обкетаман|олсам|бўлса|бўлсин|булсин)\b", re.IGNORECASE)
 
 
 def detect_text_script(text):
+    """Matn lotinmi, o'zbek kirillmi yoki ruschami.
+
+    Ikkala til belgisi bir matnda uchrashi oddiy hol: o'zbek mijoz "доставка",
+    "адрес", "заказ" deb yozadi, lekin rus mijoz "борми", "каерда", "нечпул"
+    demaydi. Shuning uchun rus so'zi topilgani o'zi yetarli emas — o'zbekcha
+    belgilar bilan solishtiriladi va teng chiqsa o'zbekcha ustun turadi.
+    """
     value = text or ""
     if not re.search(r"[А-Яа-яЁёЎўҚқҒғҲҳ]", value):
         return "latin"
-    # Rus belgilari aniqroq. Avval ularni tekshiramiz, chunki "букет" kabi so'zlar ikkala tilda bor.
-    if RU_MARKERS.search(value):
-        return "ru"
-    if UZ_CYRIL_MARKERS.search(value):
+    if UZ_CYRIL_LETTERS.search(value):
+        # ў, қ, ғ, ҳ harflari rus alifbosida yo'q. Bittasi ham yetarli.
         return "uz_cyril"
+    uz = len(UZ_CYRIL_MARKERS.findall(value)) + len(UZ_CYRIL_SUFFIXES.findall(value))
+    ru = len(RU_MARKERS.findall(value))
+    if uz and uz >= ru:
+        return "uz_cyril"
+    if ru:
+        return "ru"
     return "uz_cyril"
 
 
@@ -508,13 +531,50 @@ def ai_catalog_ranked_matches(queryset, query):
     return queryset.filter(id__in=[item_id for score, item_id in ranked if score == best])
 
 
-def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=None):
+def catalog_price_bounds(min_price, max_price):
+    """Mijoz aytgan budjetni Decimal chegaraga aylantiradi."""
+    bounds = []
+    for value in (min_price, max_price):
+        try:
+            bounds.append(Decimal(str(value)) if value not in (None, "") else None)
+        except (TypeError, ValueError, ArithmeticError):
+            bounds.append(None)
+    return bounds[0], bounds[1]
+
+
+def catalog_budget_summary(queryset, low, high):
+    """Budjetga mos mahsulot topilmasa, eng yaqinlarini ko'rsatish uchun ma'lumot.
+
+    Mijoz "250 mingga bormi" deb so'raganda katalogda eng arzoni 400 000 bo'lsa,
+    "yo'q" deb qo'yish savdoni yopadi. Operator bunday paytda eng arzonini aytadi.
+    """
+    prices = sorted(queryset.values_list("price", flat=True))
+    if not prices:
+        return {}
+    return {
+        "asked_min": str(low) if low is not None else "",
+        "asked_max": str(high) if high is not None else "",
+        "cheapest_price": str(prices[0]),
+        "most_expensive_price": str(prices[-1]),
+    }
+
+
+def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=None, min_price=None, max_price=None):
     query = (query or "").strip()
     queryset = available_ai_catalog_queryset().order_by("-created_at", "-id")
     if arrangement_type in ["bouquet", "basket", "box", "other"]:
         queryset = queryset.filter(arrangement_type=arrangement_type)
     if made_from_batch_id:
         queryset = queryset.none()
+    low, high = catalog_price_bounds(min_price, max_price)
+    if low is not None or high is not None:
+        priced = queryset
+        if low is not None:
+            priced = priced.filter(price__gte=low)
+        if high is not None:
+            priced = priced.filter(price__lte=high)
+        # Budjet aytilgan bo'lsa arzonidan boshlab ko'rsatamiz — mijoz shu tartibda o'ylaydi.
+        queryset = (priced if priced.exists() else queryset).order_by("price", "id")
     generic_query_terms = {"vitrina", "katalog", "catalog", "tayyor", "mahsulot", "gulla", "buketlar", "savatlar"}
     normalized_query = compact_match_text(query)
     is_generic_query = bool(normalized_query) and any(term in normalized_query for term in generic_query_terms)
@@ -541,6 +601,23 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
             "composition": [],
         })
     return rows
+
+
+def ai_catalog_result(query="", limit=24, arrangement_type="", min_price=None, max_price=None):
+    """get_catalog tool natijasi. Budjet so'ralgan bo'lsa chegara ma'lumoti ham keladi."""
+    rows = ai_catalog_rows(query, limit=limit, arrangement_type=arrangement_type, min_price=min_price, max_price=max_price)
+    low, high = catalog_price_bounds(min_price, max_price)
+    result = {"catalog": rows}
+    if low is None and high is None:
+        return result
+    within = [row for row in rows if (low is None or Decimal(row["price"]) >= low) and (high is None or Decimal(row["price"]) <= high)]
+    result["budget"] = dict(
+        catalog_budget_summary(available_ai_catalog_queryset(), low, high),
+        matched=len(within),
+        # Budjetga tushgani yo'q bo'lsa qatorlar eng yaqinlari — "aynan shu narxda bor" dema.
+        exact_match=bool(within),
+    )
+    return result
 
 
 def ai_stock_rows(query="", limit=24):
@@ -985,6 +1062,137 @@ def operator_handoff_rich_message(conversation, summary, phone, attachments, med
             html_parts.append(f'<li><a href="{safe_url}">{safe_url}</a></li>')
         html_parts.append("</ul>")
     return {"html": "\n".join(html_parts), "media": media_items}
+
+
+def lead_fulfillment_line(lead):
+    if lead.fulfillment == "delivery":
+        address = lead.delivery_address or "manzil aytilmagan"
+        return f"🚚 Yetkazib berish — {address}"
+    if lead.fulfillment == "pickup":
+        return "🏬 O'zi kelib olib ketadi"
+    return ""
+
+
+def lead_when_line(lead):
+    parts = [value for value in [lead.desired_date.isoformat() if lead.desired_date else "", lead.desired_time] if value]
+    return f"📅 {' · '.join(parts)}" if parts else ""
+
+
+def lead_catalog_lines(lead):
+    """Mijoz tanlagan AI katalog mahsulotlari, narxi va operator izohi bilan."""
+    rows = []
+    for row in (lead.details or {}).get("catalog_items") or []:
+        item = AICatalogItem.objects.filter(id=row.get("ai_catalog_item")).first()
+        name = row.get("catalog_name") or (item.name if item else "")
+        if not name:
+            continue
+        price = row.get("price") or (str(item.price) if item else "")
+        quantity = int(row.get("quantity") or 1)
+        title = f"{name} × {quantity}" if quantity > 1 else name
+        rows.append({
+            "text": f"{title} — {money_uz(price)} so'm" if price else title,
+            "note": (item.note or "")[:300] if item else "",
+            "image_url": item.image_url if item and item.image_url else "",
+        })
+    return rows
+
+
+def lead_operator_media(lead, conversation):
+    """Operator ko'radigan rasmlar: tanlangan katalog rasmi va mijoz yuborgan media."""
+    urls = []
+    for row in lead_catalog_lines(lead):
+        if row["image_url"] and row["image_url"] not in urls:
+            urls.append(row["image_url"])
+    for row in customer_attachment_rows(conversation.messages.order_by("created_at", "id")):
+        url = row.get("url")
+        if url and url not in urls and row.get("kind") != "ad":
+            urls.append(url)
+    return [{"kind": "photo", "url": url} for url in urls[:MAX_OPERATOR_HANDOFF_MEDIA]]
+
+
+def operator_lead_rich_message(lead, conversation):
+    """Telegram operatorlar guruhiga ketadigan «Yangi lead» xabari."""
+    customer = conversation.customer
+    platform = "Telegram" if customer.instagram_user_id.startswith("telegram:") else "Instagram"
+    username = f" · @{customer.instagram_username}" if customer.instagram_username else ""
+    catalog_rows = lead_catalog_lines(lead)
+    details = lead.details or {}
+    media_items = []
+    blocks = []
+    for index, row in enumerate(lead_operator_media(lead, conversation), start=1):
+        media_id = f"lead_{index}"
+        blocks.append(f'<img src="tg://photo?id={media_id}"/>')
+        media_items.append({"id": media_id, "media": {"type": "photo", "media": row["url"]}})
+    html = []
+    if blocks:
+        html.append("<tg-slideshow>")
+        html.extend(blocks)
+        html.append("</tg-slideshow>")
+    html.append(f"<h3>🌸 Yangi lead #{lead.id}</h3>")
+    html.append(f"<p>👤 {escape(customer.name or 'Ism yozilmagan')}<br/>📞 {escape(customer.phone or 'raqam berilmagan')}<br/>📍 {escape(platform + username)}</p>")
+    if catalog_rows:
+        html.append("<p>🛍 Tanlagan mahsuloti</p><ul>")
+        for row in catalog_rows:
+            line = escape(row["text"])
+            if row["note"]:
+                line += f"<br/><i>{escape(row['note'])}</i>"
+            html.append(f"<li>{line}</li>")
+        html.append("</ul>")
+    if details.get("flowers_text") or details.get("size_text"):
+        wanted = " · ".join(value for value in [details.get("flowers_text"), details.get("size_text")] if value)
+        html.append(f"<p>🌷 So'ragan guli<br/>{escape(wanted)}</p>")
+    extra = [line for line in [lead_fulfillment_line(lead), lead_when_line(lead)] if line]
+    if lead.estimated_price is not None:
+        extra.append(f"💰 Taxminan {money_uz(lead.estimated_price)} so'm")
+    if extra:
+        html.append("<p>" + "<br/>".join(escape(line) for line in extra) + "</p>")
+    if lead.request_uz:
+        html.append(f"<p>🧠 So'rov<br/>{escape(lead.request_uz[:1200])}</p>")
+    links = [row["url"] for row in lead_operator_media(lead, conversation)]
+    if links:
+        html.append("<p>🔗 Media havolalar</p><ul>")
+        for url in links:
+            html.append(f'<li><a href="{escape(url)}">{escape(url)}</a></li>')
+        html.append("</ul>")
+    return {"html": "\n".join(html), "media": media_items}
+
+
+def operator_lead_plain_message(lead, conversation):
+    """Rich xabar o'tmasa yuboriladigan oddiy matn."""
+    customer = conversation.customer
+    lines = [f"🌸 Yangi lead #{lead.id}", "", f"👤 {customer.name or 'Ism yozilmagan'}", f"📞 {customer.phone or 'raqam berilmagan'}"]
+    for row in lead_catalog_lines(lead):
+        lines.append(f"🛍 {row['text']}")
+    for line in [lead_fulfillment_line(lead), lead_when_line(lead)]:
+        if line:
+            lines.append(line)
+    if lead.request_uz:
+        lines.extend(["", lead.request_uz[:1200]])
+    return "\n".join(lines)
+
+
+def notify_operators_about_lead(lead, conversation):
+    """Yangi leadni operatorlar Telegram guruhiga yuboradi.
+
+    Bu AI javobiga tegmaydi — lead bazaga yozilgach ishlaydigan yetkazish qadami,
+    xuddi ichki Notification kabi. Xatolik bo'lsa lead baribir saqlanib qoladi.
+    """
+    token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
+    chat_id = settings.AI_OPERATOR_HANDOFF_GROUP_ID
+    if not token or not chat_id:
+        return {"ok": False, "detail": "operator_group_not_configured"}
+    reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
+    try:
+        sent = telegram_send_rich_message_with(token, chat_id, operator_lead_rich_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+    except Exception as error:
+        print(f"AI_LEAD_RICH_NOTIFY_FAILED lead={lead.id} error={error}", flush=True)
+        try:
+            sent = telegram_send_with(token, chat_id, operator_lead_plain_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+        except Exception as fallback_error:
+            print(f"AI_LEAD_NOTIFY_FAILED lead={lead.id} error={fallback_error}", flush=True)
+            return {"ok": False, "detail": "telegram_send_failed"}
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"operator_lead_notified": {"lead_id": lead.id, "telegram_result": sent}})
+    return {"ok": True, "lead_id": lead.id}
 
 
 def handoff_media_to_operator(conversation, summary="", phone="", customer_refused_phone=False):
@@ -1578,6 +1786,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "allow_send": False,
             "allow_group": False,
             "detail": "no_similar_catalog_item",
+            "show_whole_catalog": True,
             "source": attachment,
             "source_description": source.get("summary", ""),
             "region_description": source.get("region_description", ""),
@@ -1704,6 +1913,7 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "allow_send": False,
             "allow_group": False,
             "detail": "not_confident",
+            "show_whole_catalog": True,
             "matches": [],
             "group_matches": [],
             "near_matches": near[:3],
@@ -1920,14 +2130,16 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi.",
+            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi. Mijoz budjet aytsa (\"250 mingga bormi\", \"200 mingdan 500 minggacha\", \"1 millionlik\", \"arzonrog'i\") min_price va max_price ber. Natijadagi budget.exact_match false bo'lsa o'sha narxda mahsulot yo'q, qatorlar eng yaqinlari — budget.cheapest_price eng arzon mahsulot narxi.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "box", None]},
+                    "min_price": {"type": ["number", "null"], "description": "Budjetning pastki chegarasi so'mda. Aytilmasa null."},
+                    "max_price": {"type": ["number", "null"], "description": "Budjetning yuqori chegarasi so'mda. Mijoz bitta summa aytsa (\"250 mingga\") shu yerga yoz."},
                 },
-                "required": ["query", "arrangement_type"],
+                "required": ["query", "arrangement_type", "min_price", "max_price"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -2223,7 +2435,13 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         limit = max(1, min(int(arguments.get("limit") or 5), 20))
         return {"leads": recent_customer_orders(customer)[:limit]}
     if name == "get_catalog":
-        return {"catalog": ai_catalog_rows(arguments.get("query") or "", limit=80, arrangement_type=arguments.get("arrangement_type") or "")}
+        return ai_catalog_result(
+            arguments.get("query") or "",
+            limit=80,
+            arrangement_type=arguments.get("arrangement_type") or "",
+            min_price=arguments.get("min_price"),
+            max_price=arguments.get("max_price"),
+        )
     if name == "send_catalog_album":
         catalog_ids = [int(value) for value in (arguments.get("catalog_ids") or []) if str(value).isdigit() or isinstance(value, int)]
         blocked = media_match_send_block(tool_results, name, catalog_ids)
@@ -2408,7 +2626,10 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
     Notification.objects.create(notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     save_conversation_ai_summary(conversation, lead)
-    return {"ok": True, "lead_id": lead.id}
+    # Operatorlar leadni CRM ni ochib emas, Telegram guruhida ko'radi. Yuborilmasa
+    # buyurtma bazada yotib qoladi va hech kim mijozga qo'ng'iroq qilmaydi.
+    notified = notify_operators_about_lead(lead, conversation)
+    return {"ok": True, "lead_id": lead.id, "operators_notified": bool(notified.get("ok"))}
 
 
 def ai_response_schema():

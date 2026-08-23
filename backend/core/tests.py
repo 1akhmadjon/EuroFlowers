@@ -7965,3 +7965,140 @@ class VisionFingerprintTests(TestCase):
         text = openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"][0]["text"]
         self.assertIn("Katalina Gulidan Savat", text)
         self.assertIn("pionavidniy katalina", text)
+
+
+class NaturalSalesFlowTests(TestCase):
+    """Real operator suhbatlaridan chiqqan holatlar: budjet, lead, til."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_user_id="ig-natural", instagram_username="mijoz", name="Ahmad", phone="+998901112233")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.cheap = AICatalogItem.objects.create(name="Buket Alfalob Gulidan", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/cheap.jpg", note="25 tacha guli bor, boyi 40 sm")
+        self.middle = AICatalogItem.objects.create(name="Jumila Gulidan Kompazitsia", arrangement_type="bouquet", price=400000, quantity=1, image_url="https://cdn.example.com/mid.jpg")
+        self.pricey = AICatalogItem.objects.create(name="London Gulidan Savat", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/big.jpg")
+
+    def test_budget_query_returns_only_what_fits_cheapest_first(self):
+        """«200 mingdan 500 minggacha boganlarini tashab bera olasizmi» — real savol."""
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None, "min_price": 200000, "max_price": 500000}, self.conversation)
+        self.assertEqual([row["name_uz"] for row in result["catalog"]], ["Jumila Gulidan Kompazitsia"])
+        self.assertTrue(result["budget"]["exact_match"])
+        self.assertEqual(result["budget"]["cheapest_price"], "199000.00")
+
+    def test_budget_below_everything_still_shows_the_cheapest_and_says_so(self):
+        """«250 mingga bomi» — bunday narx yo'q, lekin quruq «yo'q» deyish savdoni yopadi."""
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None, "min_price": None, "max_price": 150000}, self.conversation)
+        self.assertFalse(result["budget"]["exact_match"])
+        self.assertEqual(result["budget"]["matched"], 0)
+        self.assertEqual(result["budget"]["cheapest_price"], "199000.00")
+        self.assertEqual(result["catalog"][0]["name_uz"], "Buket Alfalob Gulidan")
+
+    def test_catalog_without_a_budget_keeps_the_newest_first_ordering(self):
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None, "min_price": None, "max_price": None}, self.conversation)
+        self.assertNotIn("budget", result)
+        self.assertEqual(result["catalog"][0]["name_uz"], "London Gulidan Savat")
+
+    def _lead_arguments(self, **overrides):
+        arguments = {
+            "customer_name": "Ahmad", "phone": "+998901112233", "request_text": "Katalogdan London savatini tanladi",
+            "arrangement_type": "catalog", "estimated_price": 1000000, "florist_fee": None,
+            "fulfillment": "delivery", "delivery_address": "Chilonzor 5", "desired_date": "2026-08-25", "desired_time": "15:00",
+            "catalog_items": [{"catalog_name": "London Gulidan Savat", "quantity": 1}], "note": "",
+            "topic": "catalog_order", "flowers_text": None, "size_text": None, "photo_urls": [],
+        }
+        arguments.update(overrides)
+        return arguments
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_new_lead_reaches_the_operators_telegram_group(self):
+        """Lead bazada yotib qolmasin — operator uni Telegramda ko'radi."""
+        from unittest.mock import patch
+        with patch("core.services.telegram_send_rich_message_with", return_value={"ok": True}) as send:
+            result = execute_ai_tool("client_lead_create", self._lead_arguments(), self.conversation)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["operators_notified"])
+        send.assert_called_once()
+        html = send.call_args.args[2]["html"]
+        self.assertIn("Yangi lead", html)
+        self.assertIn("London Gulidan Savat", html)
+        self.assertIn("1 000 000", html)
+        self.assertIn("Chilonzor 5", html)
+        self.assertIn("+998901112233", html)
+        self.assertTrue(send.call_args.args[2]["media"])
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_the_photo_the_customer_sent_goes_to_the_operators_with_the_lead(self):
+        """Rasm bo'yicha so'rovda operator mijoz yuborgan rasmni ko'rishi shart."""
+        from unittest.mock import patch
+        photo = "https://cdn.example.com/customer-photo.jpg"
+        self.conversation.messages.create(sender="customer", text="shu nechpul", metadata={"attachments": [{"kind": "photo", "url": photo}]})
+        arguments = self._lead_arguments(topic="photo_request", catalog_items=[], photo_urls=[photo], request_text="Mijoz rasm yubordi, aynan shu gul narxini so'rayapti")
+        with patch("core.services.telegram_send_rich_message_with", return_value={"ok": True}) as send:
+            execute_ai_tool("client_lead_create", arguments, self.conversation)
+        payload = send.call_args.args[2]
+        self.assertIn(photo, payload["html"])
+        self.assertEqual([row["media"]["media"] for row in payload["media"]], [photo])
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_a_failing_telegram_send_never_loses_the_lead(self):
+        from unittest.mock import patch
+        with patch("core.services.telegram_send_rich_message_with", side_effect=RuntimeError("telegram down")), patch("core.services.telegram_send_with", side_effect=RuntimeError("still down")):
+            result = execute_ai_tool("client_lead_create", self._lead_arguments(), self.conversation)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["operators_notified"])
+        self.assertEqual(Lead.objects.filter(customer=self.customer).count(), 1)
+
+    def test_uzbek_cyrillic_is_not_mistaken_for_russian(self):
+        """«Доставка», «адрес», «заказ» — o'zbek mijozlar ham shunday yozadi."""
+        from .services import detect_text_script
+        for text in ["Доставка Канака булади", "Адрес каерда", "Заказ бермокчиман", "Цена канча", "Ассаламу алекум яхшимисиз"]:
+            self.assertEqual(detect_text_script(text), "uz_cyril", text)
+
+    def test_real_russian_is_still_detected(self):
+        from .services import detect_text_script
+        for text in ["Здравствуйте, какие цветы есть", "Сколько стоит букет", "Можно заказать букет на день рождения", "Добрый день, мне нужен букет для мамы"]:
+            self.assertEqual(detect_text_script(text), "ru", text)
+
+    def test_an_unmatched_photo_is_answered_with_the_catalog_not_a_dead_end(self):
+        """Topilmasa ham mijoz quruq ketmasin: butun katalog va aniq taklif."""
+        from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION
+        self.assertIn("send_catalog_album", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        self.assertIn("BO'SH massiv", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        self.assertIn("client_lead_create", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+
+
+class NaturalSalesPromptTests(TestCase):
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0134_ai_prompt_natural_sales")
+
+    def test_the_voice_block_wins_over_the_rule_sections(self):
+        prompt = self.migration.TOP_BLOCK
+        self.assertIn("HAMMA QOIDADAN USTUN", prompt)
+        self.assertIn("BLOKLARNI USTMA-UST QO'YMA", prompt)
+        self.assertIn("FAQAT SO'RALGANIGA JAVOB BER", prompt)
+
+    def test_the_budget_block_explains_both_outcomes(self):
+        prompt = self.migration.TOP_BLOCK
+        self.assertIn("min_price", prompt)
+        self.assertIn("max_price", prompt)
+        self.assertIn("exact_match false", prompt)
+        self.assertIn("cheapest_price", prompt)
+
+    def test_the_note_is_retold_not_pasted(self):
+        prompt = self.migration.TOP_BLOCK
+        self.assertIn("note_uz", prompt)
+        self.assertIn("o'z so'zing bilan", prompt)
+
+    def test_the_contact_block_no_longer_fires_on_a_plain_contact_ask(self):
+        self.assertIn("FAQAT shu ikki holatda", self.migration.CONTACT_BLOCK_NEW)
+        self.assertNotIn("BIRINCHI marta ism va telefon so'raganingda", self.migration.CONTACT_BLOCK_NEW)
+
+    def test_applying_the_migration_is_idempotent(self):
+        settings_row = AISettings.objects.get_or_create(pk=1)[0]
+        settings_row.system_prompt = "boshlanish\n" + self.migration.CONTACT_BLOCK_OLD + "\noxiri"
+        settings_row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(None, None)
+        settings_row.refresh_from_db()
+        self.assertEqual(settings_row.system_prompt.count("00. QANDAY GAPIRASAN"), 1)
+        self.assertIn(self.migration.CONTACT_BLOCK_NEW, settings_row.system_prompt)
+        self.assertNotIn("sen BIRINCHI marta ism va telefon so'raganingda", settings_row.system_prompt)
