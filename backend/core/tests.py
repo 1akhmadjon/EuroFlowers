@@ -835,7 +835,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertIn(AISettings.objects.get(pk=1).system_prompt, kwargs["instructions"])
@@ -866,7 +866,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "handoff_media_to_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
@@ -7345,7 +7345,7 @@ class OperatorHandoffTests(TestCase):
                 third = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
         self.assertFalse(third["ok"])
         self.assertEqual(third["detail"], "catalog_image_already_sent")
-        self.assertIn("handoff_media_to_operator", third["instruction_uz"])
+        self.assertIn("operator_telegram", third["instruction_uz"])
         album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7375,7 +7375,7 @@ class OperatorHandoffTests(TestCase):
             second = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
         self.assertFalse(second["ok"])
         self.assertEqual(second["detail"], "catalog_already_sent")
-        self.assertIn("handoff_media_to_operator", second["instruction_uz"])
+        self.assertIn("operator_telegram", second["instruction_uz"])
         album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7400,7 +7400,7 @@ class OperatorHandoffTests(TestCase):
         # Butun katalog ham, bu rasm ham ko'rilgan — endi operatorga uzatiladi.
         self.assertFalse(result["ok"])
         self.assertEqual(result["detail"], "catalog_image_already_sent")
-        self.assertIn("handoff_media_to_operator", result["instruction_uz"])
+        self.assertIn("operator_telegram", result["instruction_uz"])
         send_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7426,7 +7426,7 @@ class OperatorHandoffTests(TestCase):
         self.assertFalse(result["allow_send"])
         self.assertFalse(result["allow_group"])
         self.assertIn(result["detail"], {"not_confident", "no_similar_catalog_item"})
-        self.assertIn("handoff_media_to_operator", result["instruction_uz"])
+        self.assertIn("operator_telegram", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_a_merely_similar_item_is_not_put_in_the_group(self):
@@ -7523,7 +7523,7 @@ class OperatorHandoffTests(TestCase):
             second = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "chizganim qancha"}, conversation)
         self.assertEqual(first["detail"], "ask_for_crop")
         self.assertEqual(second["detail"], "not_confident")
-        self.assertIn("handoff_media_to_operator", second["instruction_uz"])
+        self.assertIn("operator_telegram", second["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_a_single_product_photo_never_gets_a_crop_request(self):
@@ -7813,12 +7813,13 @@ class NoStockPromptTests(TestCase):
         self.assertIn("customer_attachments", section)
         self.assertIn("KO'RMAYSAN", section)
 
-    def test_prompt_routes_unknown_topics_to_an_operator(self):
+    def test_prompt_routes_unknown_topics_to_the_shop_telegram(self):
+        """Javob berolmagan savol lead emas — mijoz Telegram akkauntga yo'naltiriladi."""
         section = self.prompt.split("8B. JAVOB BEROLMAGAN SAVOL", 1)[1].split("9. DO'KON MA'LUMOTLARI", 1)[0]
-        self.assertIn("2-HOLAT. ISM VA TELEFON ALLAQACHON BOR", section)
-        self.assertIn("operatorimiz siz bilan bog'lanib, aniq ma'lumot bersinmi", section)
-        self.assertIn("Roziligisiz lead yaratma", section)
-        self.assertIn("client_lead_create", section)
+        self.assertIn("TELEFON RAQAMI SO'RALMAYDI VA LEAD YARATILMAYDI", section)
+        self.assertIn("business.operator_telegram", section)
+        self.assertIn("client_lead_create CHAQIRILMAYDI", section)
+        self.assertIn("Lead faqat buyurtma uchun ochiladi", section)
 
     def test_prompt_lists_every_lead_topic(self):
         section = self.prompt.split("8. BUYURTMA", 1)[1].split("8A. OPERATORGA ULASH", 1)[0]
@@ -8062,11 +8063,13 @@ class NaturalSalesFlowTests(TestCase):
             self.assertEqual(detect_text_script(text), "ru", text)
 
     def test_an_unmatched_photo_is_answered_with_the_catalog_not_a_dead_end(self):
-        """Topilmasa ham mijoz quruq ketmasin: butun katalog va aniq taklif."""
+        """Topilmasa ham mijoz quruq ketmasin: butun katalog va Telegram akkaunt."""
         from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION
         self.assertIn("send_catalog_album", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
         self.assertIn("BO'SH massiv", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
-        self.assertIn("client_lead_create", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        self.assertIn("business.operator_telegram", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        # Rasm bo'yicha so'rov buyurtma emas — telefon ham, lead ham yo'q.
+        self.assertIn("lead yaratma", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
 
 
 class NaturalSalesPromptTests(TestCase):
