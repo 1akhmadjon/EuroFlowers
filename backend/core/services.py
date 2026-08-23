@@ -1220,6 +1220,36 @@ def notify_operators_about_lead(lead, conversation):
     return {"ok": True, "lead_id": lead.id}
 
 
+def lead_for_media_handoff(conversation, summary, attachments):
+    """Media so'rovi ham CRM da lead bo'lib qolsin.
+
+    Operator guruhga xabar tushadi, lekin telefon bor bo'lsa buyurtma CRM da ham
+    yozilib turishi kerak — bo'lmasa mijoz ro'yxatga tushmay qoladi va keyin uni
+    hech kim topa olmaydi. Suhbatda lead allaqachon bo'lsa yangisi ochilmaydi.
+    """
+    customer = conversation.customer
+    if not customer.phone or conversation.leads.exists():
+        return None
+    lead = Lead.objects.create(
+        customer=customer,
+        conversation=conversation,
+        social_post=conversation.social_post,
+        request_uz=(summary or "Mijoz yuborgan rasm bo'yicha so'rov")[:2000],
+        details={
+            "topic": "photo_request",
+            "flowers_text": "",
+            "size_text": "",
+            "photo_urls": customer_photo_urls([row.get("url") for row in attachments]),
+            "catalog_items": [],
+            "created_by": "ai_media_handoff",
+        },
+        source="telegram" if customer.instagram_user_id.startswith("telegram:") else "instagram",
+    )
+    Notification.objects.create(notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=lead.request_uz, body_ru=lead.request_uz, reference_type="lead", reference_id=lead.id)
+    save_conversation_ai_summary(conversation, lead)
+    return lead
+
+
 def handoff_media_to_operator(conversation, summary="", phone="", customer_refused_phone=False):
     attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
     if not attachments:
@@ -1261,7 +1291,8 @@ def handoff_media_to_operator(conversation, summary="", phone="", customer_refus
             "telegram_result": sent,
         }
     })
-    return {"ok": True, "media_sent": media_sent, "attachments_count": len(attachments), "chat_url": operator_chat_url(conversation)}
+    lead = lead_for_media_handoff(conversation, summary, attachments)
+    return {"ok": True, "media_sent": media_sent, "attachments_count": len(attachments), "chat_url": operator_chat_url(conversation), "lead_id": lead.id if lead else None}
 
 
 def latest_customer_media_attachment(conversation, source_url=""):
