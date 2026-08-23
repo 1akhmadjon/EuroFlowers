@@ -487,7 +487,13 @@ def adopt_media_id(post, media_id):
     """
     if not post or not media_id or post.media_id == media_id:
         return post
-    updated = SocialPost.objects.filter(pk=post.pk).exclude(media_id=media_id).update(media_id=media_id, updated_at=timezone.now())
+    try:
+        with transaction.atomic():
+            updated = SocialPost.objects.filter(pk=post.pk).exclude(media_id=media_id).update(media_id=media_id, updated_at=timezone.now())
+    except IntegrityError:
+        # media_id ni boshqa post egallab bo'lgan. Bu bog'lash qulaylik xolos,
+        # shuning uchun eski id bilan davom etamiz.
+        return post
     if updated:
         post.media_id = media_id
     return post
