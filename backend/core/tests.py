@@ -7330,7 +7330,7 @@ class OperatorHandoffTests(TestCase):
         self.assertTrue(first["ok"])
         send_mock.assert_called_once()
         with patch("core.services.send_image_to_customer") as send_mock:
-            with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked")) as album_mock:
+            with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as album_mock:
                 second = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
         # Rad etib qo'yish yetarli emas — o'rniga mijoz so'ragan katalog yuboriladi.
         self.assertTrue(second["ok"])
@@ -7366,7 +7366,7 @@ class OperatorHandoffTests(TestCase):
         for index in range(7):
             AICatalogItem.objects.create(name=f"Buket {index}", arrangement_type="bouquet", price=200000, quantity=1, image_url=f"https://cdn.example.com/{index}.jpg")
         conversation = media_conversation("ig-catalog-twice")
-        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked")):
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
             first = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
         self.assertTrue(first["ok"])
         with patch("core.services.send_catalog_album_chunk") as album_mock:
@@ -7382,7 +7382,7 @@ class OperatorHandoffTests(TestCase):
         from unittest.mock import patch
         items = [AICatalogItem.objects.create(name=f"Buket {i}", arrangement_type="bouquet", price=200000, quantity=1, image_url=f"https://cdn.example.com/{i}.jpg") for i in range(7)]
         conversation = media_conversation("ig-group-after-catalog")
-        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked")):
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
             execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
             result = execute_ai_tool("send_catalog_album", {"catalog_ids": [items[0].id, items[1].id]}, conversation)
         self.assertTrue(result["ok"])
