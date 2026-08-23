@@ -8354,3 +8354,97 @@ class NoBackendTriggersTests(TestCase):
         media_tool = next(tool for tool in ai_tool_definitions() if tool["name"] == "match_ai_catalog_by_media")
         self.assertIn("MAJBURIY", media_tool["description"])
         self.assertIn("Shubhalansang chaqir", media_tool["description"])
+
+
+class WebhookSurvivesPostLinkingTests(TestCase):
+    """Post bog'lash — qulaylik. Mijozning xabari esa buyurtma, u yo'qolmasligi kerak."""
+
+    def test_a_failing_link_step_does_not_lose_the_media(self):
+        from unittest.mock import patch
+        from . import webhook_services
+        event = SimpleNamespace(media_id="m-1", story_id="", story_url="https://www.instagram.com/reel/ZZZ/", event_type="media_send")
+        with patch.object(webhook_services, "social_post_by_media_or_url", side_effect=RuntimeError("db down")), \
+             patch.object(webhook_services, "link_story_post_from_event", side_effect=RuntimeError("api down")), \
+             patch.object(webhook_services, "link_media_post_from_event", side_effect=RuntimeError("unique violation")):
+            self.assertIsNone(webhook_services.resolve_social_post_safely("m-1", event))
+
+    def test_a_later_step_still_wins_when_an_earlier_one_fails(self):
+        from unittest.mock import patch
+        from . import webhook_services
+        post = SocialPost.objects.create(media_id="m-2", post_type="reel", title_uz="Reel", title_ru="Reel")
+        event = SimpleNamespace(media_id="m-2", story_id="", story_url="", event_type="media_send")
+        with patch.object(webhook_services, "social_post_by_media_or_url", side_effect=RuntimeError("boom")), \
+             patch.object(webhook_services, "link_story_post_from_event", return_value=None), \
+             patch.object(webhook_services, "link_media_post_from_event", return_value=post):
+            self.assertEqual(webhook_services.resolve_social_post_safely("m-2", event), post)
+
+    def test_adopting_a_media_id_someone_else_took_does_not_raise(self):
+        from .webhook_services import adopt_media_id
+        taken = SocialPost.objects.create(media_id="shared-id", post_type="reel", title_uz="Birinchi", title_ru="Birinchi")
+        other = SocialPost.objects.create(media_id="own-id", post_type="reel", title_uz="Ikkinchi", title_ru="Ikkinchi")
+        adopt_media_id(other, "shared-id")
+        other.refresh_from_db()
+        self.assertEqual(other.media_id, "own-id")
+        self.assertEqual(SocialPost.objects.filter(media_id="shared-id").count(), 1)
+        self.assertEqual(taken.id, SocialPost.objects.get(media_id="shared-id").id)
+
+    def test_a_free_media_id_is_adopted(self):
+        from .webhook_services import adopt_media_id
+        post = SocialPost.objects.create(media_id="old-id", post_type="reel", title_uz="Reel", title_ru="Reel")
+        adopt_media_id(post, "new-id")
+        post.refresh_from_db()
+        self.assertEqual(post.media_id, "new-id")
+
+
+class AlbumEchoIsRecordedBeforeItReturnsTests(TestCase):
+    """Echo albom yozuvidan oldin keladi, shuning uchun id darhol yozilishi kerak."""
+
+    def test_each_chunk_is_recorded_as_soon_as_it_is_sent(self):
+        from unittest.mock import patch
+        from .webhook_services import instagram_sent_message_exists
+        customer = Customer.objects.create(instagram_user_id="ig-fast-echo")
+        conversation = Conversation.objects.create(customer=customer)
+        item = AICatalogItem.objects.create(name="Buket", arrangement_type="bouquet", price=500000, quantity=1, image_url="https://cdn.example.com/x.jpg")
+        seen = {}
+
+        def carousel(*args, **kwargs):
+            # Echo aynan shu payt keladi: albom yozuvi hali saqlanmagan.
+            services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
+            seen["during_send"] = instagram_sent_message_exists(conversation, "mid-fast")
+            return {"message_id": "mid-fast"}
+
+        with patch("core.services.instagram_send_carousel", side_effect=lambda *a, **k: carousel()):
+            services.send_catalog_album(conversation, [item], whole_catalog=True)
+        services.SENT_INSTAGRAM_MESSAGE_IDS.clear()
+        self.assertTrue(instagram_sent_message_exists(conversation, "mid-fast"))
+
+
+class CustomOrderPromptTests(TestCase):
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0138_ai_prompt_custom_order_and_bargaining")
+
+    def test_the_phrasings_the_ai_missed_are_listed(self):
+        insert = self.migration.INSERT
+        for phrase in ["yasab berolislami", "man hohlaganimdek qb", "nechpul qberasla", "arzonroq qberaslami"]:
+            self.assertIn(phrase, insert)
+
+    def test_bargaining_is_separated_from_a_plain_price_question(self):
+        self.assertIn("oddiy narx savoli deb tushunma", self.migration.INSERT)
+
+    def test_the_custom_order_section_records_the_flowers_and_the_intent(self):
+        block = self.migration.CUSTOM_ORDER
+        self.assertIn("custom_order", block)
+        self.assertIn("flowers_text", block)
+        self.assertIn("o'zi yasattirmoqchi", block)
+        self.assertIn("Narx AYTMA", block)
+
+    def test_applying_it_twice_changes_nothing(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = self.migration.ANCHOR + "\n════════════════════════════════════\nqolgani"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count("MIJOZ NIMA DEMOQCHILIGINI"), 1)
+        self.assertEqual(row.system_prompt.count("00C. YASATMA BUYURTMA"), 1)

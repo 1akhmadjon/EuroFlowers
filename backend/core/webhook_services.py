@@ -89,7 +89,10 @@ def instagram_sent_message_exists(conversation, instagram_message_id):
         | Q(metadata__post_image_result__sent__message_id=instagram_message_id)
         # Albom boshqa celery jarayonidan yuborilgan bo'lishi mumkin va o'shanda
         # xotiradagi ro'yxat bo'sh bo'ladi. Bazadagi yozuv har ikkalasida ham bor.
-        | Q(metadata__catalog_album_result__sent_message_ids__contains=instagram_message_id),
+        | Q(metadata__catalog_album_result__sent_message_ids__contains=instagram_message_id)
+        # Albom yuborilishi bilan yoziladigan yozuv. Albom natijasi hammasi
+        # yuborilgach saqlanadi, echo esa undan oldin keladi.
+        | Q(metadata__outbound_platform_message__message_id=instagram_message_id),
         conversation=conversation,
         sender="system",
     ).exists()
@@ -475,6 +478,21 @@ def link_story_post_from_event(webhook_event):
     return post
 
 
+def adopt_media_id(post, media_id):
+    """Mavjud postga yangi media_id ni yozadi, band bo'lsa tegmaydi.
+
+    Avval "band emasmi" deb tekshirib, keyin saqlardik. Instagram bitta hodisani
+    parallel yuborgani uchun ikkala jarayon ham tekshiruvdan o'tib, ikkalasi ham
+    saqlardi — ikkinchisi unique constraint ga urilardi.
+    """
+    if not post or not media_id or post.media_id == media_id:
+        return post
+    updated = SocialPost.objects.filter(pk=post.pk).exclude(media_id=media_id).update(media_id=media_id, updated_at=timezone.now())
+    if updated:
+        post.media_id = media_id
+    return post
+
+
 def link_media_post_from_event(webhook_event):
     if not webhook_event or webhook_event.event_type != "media_send":
         return None
@@ -487,9 +505,7 @@ def link_media_post_from_event(webhook_event):
         if media:
             exact = social_post_by_media_or_url(media_id, media.get("permalink", ""))
             if exact:
-                if exact.media_id != media_id:
-                    exact.media_id = media_id
-                    exact.save(update_fields=["media_id", "updated_at"])
+                adopt_media_id(exact, media_id)
                 return exact
     if webhook_event.story_url:
         exact = social_post_by_media_or_url(media_id, webhook_event.story_url)
@@ -499,10 +515,32 @@ def link_media_post_from_event(webhook_event):
         if not exact:
             item = catalog_item_by_url(webhook_event.story_url)
             exact = social_post_from_catalog_item(item, webhook_event, webhook_event.story_url)
-        if exact and media_id and exact.media_id != media_id and not SocialPost.objects.filter(media_id=media_id).exclude(pk=exact.pk).exists():
-            exact.media_id = media_id
-            exact.save(update_fields=["media_id", "updated_at"])
+        adopt_media_id(exact, media_id)
         return exact
+    return None
+
+
+def resolve_social_post_safely(media_id, webhook_event):
+    """Hodisani do'kon postiga bog'lashga urinadi, muvaffaqiyatsiz bo'lsa None qaytaradi.
+
+    Bog'lash — qulaylik, mijozning xabari esa buyurtma. Shu yerdagi har qanday xato
+    (unique constraint, Instagram API tushib qolishi) butun webhookni yiqitib,
+    mijozning reeli yoki rasmi umuman qabul qilinmasligiga olib kelardi: typing ham
+    chiqmasdi, javob ham yozilmasdi. Endi bog'lanmasa ham xabar saqlanadi va AI
+    mediani suhbatdagi havola orqali baribir ko'radi.
+    """
+    for step in (
+        lambda: social_post_by_media_or_url(media_id, ""),
+        lambda: link_story_post_from_event(webhook_event),
+        lambda: link_media_post_from_event(webhook_event),
+    ):
+        try:
+            post = step()
+        except Exception as error:
+            print(f"SOCIAL_POST_LINK_FAILED media_id={media_id} error={error}", flush=True)
+            continue
+        if post:
+            return post
     return None
 
 
@@ -534,11 +572,7 @@ def resolve_instagram_event(payload):
                 continue
             referral = event.get("referral") or message.get("referral") or {}
             media_id = referral.get("media_id") or referral.get("source_id") or (webhook_event.story_id if webhook_event else "") or (webhook_event.media_id if webhook_event else "")
-            post = social_post_by_media_or_url(media_id, "")
-            if not post:
-                post = link_story_post_from_event(webhook_event)
-            if not post:
-                post = link_media_post_from_event(webhook_event)
+            post = resolve_social_post_safely(media_id, webhook_event)
             customer, _ = Customer.objects.get_or_create(instagram_user_id=external_customer_id)
             conversation = Conversation.objects.filter(customer=customer, status__in=["ai", "operator"]).first()
             if not conversation:

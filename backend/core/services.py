@@ -2318,6 +2318,10 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         delivered, detail, sent = send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=conversation)
         if isinstance(sent, dict) and sent.get("message_id"):
             sent_message_ids.append(sent["message_id"])
+            # Darhol yozamiz. Albom yozuvi butun sikl tugagach saqlanadi, Instagram
+            # echo'si esa undan oldin yetib keladi va o'z albomimiz "operator yozdi"
+            # bo'lib tushadi. Poyga oynasi shu bilan millisekundgacha qisqaradi.
+            record_outbound_platform_message(conversation, sent["message_id"])
         if delivered:
             messages_sent += 1
             album_chunks += 1
@@ -2398,6 +2402,18 @@ def remember_sent_instagram_message(result):
         return
     SENT_INSTAGRAM_MESSAGE_IDS.append(message_id)
     del SENT_INSTAGRAM_MESSAGE_IDS[:-200]
+
+
+def record_outbound_platform_message(conversation, message_id):
+    """Biz yuborgan platforma xabarining id sini darhol bazaga yozadi.
+
+    Xotiradagi ro'yxat faqat bitta celery jarayonida yashaydi, echo esa boshqasiga
+    tushishi mumkin. Baza ikkalasi uchun ham umumiy.
+    """
+    if not conversation or not message_id:
+        return
+    remember_sent_instagram_message({"message_id": message_id})
+    Message.objects.create(conversation=conversation, sender="system", text="", metadata={"outbound_platform_message": {"message_id": message_id}})
 
 
 def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=None):
