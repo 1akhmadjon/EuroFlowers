@@ -7009,14 +7009,15 @@ class OperatorHandoffTests(TestCase):
         with patch_vision(vision_fingerprint(flower_form="peony_rose", dominant_colors=["cream", "pink"], container="basket"), {item.id: verdict_payload(verdict="similar_only", color_match=False, differences="katalogda sariq")}):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         # Aynan o'shasi emas: rasm yuborilmaydi va "topdim" deyilmaydi. Mijoz quruq
-        # qaytmasin — butun katalog ko'rsatiladi va telefon so'raladi.
+        # qaytmasin — butun katalog ko'rsatiladi va mijoz Telegram akkauntga yo'naltiriladi.
         self.assertFalse(result["allow_send"])
         self.assertEqual(result["matches"], [])
         self.assertEqual(result["detail"], "similar_only")
         self.assertTrue(result["show_whole_catalog"])
         self.assertEqual(result["group_matches"], [])
         self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
-        self.assertIn("telefon", result["instruction_uz"])
+        self.assertIn("business.operator_telegram", result["instruction_uz"])
+        self.assertIn("Telefon raqami SO'RAMA", result["instruction_uz"])
         self.assertIn("topdim", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7212,7 +7213,9 @@ class OperatorHandoffTests(TestCase):
         self.assertTrue(result["show_whole_catalog"])
         self.assertEqual(result["group_matches"], [])
         self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [close.id])
-        self.assertIn("telefon", result["instruction_uz"])
+        # Rasm bo'yicha so'rov buyurtma emas: raqam so'ralmaydi, lead ochilmaydi.
+        self.assertIn("business.operator_telegram", result["instruction_uz"])
+        self.assertIn("lead yaratma", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_the_same_arrangement_in_another_colour_counts_as_similar(self):
