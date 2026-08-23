@@ -542,21 +542,34 @@ def catalog_price_bounds(min_price, max_price):
     return bounds[0], bounds[1]
 
 
-def catalog_budget_summary(queryset, low, high):
-    """Budjetga mos mahsulot topilmasa, eng yaqinlarini ko'rsatish uchun ma'lumot.
+def catalog_budget_summary(queryset, low, high, exact_match):
+    """Budjet javobi uchun ma'lumot.
 
-    Mijoz "250 mingga bormi" deb so'raganda katalogda eng arzoni 400 000 bo'lsa,
-    "yo'q" deb qo'yish savdoni yopadi. Operator bunday paytda eng arzonini aytadi.
+    Mos mahsulot topilmasa eng arzonini aytish kerak — "250 mingga bormi" savoliga
+    quruq "yo'q" javobi savdoni yopadi. Topilgan bo'lsa esa aksincha: eng arzonini
+    eslatish mijozni bekorga pastga tortadi.
+
+    Shuning uchun cheapest_price faqat mos mahsulot bo'lmagandagina beriladi.
+    Buni promptda taqiqlash yetarli bo'lmadi — model 77 000 belgilik ko'rsatma
+    ichidan o'sha qatorni topa olmay, "1 millionlik savatingiz bormi" savoliga ham
+    "eng arzoni 199 000" deb javob berdi. Ko'rmagan raqamini ayta olmaydi.
     """
-    prices = sorted(queryset.values_list("price", flat=True))
-    if not prices:
-        return {}
-    return {
+    summary = {
         "asked_min": str(low) if low is not None else "",
         "asked_max": str(high) if high is not None else "",
-        "cheapest_price": str(prices[0]),
-        "most_expensive_price": str(prices[-1]),
     }
+    if exact_match:
+        return summary
+    prices = sorted(queryset.values_list("price", flat=True))
+    if not prices:
+        return summary
+    summary["cheapest_price"] = str(prices[0])
+    summary["most_expensive_price"] = str(prices[-1])
+    summary["instruction_uz"] = (
+        f"So'ralgan narxda mahsulot yo'q. Rostini ayt va eng arzoni {money_uz(prices[0])} so'm ekanini "
+        "ayt, keyin qaytgan yaqin variantlarni albom qilib yubor."
+    )
+    return summary
 
 
 def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=None, min_price=None, max_price=None):
@@ -624,7 +637,7 @@ def ai_catalog_result(query="", limit=24, arrangement_type="", min_price=None, m
         return result
     within = [row for row in rows if (low is None or Decimal(row["price"]) >= low) and (high is None or Decimal(row["price"]) <= high)]
     result["budget"] = dict(
-        catalog_budget_summary(available_ai_catalog_queryset(), low, high),
+        catalog_budget_summary(available_ai_catalog_queryset(), low, high, bool(within)),
         matched=len(within),
         # Budjetga tushgani yo'q bo'lsa qatorlar eng yaqinlari — "aynan shu narxda bor" dema.
         exact_match=bool(within),

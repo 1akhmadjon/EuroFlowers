@@ -8165,3 +8165,49 @@ class BudgetAndContactTimingPromptTests(TestCase):
         self.assertIn(self.migration.BUDGET_NEW, row.system_prompt)
         self.assertEqual(row.system_prompt.count("ISM VA TELEFONNI QACHON SO'RAYSAN"), 1)
         self.assertLess(row.system_prompt.index("ISM VA TELEFONNI QACHON SO'RAYSAN"), row.system_prompt.index("00A. BUDJET AYTILSA"))
+
+
+class BudgetResultHidesTheCheapestWhenItFitsTests(TestCase):
+    """Model ko'rmagan raqamni ayta olmaydi — promptdagi taqiq yetarli bo'lmadi."""
+
+    def setUp(self):
+        self.conversation = Conversation.objects.create(customer=Customer.objects.create(instagram_user_id="ig-budget"))
+        AICatalogItem.objects.create(name="Arzon Buket", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/a.jpg")
+        AICatalogItem.objects.create(name="London Savat", arrangement_type="basket", price=1000000, quantity=1, image_url="https://cdn.example.com/b.jpg")
+
+    def _budget(self, **kwargs):
+        arguments = {"query": "", "arrangement_type": None, "min_price": None, "max_price": None}
+        arguments.update(kwargs)
+        return execute_ai_tool("get_catalog", arguments, self.conversation)["budget"]
+
+    def test_a_budget_that_fits_never_exposes_the_cheapest_price(self):
+        """«1 millionlik savatingiz bormi» — bor, arzonini eslatishning hojati yo'q."""
+        budget = self._budget(min_price=900000, max_price=1100000)
+        self.assertTrue(budget["exact_match"])
+        self.assertNotIn("cheapest_price", budget)
+        self.assertNotIn("instruction_uz", budget)
+
+    def test_a_budget_that_fits_nothing_exposes_it_with_an_instruction(self):
+        budget = self._budget(max_price=150000)
+        self.assertFalse(budget["exact_match"])
+        self.assertEqual(budget["cheapest_price"], "199000.00")
+        self.assertIn("199 000", budget["instruction_uz"])
+
+
+class BargainingPromptTests(TestCase):
+    def test_the_bargaining_reply_does_not_ask_for_contact_details(self):
+        migration = importlib.import_module("core.migrations.0136_ai_prompt_no_contact_ask_while_bargaining")
+        self.assertIn("SAVDOLASHUV JAVOBIDA ISM VA TELEFON SO'RAMA", migration.INSERT)
+        self.assertIn("ikki qatordan oshmasin", migration.INSERT)
+
+    def test_it_lands_inside_the_bargaining_section(self):
+        from django.apps import apps as installed_apps
+        migration = importlib.import_module("core.migrations.0136_ai_prompt_no_contact_ask_while_bargaining")
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "C. CHEGIRMA SO'RASH\n...\n" + migration.ANCHOR + "\nqolgani"
+        row.save()
+        for _ in range(2):
+            migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count("SAVDOLASHUV JAVOBIDA"), 1)
+        self.assertLess(row.system_prompt.index("SAVDOLASHUV JAVOBIDA"), row.system_prompt.index(migration.ANCHOR))
