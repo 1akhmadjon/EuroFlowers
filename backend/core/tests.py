@@ -8692,3 +8692,52 @@ class AHaggleKeepsItsAnswerNextToAnotherQuestionTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class CheckTheVerbBeforeWritingAPriceTests(TestCase):
+    """Savdolashuvni tanish qoidasi narx yozishdan oldingi tekshiruvga aylandi.
+
+    Yolg'iz kelgan "Nechpul qberasla" ni model ishonchli tanidi, lekin yonida
+    "Manzil qayoda" turganda oltita yurgizishdan ikkitasida katalog narxini yozdi.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0143_ai_prompt_check_the_verb_before_a_price")
+
+    def test_the_check_runs_before_every_number(self):
+        block = self.migration.INSERT
+        self.assertIn("NARX YOZISHDAN OLDIN TEKSHIR", block)
+        self.assertIn("Bo'lsa yozadigan raqam kelishilgan narx, katalog narxi EMAS", block)
+
+    def test_every_colloquial_form_from_the_real_chat_is_covered(self):
+        block = self.migration.INSERT
+        for verb in ["qberasla", "qberas", "bolishi", "qo'yib berasiz"]:
+            self.assertIn(f'"{verb}"', block, f"fe'l ro'yxatda yo'q: {verb}")
+
+    def test_a_second_question_does_not_cancel_the_check(self):
+        block = self.migration.INSERT
+        self.assertIn("xabarda boshqa savol ham turgani", block)
+        self.assertIn("mijoz ikkita xabar ketma-ket yozgani", block)
+        self.assertIn("savdolashuv savoli ikkinchi bo'lib kelgani", block)
+
+    def test_it_inserts_once_right_after_the_verb_rule(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "oxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count("NARX YOZISHDAN OLDIN TEKSHIR"), 1)
+        self.assertLess(row.system_prompt.index(self.migration.ANCHOR), row.system_prompt.index(self.migration.INSERT))
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "oxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
