@@ -99,9 +99,15 @@ CONTAINER_FAMILIES = {
 }
 # Katalog tomonida idishni taxmin qilish shart emas: operator uni bazaga o'zi yozgan.
 ARRANGEMENT_FAMILIES = {"bouquet": "bouquet", "basket": "basket", "box": "box"}
+# Katalogda "vaza" degan tur yo'q — operator har bir kompazitsiyani "bouquet" yoki
+# "basket" deb yozadi. O'sha bitta kompazitsiya do'konda goh vazada turgan holda, goh
+# qo'lda ushlab turib suratga olinadi. Shuning uchun mijoz rasmida vaza ko'ringani
+# "bu boshqa mahsulot" degani emas: vaza bilan buket qo'shni oila. Savat esa alohida —
+# uning dastasi rasmda aniq ko'rinadi va u chindan ham boshqa mahsulot.
 CONTAINER_FAMILY_NEIGHBOURS = {
-    "bouquet": {"box"},
+    "bouquet": {"box", "vase"},
     "box": {"bouquet"},
+    "vase": {"bouquet"},
 }
 
 

@@ -8479,3 +8479,37 @@ class LeadOnlyForOrdersPromptTests(TestCase):
         self.assertNotIn(self.migration.OLD_BLOCK, row.system_prompt)
         self.assertEqual(row.system_prompt.count("TELEFON RAQAMI SO'RALMAYDI"), 1)
         self.assertEqual(row.system_prompt.count("ISM VA TELEFON FAQAT BUYURTMA UCHUN"), 1)
+
+
+class FlowersInAVaseCanStillMatchTheCatalogTests(TestCase):
+    """Bitta kompazitsiya goh vazada, goh qo'lda suratga olinadi.
+
+    Katalogda "vaza" degan tur yo'q — hamma narsa "bouquet" yoki "basket". Mijoz
+    vazada turgan rasmni yuborganida idish oilasi mos kelmay qolsa, katalogdagi
+    birorta gul ham tekshiruvdan o'tolmaydi: mijoz o'z do'konimizning storysiga
+    javob yozganida ham "bunday gulimiz yo'q" degan yolg'on javob chiqadi.
+    """
+
+    def test_a_vase_photo_can_match_a_bouquet_in_the_catalog(self):
+        from . import vision_services
+        source_family = vision_services.container_family({"container": "vase"})
+        catalog_family = vision_services.container_family({"container": "unwrapped_bouquet"}, "bouquet")
+        self.assertEqual(source_family, "vase")
+        self.assertEqual(catalog_family, "bouquet")
+        self.assertTrue(vision_services.families_can_match(source_family, catalog_family))
+        self.assertTrue(vision_services.families_can_match(catalog_family, source_family))
+
+    def test_a_basket_is_still_a_different_product(self):
+        from . import vision_services
+        self.assertFalse(vision_services.families_can_match("vase", "basket"))
+        self.assertFalse(vision_services.families_can_match("basket", "vase"))
+
+    def test_every_catalog_arrangement_type_is_reachable_from_a_vase_photo_or_a_basket_photo(self):
+        from . import vision_services
+        for arrangement in vision_services.ARRANGEMENT_FAMILIES:
+            family = vision_services.ARRANGEMENT_FAMILIES[arrangement]
+            reachable = any(
+                vision_services.families_can_match(source, family)
+                for source in ("vase", "basket", "bouquet", "box")
+            )
+            self.assertTrue(reachable, f"{arrangement} hech qaysi mijoz rasmiga mos kelolmaydi")
