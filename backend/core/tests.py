@@ -9280,3 +9280,87 @@ class WiltedAndNaturalAreTwoDifferentQuestionsTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class TelegramHandleSurvivesTheCyrillicConversionTests(TestCase):
+    """Kirill javobda Telegram username o'girilib ketmasligi kerak.
+
+    "@euroflowerspremium" da "EuroFlowers" brend sifatida saqlanardi, qolgan
+    "premium" esa kirillga o'girilib "@euroflowersпремиум" bo'lib chiqardi —
+    mijoz bunday akkauntni topolmaydi.
+    """
+
+    def test_the_handle_stays_latin(self):
+        from .services import latin_to_cyrillic
+        reply = latin_to_cyrillic("Aniq javob uchun @euroflowerspremium ga yozing")
+        self.assertIn("@euroflowerspremium", reply)
+        self.assertNotIn("премиум", reply)
+
+    def test_the_bride_channel_link_stays_latin(self):
+        from .services import latin_to_cyrillic
+        self.assertIn("t.me/euroflowers_kelinbuket", latin_to_cyrillic("kelin buket: t.me/euroflowers_kelinbuket"))
+
+    def test_links_emails_and_brands_still_survive(self):
+        from .services import latin_to_cyrillic
+        reply = latin_to_cyrillic("https://yandex.uz/maps/-/CTfQ6TMD va info@euroflowers.uz, Next Mall")
+        self.assertIn("https://yandex.uz/maps/-/CTfQ6TMD", reply)
+        self.assertIn("info@euroflowers.uz", reply)
+        self.assertIn("Next Mall", reply)
+
+    def test_ordinary_words_are_still_converted(self):
+        from .services import latin_to_cyrillic
+        self.assertEqual(latin_to_cyrillic("Narxi 800 000 so‘m"), "Нархи 800 000 сўм")
+
+
+class TheAssistantDoesNotRepeatItselfTests(TestCase):
+    """Story javobidan keyin yangi savolga o'sha nom va narx qaytardi."""
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0150_ai_prompt_no_repeat_no_greeting")
+
+    def test_the_greeting_is_tied_to_a_context_field(self):
+        block = self.migration.BLOCK
+        self.assertIn("conversation.has_ai_reply_in_session", block)
+        self.assertIn("media\nkelgani suhbatni boshidan boshlamaydi", block)
+        self.assertIn("Ассалому алайкум! Ҳозирда бизда бор гуллар шулар", block)
+
+    def test_the_repeat_mistake_is_written_out(self):
+        block = self.migration.BLOCK
+        self.assertIn("O'ZINGNI TAKRORLAMA", block)
+        self.assertIn('mijoz: "solib qomaganmi"', block)
+        self.assertIn("narxni ikkinchi marta yozding", block)
+
+    def test_more_options_means_the_whole_album(self):
+        block = self.migration.BLOCK
+        self.assertIn("catalog_ids BO'SH massiv", block)
+        for phrase in ["yana shunaqa variantla bormi", "yokida faqat shumi",
+                       "boya ko'proq gullar tashuvdingku", "яна шунака вариантла борми"]:
+            self.assertIn(phrase, block)
+        self.assertIn('"Katalogimiz shu" deb yozib, albomni yubormaslik ham XATO', block)
+
+    def test_the_wilting_answer_needs_a_wilting_question(self):
+        block = self.migration.BLOCK
+        self.assertIn("SO'LISH JAVOBINI FAQAT SO'RALGANDA BER", block)
+        self.assertIn("boya koproq gullar tashudinku katalogda", block)
+
+    def test_it_inserts_once_before_the_previous_block(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
+        self.assertLess(row.system_prompt.index("00F."), row.system_prompt.index(self.migration.ANCHOR))
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)

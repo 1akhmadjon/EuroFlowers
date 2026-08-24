@@ -253,7 +253,15 @@ def flower_variant_display_name(variant, language):
     return " ".join(part for part in parts if part).strip()
 
 
-PROTECTED_RE = re.compile(r"https?://\S+|www\.\S+|[\w.+-]+@[\w-]+\.[\w.]+|EuroFlowers|Next\s+Mall|Instagram|Telegram|\bAI\b", re.IGNORECASE)
+# Havola, pochta, Telegram username va brend nomlari yozuv o'girishdan chetda
+# qoladi. "@euroflowerspremium" ni himoyalamasak "EuroFlowers" qismi brend
+# sifatida saqlanib, qolgan "premium" kirillga o'girilib "@euroflowersпремиум"
+# bo'lib chiqadi va mijoz akkauntni topolmaydi.
+PROTECTED_RE = re.compile(
+    r"https?://\S+|www\.\S+|\bt\.me/\S+|[\w.+-]+@[\w-]+\.[\w.]+|@[A-Za-z0-9_]{2,}"
+    r"|EuroFlowers|Next\s+Mall|Instagram|Telegram|\bAI\b",
+    re.IGNORECASE,
+)
 
 CYRIL_TO_LATIN = {
     "А": "A", "а": "a", "Б": "B", "б": "b", "В": "V", "в": "v", "Г": "G", "г": "g",
