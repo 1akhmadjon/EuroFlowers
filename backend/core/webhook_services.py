@@ -436,7 +436,8 @@ def link_story_post_from_event(webhook_event):
     story = None
     if webhook_event.story_url:
         try:
-            story = find_active_story_by_media_url(webhook_event.story_url)
+            # Story javobi doim xabar kelgan akkauntning storysiga tegishli.
+            story = find_active_story_by_media_url(webhook_event.story_url, webhook_event.recipient_id)
         except Exception as exc:
             print(f"INSTAGRAM_ACTIVE_STORY_LOOKUP_FAILED webhook_event_id={webhook_event.id} error={exc}", flush=True)
     if story:

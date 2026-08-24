@@ -8513,3 +8513,81 @@ class FlowersInAVaseCanStillMatchTheCatalogTests(TestCase):
                 for source in ("vase", "basket", "bouquet", "box")
             )
             self.assertTrue(reachable, f"{arrangement} hech qaysi mijoz rasmiga mos kelolmaydi")
+
+
+class StoryLookupCoversEveryConnectedAccountTests(TestCase):
+    """Tizimga bir nechta Instagram akkaunt ulanadi va storyni qidirish hammasini ko'rishi kerak.
+
+    Faqat asosiy akkauntdan qidirilganda ikkinchi akkauntning storysi "yo'q" bo'lib
+    chiqadi: operator to'g'ri link qo'ygan bo'lsa ham post bog'lanmaydi va mijozning
+    storyga yozgan javobi har safar rasm tahliliga tushib ketadi.
+    """
+
+    def setUp(self):
+        from unittest.mock import patch
+        from . import platform_services
+        self.platform_services = platform_services
+        self.calls = []
+        self.stories = {
+            "acc-birinchi": [{"id": "story-1", "permalink": "https://www.instagram.com/stories/birinchi/111", "media_url": "https://cdn/1.jpg"}],
+            "acc-ikkinchi": [{"id": "story-2", "permalink": "https://www.instagram.com/stories/ikkinchi/222", "media_url": "https://cdn/2.jpg"}],
+        }
+        pairs = patch.object(platform_services, "instagram_account_token_pairs", return_value={"acc-birinchi": "tok-1", "acc-ikkinchi": "tok-2"})
+        pairs.start()
+        self.addCleanup(pairs.stop)
+
+        class Response:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": self.rows}
+
+        def fake_get(url, params=None, timeout=None):
+            account = url.rstrip("/").split("/")[-2]
+            self.calls.append(account)
+            return Response(self.stories.get(account, []))
+
+        requests_patch = patch.object(platform_services.requests, "get", fake_get)
+        requests_patch.start()
+        self.addCleanup(requests_patch.stop)
+
+    def test_it_asks_every_account_when_the_account_is_unknown(self):
+        rows = self.platform_services.instagram_active_stories()
+        self.assertEqual(sorted(self.calls), ["acc-birinchi", "acc-ikkinchi"])
+        self.assertEqual([row["id"] for row in rows], ["story-1", "story-2"])
+
+    def test_a_story_of_the_second_account_is_found(self):
+        story = self.platform_services.find_active_story_by_media_url(
+            "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=story-2&signature=x"
+        )
+        self.assertIsNotNone(story)
+        self.assertEqual(story["permalink"], "https://www.instagram.com/stories/ikkinchi/222")
+
+    def test_the_operators_link_resolves_on_the_second_account_too(self):
+        story = self.platform_services.find_active_story_by_permalink("https://www.instagram.com/stories/ikkinchi/222")
+        self.assertEqual(story["id"], "story-2")
+
+    def test_a_known_account_is_asked_alone(self):
+        rows = self.platform_services.instagram_active_stories("acc-ikkinchi")
+        self.assertEqual(self.calls, ["acc-ikkinchi"])
+        self.assertEqual([row["id"] for row in rows], ["story-2"])
+
+    def test_one_broken_account_does_not_hide_the_others(self):
+        def explode(url, params=None, timeout=None):
+            raise RuntimeError("token expired")
+
+        original = self.platform_services.requests.get
+
+        def maybe_explode(url, params=None, timeout=None):
+            if "acc-birinchi" in url:
+                return explode(url)
+            return original(url, params=params, timeout=timeout)
+
+        from unittest.mock import patch
+        with patch.object(self.platform_services.requests, "get", maybe_explode):
+            rows = self.platform_services.instagram_active_stories()
+        self.assertEqual([row["id"] for row in rows], ["story-2"])

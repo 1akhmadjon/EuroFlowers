@@ -70,60 +70,80 @@ def instagram_user_id(access_token):
     return account_id
 
 
-def instagram_active_stories():
+def instagram_lookup_accounts(account_id=None):
+    """Story va postni qaysi akkauntlardan qidirish kerak.
+
+    Tizimga bitta emas, bir nechta Instagram akkaunt ulanadi. Mijozning xabari
+    qaysi akkauntga kelganini bilsak faqat o'shanikini so'raymiz; bilmasak
+    (masalan operator postga link qo'yayotganda) hammasidan qidiramiz. Faqat
+    asosiy akkauntdan qidirish boshqa akkauntning storysini "yo'q" qilib
+    ko'rsatadi va o'sha story hech qachon postga bog'lanmay qoladi.
+    """
+    pairs = instagram_account_token_pairs()
+    if account_id and str(account_id) in pairs:
+        return [(str(account_id), pairs[str(account_id)])]
+    if pairs:
+        return list(pairs.items())
     _, access_token = instagram_credentials()
     if not access_token:
         return []
-    account_id = instagram_user_id(access_token)
-    if not account_id:
-        return []
-    response = requests.get(
-        f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/stories",
-        params={"access_token": access_token, "fields": "id,media_type,media_url,permalink,timestamp"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    return response.json().get("data", [])
+    resolved = instagram_user_id(access_token)
+    return [(resolved, access_token)] if resolved else []
 
 
-def instagram_recent_media():
-    _, access_token = instagram_credentials()
-    if not access_token:
-        return []
-    account_id = instagram_user_id(access_token)
-    if not account_id:
-        return []
-    url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/media"
-    params = {"access_token": access_token, "fields": "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url", "limit": 100}
+def instagram_active_stories(account_id=None):
     rows = []
-    for _ in range(5):
-        response = requests.get(url, params=params, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        rows.extend(data.get("data", []))
-        url = data.get("paging", {}).get("next")
-        params = {}
-        if not url:
-            break
+    for account, access_token in instagram_lookup_accounts(account_id):
+        try:
+            response = requests.get(
+                f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account}/stories",
+                params={"access_token": access_token, "fields": "id,media_type,media_url,permalink,timestamp"},
+                timeout=20,
+            )
+            response.raise_for_status()
+            rows.extend(response.json().get("data", []))
+        except Exception as error:
+            # Bitta akkauntning tokeni eskirgani qolganlarini qidirishga to'sqinlik qilmaydi.
+            print(f"INSTAGRAM_ACTIVE_STORIES_FAILED account={account} error={error}", flush=True)
     return rows
 
 
-def find_active_story_by_permalink(permalink):
+def instagram_recent_media(account_id=None):
+    rows = []
+    for account, access_token in instagram_lookup_accounts(account_id):
+        url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account}/media"
+        params = {"access_token": access_token, "fields": "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url", "limit": 100}
+        try:
+            for _ in range(5):
+                response = requests.get(url, params=params, timeout=20)
+                response.raise_for_status()
+                data = response.json()
+                rows.extend(data.get("data", []))
+                url = data.get("paging", {}).get("next")
+                params = {}
+                if not url:
+                    break
+        except Exception as error:
+            print(f"INSTAGRAM_RECENT_MEDIA_FAILED account={account} error={error}", flush=True)
+    return rows
+
+
+def find_active_story_by_permalink(permalink, account_id=None):
     normalized = normalize_instagram_permalink(permalink)
     if not normalized:
         return None
-    for story in instagram_active_stories():
+    for story in instagram_active_stories(account_id):
         if normalize_instagram_permalink(story.get("permalink")) == normalized:
             return story
     return None
 
 
-def find_active_story_by_media_url(media_url):
+def find_active_story_by_media_url(media_url, account_id=None):
     normalized = normalize_instagram_permalink(media_url)
     asset_id = media_id_from_url(media_url)
     if not normalized and not asset_id:
         return None
-    for story in instagram_active_stories():
+    for story in instagram_active_stories(account_id):
         story_media_url = story.get("media_url", "")
         if asset_id and str(story.get("id", "")) == asset_id:
             return story
@@ -134,20 +154,20 @@ def find_active_story_by_media_url(media_url):
     return None
 
 
-def find_media_by_permalink(permalink):
+def find_media_by_permalink(permalink, account_id=None):
     normalized = normalize_instagram_permalink(permalink)
     if not normalized:
         return None
-    for media in instagram_recent_media():
+    for media in instagram_recent_media(account_id):
         if normalize_instagram_permalink(media.get("permalink")) == normalized:
             return media
     return None
 
 
-def find_media_by_id(media_id):
+def find_media_by_id(media_id, account_id=None):
     if not media_id:
         return None
-    for media in instagram_recent_media():
+    for media in instagram_recent_media(account_id):
         if str(media.get("id", "")) == str(media_id):
             return media
     return None
