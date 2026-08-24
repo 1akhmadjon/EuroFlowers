@@ -9592,3 +9592,47 @@ class TheAssistantNeverAsksForAPhoneTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class APhotoWithMakeItRequestIsACustomOrderTests(TestCase):
+    """Rasm + "shu guldan yasab berolislami" katalog qidiruvi emas."""
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0153_ai_prompt_photo_plus_make_it_is_custom")
+
+    def test_the_phrasings_are_listed(self):
+        block = self.migration.INSERT
+        for phrase in ["shu guldan yasab berolislami", "shunaqasini yasang", "shu guldan buket qb bering"]:
+            self.assertIn(phrase, block)
+
+    def test_the_album_answer_is_named_as_wrong(self):
+        block = self.migration.INSERT
+        self.assertIn("savolga javob emas", block)
+        self.assertIn("mijoz gul so'ramadi, yasab\nberishni so'radi", block)
+
+    def test_the_right_answer_redirects_with_the_photo_named(self):
+        block = self.migration.INSERT
+        self.assertIn("Yuborgan rasmingizdagi guldan buket", block)
+        self.assertIn("@euroflowerspremium", block)
+
+    def test_it_appends_once_after_the_custom_order_block(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
+        self.assertLess(row.system_prompt.index(self.migration.ANCHOR), row.system_prompt.index(self.migration.MARKER))
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
