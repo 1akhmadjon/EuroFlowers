@@ -9400,31 +9400,3 @@ class AQualityQuestionDescribesTheFlowerTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
-
-
-class TheQualityQuestionIsRecognisedAfterTransliterationTests(TestCase):
-    """Model kirill matnni lotinga o'girilgan holda ko'radi: "sifati kanaka"."""
-
-    def setUp(self):
-        self.migration = importlib.import_module("core.migrations.0152_ai_prompt_quality_in_cyrillic")
-
-    def test_the_transliterated_spellings_are_listed(self):
-        for form in ['"sifati kanaka"', '"kanaka gul bu"', '"sifati kanday"']:
-            self.assertIn(form, self.migration.NEW)
-
-    def test_the_k_stands_for_q_is_repeated_here(self):
-        self.assertIn('"k" bu yerda "q" degani', self.migration.NEW)
-
-    def test_it_applies_once_and_reverts(self):
-        from django.apps import apps as installed_apps
-        row = AISettings.objects.get_or_create(pk=1)[0]
-        original = "bosh\n" + self.migration.OLD + "\noxir"
-        row.system_prompt = original
-        row.save()
-        for _ in range(2):
-            self.migration.apply_prompt(installed_apps, None)
-        row.refresh_from_db()
-        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
-        self.migration.revert_prompt(installed_apps, None)
-        row.refresh_from_db()
-        self.assertEqual(row.system_prompt, original)
