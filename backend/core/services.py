@@ -164,9 +164,20 @@ def parse_lead_date(value):
 
 
 def normalize_phone(value):
+    """Mijoz yozgan raqamni bitta ko'rinishga keltiradi.
+
+    Mijozlar raqamni juda xilma-xil yozadi: "901234567", "+998 90 123 45 67",
+    "998901234567", ruscha odat bilan "8 998 ...", ba'zida oldiga nol qo'yib
+    "0901234567". Bularning hammasi bitta raqam. To'qqiz raqamdan kam bo'lsa
+    to'ldirib taxmin qilmaymiz — bo'sh qaytaramiz va AI mijozdan qayta so'raydi.
+    """
     if "*" in (value or ""):
         return ""
     digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 13 and digits.startswith("8998"):
+        digits = digits[1:]
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = digits[1:]
     if len(digits) == 9:
         digits = "998" + digits
     if len(digits) == 12 and digits.startswith("998"):

@@ -2282,6 +2282,15 @@ def sale_group_caption(item, history, payment_type, image_url=""):
         lines.append(f"\U0001f3ec {md_escape(item.branch.name)} filiali")
     if quantity > 1:
         lines.append(f"\U0001f9fe Soni: *{quantity} ta*")
+    # Hajm uch joydan yig'iladi: operator yozgan hajm nomi, bo'yi va diametri.
+    # Guruhdagi florist qaysi gul sotilganini shu qatordan aniqlaydi.
+    size = " \u00b7 ".join(part for part in (
+        (item.volume or "").strip(),
+        f"bo\u2018yi {item.height_cm} sm" if item.height_cm else "",
+        f"diametri {item.diameter_cm} sm" if item.diameter_cm else "",
+    ) if part)
+    if size:
+        lines.append(f"\U0001f4d0 Hajmi: {md_escape(size)}")
     lines.append(f"\U0001f4b0 Savdo: *{money_uz(sale_total)} so\u2018m*")
     if delivery:
         lines.append(f"\U0001f69a Dastafka: {money_uz(delivery)} so\u2018m")

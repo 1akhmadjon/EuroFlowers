@@ -8787,3 +8787,152 @@ class AHaggleReadsTheNoteBeforeTheGenericAnswerTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class PhoneNumberIsTakenInEveryShapeCustomersWriteTests(TestCase):
+    """Mijoz raqamni qanday yozsa ham qabul qilinadi, kam bo'lsa to'ldirilmaydi."""
+
+    def test_the_nine_digit_form_is_complete(self):
+        from .services import normalize_phone
+        self.assertEqual(normalize_phone("901234567"), "+998901234567")
+        self.assertEqual(normalize_phone("90 123 45 67"), "+998901234567")
+
+    def test_the_shapes_customers_actually_use(self):
+        from .services import normalize_phone
+        for written, expected in [
+            ("+998901234567", "+998901234567"),
+            ("998901234567", "+998901234567"),
+            ("+998 90 240 95 15", "+998902409515"),
+            ("8 998 90 123 45 67", "+998901234567"),
+            ("0901234567", "+998901234567"),
+            ("telefonim 93 555 66 77", "+998935556677"),
+        ]:
+            self.assertEqual(normalize_phone(written), expected, f"noto'g'ri o'qildi: {written}")
+
+    def test_a_short_number_is_never_guessed(self):
+        from .services import normalize_phone
+        for written in ["9012345", "90123456", "123", "", "**** 4567"]:
+            self.assertEqual(normalize_phone(written), "", f"to'ldirib taxmin qilindi: {written}")
+
+
+class NoDataMeansOperatorNotAGuessTests(TestCase):
+    """Javob senda bo'lmasa taxmin qilinmaydi — operator Telegramiga yo'naltiriladi."""
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0145_ai_prompt_no_data_no_guess")
+
+    def test_it_searches_before_it_redirects(self):
+        block = self.migration.BLOCK
+        self.assertIn("AVVAL YAXSHILAB QIDIR, KEYINGINA OPERATORGA YO'NALTIR", block)
+        self.assertIn("Suhbat tarixi", block)
+        self.assertIn("get_catalog", block)
+        self.assertIn("Qidirmasdan turib\noperatorga yo'naltirish ham xato", block)
+
+    def test_every_missing_fact_from_the_real_chats_is_listed(self):
+        block = self.migration.BLOCK
+        for missing in ["karta raqami", "zaklad", "zapiska narxi", "harf yoki yozuv narxi",
+                        "aksiya qachongacha", "kelin buket", "stol bezagi", "diametri"]:
+            self.assertIn(missing, block, f"ro'yxatda yo'q: {missing}")
+        self.assertIn("business.operator_telegram", block)
+        self.assertIn("telefon raqami SO'RAMA va lead YARATMA", block)
+
+    def test_it_refuses_to_swap_one_flower_for_another(self):
+        block = self.migration.BLOCK
+        self.assertIn("FAQAT KATALOGDA BOR GUL BILAN ISHLA", block)
+        self.assertIn("Katalina gortenziya emas", block)
+        for absent in ["gortenziya", "pion", "orxideya", "ramashka", "gerbera", "lola", "krizantema"]:
+            self.assertIn(absent, block)
+
+    def test_a_voice_message_is_answered_by_asking_for_text(self):
+        block = self.migration.BLOCK
+        self.assertIn("Ovozli xabarni tinglay olmadim, yozib yuborsangiz", block)
+        self.assertIn("Ovozli xabar uchun telefon so'rama va operatorga topshirma", block)
+
+    def test_the_greeting_happens_once(self):
+        block = self.migration.BLOCK
+        self.assertIn("SALOMLASHISH BIR MARTA", block)
+        self.assertIn("ENG BIRINCHI", block)
+
+    def test_a_catalog_number_still_reads_as_a_haggle(self):
+        block = self.migration.BLOCK
+        self.assertIn("2 chisi nechpul qberas", block)
+        self.assertIn("Katalog narxini qaytarish XATO", block)
+        self.assertIn("mijozni haydash bo'ladi", block)
+
+    def test_the_short_answers_are_spelled_out(self):
+        block = self.migration.BLOCK
+        self.assertIn("Nalichida bormi", block)
+        self.assertIn("hammasi tabiiy tirik gul", block)
+        self.assertIn("BUKETGA YOZUV YOZILMAYDI", block)
+        self.assertIn("Do'kon 24/7 ochiq VA administratorlar", block)
+
+    def test_the_phone_rule_names_the_nine_digit_form(self):
+        block = self.migration.BLOCK
+        self.assertIn('"901234567" ko\'rinishida bersa ham qabul qilasan', block)
+        self.assertIn("to'qqiz raqamdan kam", block)
+        self.assertIn("to'liq yozib yuborasizmi", block)
+
+    def test_it_inserts_once_before_section_00(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count("00D. JAVOBNI QAYERDAN OLASAN"), 1)
+        self.assertLess(row.system_prompt.index("00D."), row.system_prompt.index(self.migration.ANCHOR))
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
+
+
+class SaleGroupMessageCarriesTheSizeTests(TestCase):
+    """Guruhdagi florist qaysi gul sotilganini hajmidan tanib oladi."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("sale-size", password="password", first_name="Sotuvchi", last_name="A")
+        flower = Flower.objects.create(name_uz="Atirgul hajm", slug="rose-size")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Freedom", color_uz="Qizil")
+        self.batch = StockBatch.objects.create(variant=variant, batch_number="SZ-1", height_cm=60, stems_per_bunch=20,
+                                               received_stems=100, remaining_stems=100, cost_per_stem=1000,
+                                               sale_price_per_stem=5000, sale_price_per_bunch=100000)
+
+    def _caption(self, **overrides):
+        from .inventory_services import sale_group_caption
+        data = {"name_uz": "Alfalob buket", "arrangement_type": "bouquet", "catalog_kind": "standard",
+                "price": Decimal("1000000"), "quantity_total": 1, "status": "available"}
+        data.update(overrides)
+        item = CatalogItem.objects.create(**data)
+        history = CatalogHistory.objects.create(
+            catalog_item=item, action="sold", created_by=self.user, quantity=1,
+            listed_unit_price=Decimal("1000000"), sold_unit_price=Decimal("850000"),
+            snapshot={"delivery_amount": "50000"},
+        )
+        return sale_group_caption(item, history, "mixed")
+
+    def test_the_size_line_is_there(self):
+        caption = self._caption(volume="katta", height_cm=60, diameter_cm=45)
+        self.assertIn("Hajmi: katta · bo‘yi 60 sm · diametri 45 sm", caption)
+
+    def test_it_is_skipped_when_nothing_is_known(self):
+        self.assertNotIn("Hajmi", self._caption())
+
+    def test_partial_size_still_shows(self):
+        self.assertIn("Hajmi: bo‘yi 55 sm", self._caption(height_cm=55))
+
+    def test_the_money_lines_stay_intact(self):
+        caption = self._caption(volume="o'rtacha")
+        self.assertIn("Savdo: *800 000 so‘m*", caption)
+        self.assertIn("Dastafka: 50 000 so‘m", caption)
+        self.assertIn("Jami olingan: *850 000 so‘m*", caption)
+        self.assertIn("To‘lov: *Aralash*", caption)
+        self.assertIn("Sotdi: Sotuvchi A", caption)
