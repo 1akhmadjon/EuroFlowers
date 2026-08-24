@@ -350,6 +350,23 @@ UZ_CYRIL_SUFFIXES = re.compile(r"мокчи|моқчи|япти|вотти|во�
 UZ_CYRIL_MARKERS = re.compile(r"\b(гул|гулла|гуллар|бор|борми|бормиди|булади|бўлади|керак|кере|канака|қанақа|нечпул|неч|манзил|каерда|қаерда|ассалом|ассалому|алекум|алайкум|раҳмат|рахмат|сават|яса|ясаймиз|ясанг|ясаб|олиб|беринг|берин|бервор|сизда|бизда|сиз|биз|ишлайсизми|нархи|дона|сўм|сум|киммат|қиммат|арзон|яхши|ҳам|хам|учун|билан|мумкинми|деган|қилиб|килиб|хохлайман|хохласангиз|менга|сизга|уйга|эди|экан|бўлса|булса|нима|нечта|качон|қачон|канча|қанча|кани|қани|нечада|таер|тайёр|обкетаман|олсам|бўлса|бўлсин|булсин)\b", re.IGNORECASE)
 
 
+def conversation_script(texts):
+    """Javob berilayotgan xabarlar qaysi yozuvda kelgan.
+
+    Bitta so'zli xabar ("доставка", "локация", "адрес") o'zbekchada ham, ruschada
+    ham aynan bir xil yoziladi. Uni yolg'iz o'qib til tanlash xato: mijoz o'zbek
+    kirillida yozib turib oxirida "доставка" desa, javob ruscha ketib qolardi.
+    Shuning uchun javob berilayotgan hamma xabar birga qaraladi va bittasi ham
+    o'zbek kirilida bo'lsa suhbat o'zbekcha hisoblanadi.
+    """
+    scripts = [detect_text_script(text) for text in texts if (text or "").strip()]
+    if "uz_cyril" in scripts:
+        return "uz_cyril"
+    if "ru" in scripts:
+        return "ru"
+    return "latin"
+
+
 def detect_text_script(text):
     """Matn lotinmi, o'zbek kirillmi yoki ruschami.
 
@@ -2569,9 +2586,11 @@ def ai_reply(conversation):
     history_messages = list(conversation.messages.exclude(sender="system").order_by("created_at", "id"))
     fresh_session = bool(len(history_messages) > 1 and history_messages[-1].created_at - history_messages[-2].created_at >= timedelta(hours=24))
     latest_customer_text = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
+    latest_ai_index = max((index for index, message in enumerate(history_messages) if message.sender == "ai"), default=-1)
+    pending_customer_messages = [message.text for message in history_messages[latest_ai_index + 1:] if message.sender == "customer"]
     # O'zbek kirill suhbatda model lotinda aniqroq yozadi. Kirill matnni lotinga o'girib beramiz,
     # javobni esa oxirida kirillga qaytaramiz. Rus tiliga tegilmaydi.
-    cyrillic_mode = detect_text_script(latest_customer_text) == "uz_cyril"
+    cyrillic_mode = conversation_script(pending_customer_messages or [latest_customer_text]) == "uz_cyril"
     history = []
     for message in history_messages:
         content = message.text
@@ -2586,8 +2605,6 @@ def ai_reply(conversation):
     session_messages = history_messages[-1:] if fresh_session else history_messages
     ai_replies_count = sum(1 for message in session_messages if message.sender == "ai")
     has_ai_reply_in_session = ai_replies_count > 0
-    latest_ai_index = max((index for index, message in enumerate(history_messages) if message.sender == "ai"), default=-1)
-    pending_customer_messages = [message.text for message in history_messages[latest_ai_index + 1:] if message.sender == "customer"]
     last_customer_message = next((message.text for message in reversed(history_messages) if message.sender == "customer"), "")
     business_settings, _ = BusinessSettings.objects.get_or_create(pk=1)
     ai_settings, _ = AISettings.objects.get_or_create(pk=1)

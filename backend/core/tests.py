@@ -9085,3 +9085,99 @@ class EveryMessageToTheTestAccountIsATestChatTests(TestCase):
         reschedule = [line for line in source.splitlines() if "apply_async(args=[conversation_id, expected_message_id, recipient_id" in line]
         self.assertEqual(len(reschedule), 1)
         self.assertIn("account_id]", reschedule[0], "qayta rejalashtirishda akkaunt tushib qolgan")
+
+
+class OneAmbiguousWordDoesNotSwitchTheLanguageTests(TestCase):
+    """Javob tili oxirgi xabardan emas, javob berilayotgan hammasidan aniqlanadi.
+
+    Real suhbatda mijoz "жойила катта", "вилоятга борми", "доставка" deb yozdi.
+    Oxirgisi ruscha ham, o'zbekcha ham bir xil yoziladigan so'z — AI shuni yolg'iz
+    o'qib ruscha javob berdi va shundan keyin suhbat ruschaga o'tib ketdi.
+    """
+
+    def test_a_lone_loanword_reads_as_russian(self):
+        from .services import detect_text_script
+        self.assertEqual(detect_text_script("доставка"), "ru")
+
+    def test_but_the_batch_it_arrived_in_is_uzbek(self):
+        from .services import conversation_script
+        self.assertEqual(conversation_script(["жойила катта", "вилоятга борми", "доставка"]), "uz_cyril")
+
+    def test_uzbek_wins_wherever_it_sits_in_the_batch(self):
+        from .services import conversation_script
+        self.assertEqual(conversation_script(["доставка", "вилоятга борми"]), "uz_cyril")
+        self.assertEqual(conversation_script(["вилоятга борми", "доставка"]), "uz_cyril")
+
+    def test_a_genuinely_russian_batch_stays_russian(self):
+        from .services import conversation_script
+        self.assertEqual(conversation_script(["Здравствуйте", "доставка есть?"]), "ru")
+
+    def test_latin_and_empty_batches(self):
+        from .services import conversation_script
+        self.assertEqual(conversation_script(["Assalomu alaykum", "narxi qancha"]), "latin")
+        self.assertEqual(conversation_script([]), "latin")
+        self.assertEqual(conversation_script(["", "   "]), "latin")
+
+    def test_the_reply_builder_decides_from_the_pending_batch(self):
+        source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
+        self.assertIn("cyrillic_mode = conversation_script(pending_customer_messages or [latest_customer_text])", source)
+        # pending ro'yxati cyrillic_mode dan OLDIN hisoblanishi kerak
+        self.assertLess(source.index("pending_customer_messages = [message.text"), source.index("cyrillic_mode = conversation_script"))
+
+
+class EveryPendingMessageGetsAnAnswerTests(TestCase):
+    """Kirillcha yozilgan savol va ketma-ket kelgan xabarlar."""
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0147_ai_prompt_cyrillic_and_pending")
+
+    def test_the_prompt_finally_uses_pending_customer_messages(self):
+        block = self.migration.BLOCK
+        self.assertIn("pending_customer_messages", block)
+        self.assertIn("har biriga\njavob ber", block)
+        self.assertIn("Javob baribir bitta xabar bo'ladi", block)
+
+    def test_the_real_three_message_mistake_is_written_out(self):
+        block = self.migration.BLOCK
+        for part in ["жойила катта", "вилоятга борми", "доставка"]:
+            self.assertIn(part, block)
+
+    def test_the_k_and_q_confusion_is_explained(self):
+        block = self.migration.BLOCK
+        self.assertIn('"k" harfi "q" ni ham bildirishi mumkin', block)
+        for pair in ["komaganmi   = qolmaganmi", "kanaka      = qanaqa", "arzonrok    = arzonroq"]:
+            self.assertIn(pair, block)
+
+    def test_the_freshness_question_is_listed_in_both_scripts(self):
+        block = self.migration.BLOCK
+        self.assertIn("solib qolmaganmi", block)
+        self.assertIn("солиб комаганми", block)
+        self.assertIn("гул солиб комаганми", block)
+
+    def test_a_freshness_question_never_moves_the_price(self):
+        block = self.migration.BLOCK
+        self.assertIn("Kelishilgan narxni bu savolga AYTMA", block)
+        self.assertIn('"950 000 so\'m qilib beramiz" deb narx tushirding', block)
+        self.assertIn("yetkazib berish savoli deb o'qish ham XATO", block)
+
+    def test_it_inserts_once_before_section_00(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
+        self.assertLess(row.system_prompt.index("00E."), row.system_prompt.index(self.migration.ANCHOR))
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
