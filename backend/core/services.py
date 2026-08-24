@@ -1357,6 +1357,13 @@ def direct_ai_catalog_link_matches(items, source_url, attachment=None, conversat
             return matched
     if conversation is None:
         return []
+    # Mijozning o'zi suratga olgan rasmi suhbatdagi eski reel havolasi bilan
+    # javob berilmaydi. Aks holda mijoz avval reel yuborib, keyin butunlay
+    # boshqa gulning rasmini tashlaganda o'sha eski reeldagi gullar qaytardi va
+    # javob "siz yuborgan reeldan borlari shular" bo'lib chiqardi — rasm esa
+    # umuman tahlil qilinmasdi.
+    if (attachment or {}).get("kind") == "photo":
+        return []
     for link in conversation_shared_links(conversation):
         if media_url_match_key(link) == media_url_match_key(source_url):
             continue
@@ -1489,17 +1496,27 @@ def media_match_send_block(tool_results, name, catalog_ids):
 
 
 def whole_catalog_already_sent(conversation):
-    """Butun katalog bu suhbatda allaqachon albom bo'lib ketganmi.
+    """Butun katalog hozir, mijoz hech narsa yozmasdan turib yuborilganmi.
 
     Mahsulotlar sonini sanash bilan aniqlab bo'lmaydi — katalogda uchta mahsulot
     bo'lsa "butun katalog" ham uchta rasm. Shuning uchun albom yuborilganda
     uning butun katalog ekani o'sha yerda belgilab qo'yiladi.
+
+    Ilgari bu tekshiruv butun suhbatga tegishli edi va albom bir marta ketgach
+    mijoz "каталогни корсат" deb uch marta so'rasa ham qayta yuborilmasdi.
+    Endi to'siq faqat oxirgi albomdan keyin mijoz hech narsa yozmagan holatda
+    ishlaydi — ya'ni modelni bir turda ikki marta yuborishdan saqlaydi, mijozning
+    o'z so'rovini esa bloklamaydi.
     """
+    last_album_at = None
     for message in conversation.messages.filter(sender="system").order_by("-created_at", "-id")[:40]:
         result = (message.metadata or {}).get("catalog_album_result") or {}
         if result.get("whole_catalog") and any(row.get("delivered") for row in result.get("items") or []):
-            return True
-    return False
+            last_album_at = message.created_at
+            break
+    if last_album_at is None:
+        return False
+    return not conversation.messages.filter(sender="customer", created_at__gt=last_album_at).exists()
 
 
 def catalog_image_already_sent(conversation, catalog_id):

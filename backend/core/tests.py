@@ -9400,3 +9400,107 @@ class AQualityQuestionDescribesTheFlowerTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class TheCustomerCanAskForTheCatalogAgainTests(TestCase):
+    """Albom bir marta ketgach mijoz uni boshqa ko'ra olmasdi.
+
+    Real suhbatda mijoz "Korsat katalogni", keyin "Korsatmading yubor katalog"
+    deb yozdi — backend to'sig'i har uchalasini ham bloklab turdi va AI
+    "katalogimiz shu" deb yozib hech narsa yubormadi.
+    """
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_username="katalog_probe", instagram_user_id="ig-katalog")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+
+    def _album_sent(self):
+        return Message.objects.create(
+            conversation=self.conversation, sender="system", text="",
+            metadata={"catalog_album_result": {"whole_catalog": True, "items": [{"delivered": True}]}},
+        )
+
+    def test_nothing_sent_yet_means_not_blocked(self):
+        from .services import whole_catalog_already_sent
+        self.assertFalse(whole_catalog_already_sent(self.conversation))
+
+    def test_it_blocks_a_second_send_in_the_same_turn(self):
+        from .services import whole_catalog_already_sent
+        self._album_sent()
+        self.assertTrue(whole_catalog_already_sent(self.conversation))
+
+    def test_the_customer_asking_again_unblocks_it(self):
+        from .services import whole_catalog_already_sent
+        self._album_sent()
+        Message.objects.create(conversation=self.conversation, sender="customer", text="Korsat katalogni")
+        self.assertFalse(whole_catalog_already_sent(self.conversation))
+
+    def test_it_blocks_again_after_the_new_album_goes_out(self):
+        from .services import whole_catalog_already_sent
+        self._album_sent()
+        Message.objects.create(conversation=self.conversation, sender="customer", text="Korsat katalogni")
+        self._album_sent()
+        self.assertTrue(whole_catalog_already_sent(self.conversation))
+
+    def test_a_partial_album_never_blocks(self):
+        from .services import whole_catalog_already_sent
+        Message.objects.create(
+            conversation=self.conversation, sender="system", text="",
+            metadata={"catalog_album_result": {"whole_catalog": False, "items": [{"delivered": True}]}},
+        )
+        self.assertFalse(whole_catalog_already_sent(self.conversation))
+
+    def test_an_undelivered_album_never_blocks(self):
+        from .services import whole_catalog_already_sent
+        Message.objects.create(
+            conversation=self.conversation, sender="system", text="",
+            metadata={"catalog_album_result": {"whole_catalog": True, "items": [{"delivered": False}]}},
+        )
+        self.assertFalse(whole_catalog_already_sent(self.conversation))
+
+
+class APhotoIsAlwaysAnalysedNotAnsweredFromAnOldReelTests(TestCase):
+    """Mijoz reel yuborib, keyin boshqa gulning rasmini tashladi.
+
+    Javob "siz yuborgan reeldan borlari shular" bo'lib chiqdi — rasm umuman
+    tahlil qilinmadi, suhbatdagi eski reel havolasi ishlatildi.
+    """
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_username="rasm_probe", instagram_user_id="ig-rasm")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.item = AICatalogItem.objects.create(
+            name="Reeldagi gul", arrangement_type="bouquet", price=Decimal("500000"),
+            instagram_link="https://www.instagram.com/reel/AAA111/", is_active=True,
+        )
+        Message.objects.create(
+            conversation=self.conversation, sender="customer", text="shundan bormi",
+            metadata={"attachments": [{"url": "https://www.instagram.com/reel/AAA111/", "kind": "reel"}]},
+        )
+
+    def test_a_shared_reel_still_matches_from_the_conversation(self):
+        from .services import direct_ai_catalog_link_matches
+        matched = direct_ai_catalog_link_matches(
+            [self.item], "https://lookaside.fbsbx.com/x?asset_id=1",
+            attachment={"url": "https://lookaside.fbsbx.com/x?asset_id=1", "kind": "reel"},
+            conversation=self.conversation,
+        )
+        self.assertEqual([row.id for row in matched], [self.item.id])
+
+    def test_the_customers_own_photo_does_not(self):
+        from .services import direct_ai_catalog_link_matches
+        matched = direct_ai_catalog_link_matches(
+            [self.item], "https://lookaside.fbsbx.com/x?asset_id=2",
+            attachment={"url": "https://lookaside.fbsbx.com/x?asset_id=2", "kind": "photo"},
+            conversation=self.conversation,
+        )
+        self.assertEqual(matched, [], "rasm eski reel havolasi bilan javob oldi")
+
+    def test_a_photo_whose_own_link_matches_still_works(self):
+        from .services import direct_ai_catalog_link_matches
+        matched = direct_ai_catalog_link_matches(
+            [self.item], "https://www.instagram.com/reel/AAA111/",
+            attachment={"url": "https://www.instagram.com/reel/AAA111/", "kind": "photo"},
+            conversation=self.conversation,
+        )
+        self.assertEqual([row.id for row in matched], [self.item.id])
