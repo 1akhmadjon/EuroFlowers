@@ -8650,3 +8650,45 @@ class BargainingIsRecognisedByTheVerbTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class AHaggleKeepsItsAnswerNextToAnotherQuestionTests(TestCase):
+    """Savdolashuv savoli boshqa savol bilan birga kelsa ham savdolashuv bo'lib qoladi.
+
+    "Nechpul qberasla" va "Manzil qayoda" birga kelganda AI ikkalasiga javob berdi,
+    lekin narxni katalog narxi qilib qo'ydi — savdolashuv payqalmadi.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0142_ai_prompt_haggle_keeps_its_answer")
+
+    def test_each_question_keeps_its_own_answer(self):
+        block = self.migration.INSERT
+        self.assertIn("har bir savol O'Z javobini oladi", block)
+        self.assertIn("oddiy narx savoliga aylanib qolmaydi", block)
+
+    def test_the_real_mistake_is_written_out(self):
+        self.assertIn("sen 1 000 000 so'm va\nmanzilni aytding", self.migration.INSERT)
+        self.assertIn("To'g'ri: 800 000 so'm va manzil.", self.migration.INSERT)
+
+    def test_it_appends_once_after_the_anchor(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "oxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count("har bir savol O'Z javobini oladi"), 1)
+        self.assertLess(row.system_prompt.index(self.migration.ANCHOR), row.system_prompt.index(self.migration.INSERT))
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "oxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
