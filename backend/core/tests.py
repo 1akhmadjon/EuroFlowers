@@ -9181,3 +9181,55 @@ class EveryPendingMessageGetsAnAnswerTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class TheReplyLanguageComesFromTheScriptFieldTests(TestCase):
+    """«доставка» ruscha belgi ro'yxatida turgani uchun butun javob ruschaga o'tardi."""
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0148_ai_prompt_language_from_script")
+
+    def test_the_shared_loanwords_left_the_russian_marker_list(self):
+        for word in ["доставка", "адрес"]:
+            self.assertIn(word, self.migration.OLD_MARKERS)
+            self.assertNotIn(word, self.migration.NEW_MARKERS.split("Quyidagi so'zlar")[0])
+
+    def test_the_reply_language_is_read_from_the_context(self):
+        block = self.migration.NEW_MARKERS
+        self.assertIn("conversation.customer_script", block)
+        for value in ['"latin"', '"uz_cyril"', '"ru"']:
+            self.assertIn(value, block)
+
+    def test_the_shared_words_are_named_as_not_russian(self):
+        block = self.migration.NEW_MARKERS
+        self.assertIn("rus tilining belgisi EMAS", block)
+        for word in ["доставка", "дастафка", "адрес", "локация", "наличия"]:
+            self.assertIn(word, block)
+
+    def test_the_real_mistake_is_written_out(self):
+        block = self.migration.NEW_MARKERS
+        self.assertIn("вилоятга борми", block)
+        self.assertIn("butun javobni rus tilida berding", block)
+
+    def test_genuinely_russian_markers_stay(self):
+        for word in ["здравствуйте", "сколько", "букет из"]:
+            self.assertIn(word, self.migration.NEW_MARKERS)
+
+    def test_the_context_carries_the_script(self):
+        source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
+        self.assertIn('"customer_script": customer_script,', source)
+        self.assertIn("customer_script = conversation_script(", source)
+
+    def test_it_applies_once_and_reverts(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.OLD_MARKERS + "\noxir"
+        row.system_prompt = original
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)

@@ -2590,7 +2590,8 @@ def ai_reply(conversation):
     pending_customer_messages = [message.text for message in history_messages[latest_ai_index + 1:] if message.sender == "customer"]
     # O'zbek kirill suhbatda model lotinda aniqroq yozadi. Kirill matnni lotinga o'girib beramiz,
     # javobni esa oxirida kirillga qaytaramiz. Rus tiliga tegilmaydi.
-    cyrillic_mode = conversation_script(pending_customer_messages or [latest_customer_text]) == "uz_cyril"
+    customer_script = conversation_script(pending_customer_messages or [latest_customer_text])
+    cyrillic_mode = customer_script == "uz_cyril"
     history = []
     for message in history_messages:
         content = message.text
@@ -2628,6 +2629,9 @@ def ai_reply(conversation):
             "fresh_session": fresh_session,
             "has_ai_reply_in_session": has_ai_reply_in_session,
             "pending_customer_messages": pending_customer_messages,
+            # Javob tili shu maydondan olinadi. Bitta so'zga qarab til tanlash
+            # xato: "доставка", "адрес", "локация" ikkala tilda ham bir xil.
+            "customer_script": customer_script,
             "customer_attachments": customer_attachment_rows(history_messages),
             "social_post": ai_post_context(conversation),
             "open_lead": {
