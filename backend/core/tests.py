@@ -9487,14 +9487,38 @@ class APhotoIsAlwaysAnalysedNotAnsweredFromAnOldReelTests(TestCase):
         )
         self.assertEqual([row.id for row in matched], [self.item.id])
 
-    def test_the_customers_own_photo_does_not(self):
+    def test_a_screenshot_of_the_reel_just_shared_still_matches(self):
+        """Reel yuborib darhol skrinshot tashlash — bitta savol."""
         from .services import direct_ai_catalog_link_matches
         matched = direct_ai_catalog_link_matches(
             [self.item], "https://lookaside.fbsbx.com/x?asset_id=2",
             attachment={"url": "https://lookaside.fbsbx.com/x?asset_id=2", "kind": "photo"},
             conversation=self.conversation,
         )
+        self.assertEqual([row.id for row in matched], [self.item.id])
+
+    def test_a_photo_sent_after_we_answered_the_reel_does_not(self):
+        """Reel haqida javob berilgach kelgan rasm — yangi savol."""
+        from .services import direct_ai_catalog_link_matches
+        Message.objects.create(conversation=self.conversation, sender="ai",
+                               text="Siz yuborgan reeldan hozir bizda borlari shular.")
+        matched = direct_ai_catalog_link_matches(
+            [self.item], "https://lookaside.fbsbx.com/x?asset_id=2",
+            attachment={"url": "https://lookaside.fbsbx.com/x?asset_id=2", "kind": "photo"},
+            conversation=self.conversation,
+        )
         self.assertEqual(matched, [], "rasm eski reel havolasi bilan javob oldi")
+
+    def test_a_shared_reel_still_matches_after_an_ai_reply(self):
+        """Havolaning o'zi kelsa butun suhbat bo'yicha qidiriladi."""
+        from .services import direct_ai_catalog_link_matches
+        Message.objects.create(conversation=self.conversation, sender="ai", text="javob")
+        matched = direct_ai_catalog_link_matches(
+            [self.item], "https://lookaside.fbsbx.com/x?asset_id=3",
+            attachment={"url": "https://lookaside.fbsbx.com/x?asset_id=3", "kind": "reel"},
+            conversation=self.conversation,
+        )
+        self.assertEqual([row.id for row in matched], [self.item.id])
 
     def test_a_photo_whose_own_link_matches_still_works(self):
         from .services import direct_ai_catalog_link_matches

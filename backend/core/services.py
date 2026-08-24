@@ -1325,14 +1325,23 @@ def social_post_answer(post):
     }
 
 
-def conversation_shared_links(conversation):
+def conversation_shared_links(conversation, unanswered_only=False):
     """Suhbatda mijoz yuborgan story/reel havolalari, oxirgisi birinchi bo'lib.
 
     Mijoz avval reel yuborib, keyin o'sha reeldan screenshot tashlashi mumkin.
     Screenshot'ning o'z havolasi yo'q, lekin reel hali ham suhbatda turadi.
+
+    unanswered_only — faqat oxirgi AI javobidan keyin yuborilgan havolalar.
+    Biz o'sha reel haqida allaqachon javob bergan bo'lsak, mijozning keyingi
+    rasmi yangi savol: uni eski havola bilan javoblash xato bo'ladi.
     """
+    queryset = conversation.messages.filter(sender="customer")
+    if unanswered_only:
+        last_ai = conversation.messages.filter(sender="ai").order_by("-created_at", "-id").first()
+        if last_ai:
+            queryset = queryset.filter(created_at__gt=last_ai.created_at)
     links = []
-    for message in conversation.messages.filter(sender="customer").order_by("-created_at", "-id")[:30]:
+    for message in queryset.order_by("-created_at", "-id")[:30]:
         for attachment in (message.metadata or {}).get("attachments") or []:
             url = attachment.get("url") or ""
             if url and url not in links:
@@ -1357,14 +1366,13 @@ def direct_ai_catalog_link_matches(items, source_url, attachment=None, conversat
             return matched
     if conversation is None:
         return []
-    # Mijozning o'zi suratga olgan rasmi suhbatdagi eski reel havolasi bilan
-    # javob berilmaydi. Aks holda mijoz avval reel yuborib, keyin butunlay
-    # boshqa gulning rasmini tashlaganda o'sha eski reeldagi gullar qaytardi va
-    # javob "siz yuborgan reeldan borlari shular" bo'lib chiqardi — rasm esa
-    # umuman tahlil qilinmasdi.
-    if (attachment or {}).get("kind") == "photo":
-        return []
-    for link in conversation_shared_links(conversation):
+    # Mijozning o'z rasmi uchun faqat HALI JAVOB BERILMAGAN havolalar qaraladi.
+    # Reel yuborib, darhol o'sha reelning skrinshotini tashlash — bitta savol,
+    # havola ishlaydi. Reel haqida javob berib bo'lgach kelgan rasm esa yangi
+    # savol: uni eski reel bilan javoblasak "siz yuborgan reeldan borlari
+    # shular" deb noto'g'ri javob chiqadi va rasm umuman tahlil qilinmaydi.
+    photo = (attachment or {}).get("kind") == "photo"
+    for link in conversation_shared_links(conversation, unanswered_only=photo):
         if media_url_match_key(link) == media_url_match_key(source_url):
             continue
         matched = items_matching_link(items, link)
