@@ -8591,3 +8591,62 @@ class StoryLookupCoversEveryConnectedAccountTests(TestCase):
         with patch.object(self.platform_services.requests, "get", maybe_explode):
             rows = self.platform_services.instagram_active_stories()
         self.assertEqual([row["id"] for row in rows], ["story-2"])
+
+
+class BargainingIsRecognisedByTheVerbTests(TestCase):
+    """Mijoz savdolashuvni "arzonroq" so'zisiz, "berasiz" fe'li bilan so'raydi.
+
+    Real suhbatda "Shuni nechpul qberas" ga oddiy narx, "Bolishi nechpul" ga esa
+    yetkazib berish savoli qaytdi. Ro'yxatga yangi shakl qo'shish yetmaydi —
+    modelga fe'l bo'yicha ajratishni o'rgatish kerak.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0141_ai_prompt_bargaining_verbs")
+
+    def test_the_phrasings_from_the_real_chat_are_listed(self):
+        block = self.migration.NEW_BARGAIN
+        for phrase in ["nechpul qberas", "bolishi nechpul", "bo'lishi qancha", "qanchaga qo'yasiz"]:
+            self.assertIn(phrase, block, f"savdolashuv shakli yo'q: {phrase}")
+
+    def test_the_verb_tells_a_price_question_from_a_haggle(self):
+        block = self.migration.NEW_BARGAIN
+        self.assertIn("RO'YXATNI YOD OLMA, FE'LGA QARA", block)
+        self.assertIn('"turadi", "narxi qancha", "nechpul" → oddiy narx savoli', block)
+        self.assertIn('"berasiz", "qberasla", "qo\'yasiz", "qilib berasiz", "bo\'lishi" → savdolashuv', block)
+
+    def test_the_two_real_mistakes_are_written_out(self):
+        block = self.migration.NEW_BARGAIN
+        self.assertIn('mijoz "Shuni nechpul qberas" dedi, sen 1 000 000 so\'m deding', block)
+        self.assertIn('mijoz "Bolishi nechpul" dedi', block)
+
+    def test_a_question_the_customer_asked_is_not_a_block_to_drop(self):
+        block = self.migration.NEW_BLOCKS
+        self.assertIn("Mijozning o'zi so'ragan savol", block)
+        self.assertIn("ketma-ket ikki xabarda", block)
+        self.assertIn('mijoz "Nechpul qberasla" va "Manzil qayoda" deb yozdi', block)
+
+    def test_it_rewrites_each_anchor_once(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.OLD_BARGAIN + "orasi\n" + self.migration.OLD_BLOCKS + "oxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        prompt = row.system_prompt
+        self.assertEqual(prompt.count("RO'YXATNI YOD OLMA, FE'LGA QARA"), 1)
+        self.assertEqual(prompt.count("Mijozning o'zi so'ragan savol"), 1)
+        self.assertIn("bolishi nechpul", prompt)
+        self.assertNotIn(self.migration.OLD_BARGAIN, prompt)
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.OLD_BARGAIN + "orasi\n" + self.migration.OLD_BLOCKS + "oxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
