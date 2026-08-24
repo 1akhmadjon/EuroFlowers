@@ -72,6 +72,16 @@ MEDIA_MATCH_GROUP_INSTRUCTION = (
     "catalog_id larni send_catalog_album bilan yubor va mijozdan qaysi biri "
     "kerakligini so'ra. Bittasini tanlab narx aytma."
 )
+# Mijoz rasm yuborib "shu guldan yasab bering" desa, u katalogdan gul qidirmayapti.
+# Bunday paytda katalog albomini yuborish savolga javob bo'lmaydi, shuning uchun
+# har ikkala "topilmadi" ko'rsatmasi yasatma javobiga yo'l ochib qo'yadi.
+MEDIA_MATCH_CUSTOM_ORDER_NOTE = (
+    " LEKIN mijoz shu guldan YASAB BERISHNI so'ragan bo'lsa (\"yasab berolislami\", "
+    "\"shunaqasini yasang\", \"shu guldan buket qb bering\") — bu yasatma buyurtma, "
+    "katalog qidiruvi emas. Unda albom YUBORMA va 00C bo'limidagi javobni ber: "
+    "xohlaganingizdek yasab beramiz, yuborgan rasmingizdagi guldan buket bo'yicha "
+    "business.operator_telegram ga yozing, operatorlarimiz shu haqida aniq ma'lumot berishadi."
+)
 MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "Aynan mos mahsulot topilmadi. Bitta ham katalog rasmini alohida YUBORMA va taxmin "
     "qilib mahsulot nomi yoki narxini aytma. Buning o'rniga send_catalog_album ni "
@@ -80,7 +90,7 @@ MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "yuborgan gul kerak bo'lsa business.operator_telegram dagi Telegram akkauntimizga "
     "yozing, operatorlarimiz siz yuborgan gul haqida aniq javob berishadi. Telefon "
     "raqami SO'RAMA va lead yaratma — mijoz katalogdan gul tanlasagina buyurtma bo'ladi."
-)
+) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
 MEDIA_MATCH_LINK_GROUP_INSTRUCTION = (
     "Mijoz yuborgan post/reelga bir nechta katalog mahsuloti qo'yilgan, qaysi birini "
     "so'raganini aytib bo'lmaydi. group_matches dagi catalog_id larni send_catalog_album "
@@ -101,7 +111,7 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "business.operator_telegram dagi Telegram akkauntimizga yozing, operatorlarimiz "
     "aniq narxini aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Telefon raqami "
     "SO'RAMA va lead yaratma."
-)
+) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
 MEDIA_MATCH_CLOSE_INSTRUCTION = (
     "Rasmdagi gul katalogimizdagi bir nechta mahsulotga juda yaqin, lekin qaysi biri "
     "ekaniga to'liq ishonch yo'q. group_matches dagi catalog_id larni send_catalog_album "

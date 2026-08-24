@@ -9636,3 +9636,24 @@ class APhotoWithMakeItRequestIsACustomOrderTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class TheMediaInstructionLeavesRoomForACustomOrderTests(TestCase):
+    """Tool ko'rsatmasi promptdan ustun keladi, shuning uchun izn o'sha yerda yozildi."""
+
+    def test_both_not_found_instructions_carry_the_note(self):
+        from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION, MEDIA_MATCH_CUSTOM_ORDER_NOTE
+        self.assertIn(MEDIA_MATCH_CUSTOM_ORDER_NOTE, MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        self.assertIn(MEDIA_MATCH_CUSTOM_ORDER_NOTE, MEDIA_MATCH_SIMILAR_INSTRUCTION)
+
+    def test_the_note_names_the_phrasings_and_the_answer(self):
+        from .services import MEDIA_MATCH_CUSTOM_ORDER_NOTE as note
+        self.assertIn("yasab berolislami", note)
+        self.assertIn("albom YUBORMA", note)
+        self.assertIn("yuborgan rasmingizdagi guldan", note)
+        self.assertIn("business.operator_telegram", note)
+
+    def test_the_original_instructions_still_say_what_they_said(self):
+        from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION
+        self.assertIn("butun katalogni yubor", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        self.assertIn("Telefon raqami SO'RAMA", MEDIA_MATCH_SIMILAR_INSTRUCTION)
