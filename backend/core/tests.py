@@ -9233,3 +9233,45 @@ class TheReplyLanguageComesFromTheScriptFieldTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class WiltedAndNaturalAreTwoDifferentQuestionsTests(TestCase):
+    """0147 da ikkita savolni bitta ro'yxatga qo'shib qo'ygandim.
+
+    "Табиийми" ga so'lish haqidagi javob qaytdi — mijoz esa gul tirikmi deb
+    so'ragan edi.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0149_ai_prompt_natural_is_not_wilted")
+
+    def test_natural_left_the_wilting_list(self):
+        wilting = self.migration.NEW_BLOCK.split("esa BOSHQA savol")[0]
+        for word in ["tabiiymi", "jivoymi", "табиийми", "живойми"]:
+            self.assertNotIn(word, wilting, f"so'lish ro'yxatida qolib ketgan: {word}")
+
+    def test_the_wilting_phrasings_are_still_all_there(self):
+        block = self.migration.NEW_BLOCK
+        for word in ["solib qolmaganmi", "solib komaganmi", "солиб комаганми",
+                     "гул солиб комаганми", "svejiymi", "свежийми"]:
+            self.assertIn(word, block)
+
+    def test_natural_has_its_own_one_line_answer(self):
+        block = self.migration.NEW_BLOCK
+        self.assertIn("BOSHQA savol", block)
+        self.assertIn("ha, hammasi tabiiy tirik gul", block)
+        self.assertIn("Unga so'lish javobini berma", block)
+
+    def test_it_applies_once_and_reverts(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.OLD_BLOCK + "\noxir"
+        row.system_prompt = original
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
