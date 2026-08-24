@@ -9528,3 +9528,67 @@ class APhotoIsAlwaysAnalysedNotAnsweredFromAnOldReelTests(TestCase):
             conversation=self.conversation,
         )
         self.assertEqual([row.id for row in matched], [self.item.id])
+
+
+class TheAssistantNeverAsksForAPhoneTests(TestCase):
+    """Raqam so'rash promptdan butunlay olib tashlandi.
+
+    extra_teest suhbatida mijoz "Yasab berolislami" deb so'raganda AI
+    "telefon raqamingizni yozib qoldiring" deb javob berdi. Endi mijoz nima
+    so'raganini takrorlab, Telegram akkauntga yo'naltiriladi.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0152_ai_prompt_never_ask_for_a_phone")
+
+    def test_the_top_rule_forbids_it_outright(self):
+        block = self.migration.NEW_TOP
+        self.assertIn("ISM VA TELEFON HECH QACHON SO'RALMAYDI", block)
+        self.assertIn("client_lead_create ni ham\nCHAQIRMAYSAN", block)
+        self.assertIn("shu qoida ulardan ustun", block)
+
+    def test_the_forbidden_sentences_are_named(self):
+        block = self.migration.NEW_TOP
+        for line in ['"Telefon raqamingizni qoldiring"',
+                     '"Ism va telefon raqamingizni yozib yuboring"',
+                     '"Operatorlarimiz aloqaga chiqib aytishadi"']:
+            self.assertIn(line, block)
+
+    def test_a_custom_order_repeats_the_request_and_redirects(self):
+        block = self.migration.NEW_CUSTOM
+        self.assertIn("O'Z SO'ZI bilan qisqa takrorla", block)
+        self.assertIn("business.operator_telegram", block)
+        self.assertIn("yuborgan rasmingizdagi guldan", block)
+        self.assertIn("Telefon raqami SO'RAMA va client_lead_create CHAQIRMA.", block)
+
+    def test_the_custom_order_no_longer_gathers_details(self):
+        block = self.migration.NEW_CUSTOM
+        self.assertIn("Ma'lumot yig'ma, ketma-ket savol berma", block)
+        self.assertNotIn("buketmi yoki savatmi", block)
+        self.assertNotIn("topic       custom_order", block)
+
+    def test_the_when_section_says_never(self):
+        self.assertIn("Hech qachon va hech qanday holatda.", self.migration.NEW_WHEN)
+
+    def test_every_patch_applies_once(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "\n\n".join(old for old, _ in self.migration.PATCHES)
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        for marker in self.migration.MARKERS:
+            self.assertEqual(row.system_prompt.count(marker), 1, f"takrorlandi yoki tushmadi: {marker[:40]}")
+        self.assertNotIn("ISM VA TELEFON FAQAT BUYURTMA UCHUN", row.system_prompt)
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "\n\n".join(old for old, _ in self.migration.PATCHES)
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
