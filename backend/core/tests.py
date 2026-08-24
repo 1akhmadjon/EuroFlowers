@@ -9120,9 +9120,11 @@ class OneAmbiguousWordDoesNotSwitchTheLanguageTests(TestCase):
 
     def test_the_reply_builder_decides_from_the_pending_batch(self):
         source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
-        self.assertIn("cyrillic_mode = conversation_script(pending_customer_messages or [latest_customer_text])", source)
-        # pending ro'yxati cyrillic_mode dan OLDIN hisoblanishi kerak
-        self.assertLess(source.index("pending_customer_messages = [message.text"), source.index("cyrillic_mode = conversation_script"))
+        self.assertIn("customer_script = conversation_script(pending_customer_messages or [latest_customer_text])", source)
+        self.assertIn('cyrillic_mode = customer_script == "uz_cyril"', source)
+        # pending ro'yxati yozuv aniqlanishidan OLDIN hisoblanishi kerak
+        self.assertLess(source.index("pending_customer_messages = [message.text"),
+                        source.index("customer_script = conversation_script("))
 
 
 class EveryPendingMessageGetsAnAnswerTests(TestCase):
@@ -9246,7 +9248,10 @@ class WiltedAndNaturalAreTwoDifferentQuestionsTests(TestCase):
         self.migration = importlib.import_module("core.migrations.0149_ai_prompt_natural_is_not_wilted")
 
     def test_natural_left_the_wilting_list(self):
-        wilting = self.migration.NEW_BLOCK.split("esa BOSHQA savol")[0]
+        listed = [line for line in self.migration.NEW_BLOCK.splitlines()
+                  if line.strip().startswith(("lotin:", "kirill:")) or line.startswith("          \"")]
+        wilting = "\n".join(listed)
+        self.assertIn("solib qolmaganmi", wilting, "ro'yxat topilmadi")
         for word in ["tabiiymi", "jivoymi", "табиийми", "живойми"]:
             self.assertNotIn(word, wilting, f"so'lish ro'yxatida qolib ketgan: {word}")
 
