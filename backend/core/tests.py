@@ -9364,3 +9364,39 @@ class TheAssistantDoesNotRepeatItselfTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class AQualityQuestionDescribesTheFlowerTests(TestCase):
+    """«Sifati qanaqa» ga so'lish javobi qaytardi — mijoz gulni bilmoqchi edi."""
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0151_ai_prompt_quality_from_the_note")
+
+    def test_the_answer_comes_from_the_note(self):
+        block = self.migration.BLOCK
+        self.assertIn("Javobni izohdan ol", block)
+        self.assertIn("nechta guli borligi", block)
+        self.assertIn("get_catalog", block)
+
+    def test_both_scripts_are_listed(self):
+        block = self.migration.BLOCK
+        self.assertIn("Sifati qanaqa", block)
+        self.assertIn("сифати канака", block)
+
+    def test_it_rules_out_the_wilting_answer(self):
+        self.assertIn("so'lish haqidagi javobni berma", self.migration.BLOCK)
+
+    def test_it_applies_once_and_reverts(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "\noxir"
+        row.system_prompt = original
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.MARKER), 1)
+        self.assertLess(row.system_prompt.index(self.migration.MARKER), row.system_prompt.index(self.migration.ANCHOR))
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
