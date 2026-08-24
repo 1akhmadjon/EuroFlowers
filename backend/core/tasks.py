@@ -41,7 +41,9 @@ def process_delayed_instagram_reply(conversation_id, expected_message_id, recipi
     if remaining is None:
         return None
     if remaining > 0:
-        process_delayed_instagram_reply.apply_async(args=[conversation_id, expected_message_id, recipient_id], countdown=ceil(remaining))
+        # account_id ni ham uzatamiz: mijoz ketma-ket yozganda vazifa qayta
+        # rejalashtiriladi va u tushib qolsa javob boshqa akkauntdan ketardi.
+        process_delayed_instagram_reply.apply_async(args=[conversation_id, expected_message_id, recipient_id, account_id], countdown=ceil(remaining))
         return None
     stop_typing = threading.Event()
     typing_thread = threading.Thread(target=keep_typing, args=(lambda: instagram_sender_action(recipient_id, "typing_on", account_id), stop_typing, f"INSTAGRAM_TYPING_ON_FAILED recipient={recipient_id}"), daemon=True)

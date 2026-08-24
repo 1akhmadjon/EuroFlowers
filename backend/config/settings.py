@@ -101,6 +101,9 @@ AI_CATALOG_MATCH_SHORTLIST = int(os.getenv("AI_CATALOG_MATCH_SHORTLIST", "4"))
 AI_CATALOG_MATCH_MIN_SCORE = int(os.getenv("AI_CATALOG_MATCH_MIN_SCORE", "55"))
 AI_TEST_INSTAGRAM_USERNAMES = [value.strip().lower().lstrip("@") for value in os.getenv("AI_TEST_INSTAGRAM_USERNAMES", "extra_teest").split(",") if value.strip()]
 AI_TEST_INSTAGRAM_USER_IDS = [value.strip() for value in os.getenv("AI_TEST_INSTAGRAM_USER_IDS", "").split(",") if value.strip()]
+# Test uchun ajratilgan Instagram akkaunt. Shu akkauntga kelgan har qanday xabar
+# test hisoblanadi: kim yozganidan qat'i nazar AI javob beradi.
+AI_TEST_INSTAGRAM_ACCOUNT_IDS = [value.strip() for value in os.getenv("AI_TEST_INSTAGRAM_ACCOUNT_IDS", "17841476392326035").split(",") if value.strip()]
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
 INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID", "")
 INSTAGRAM_VERIFY_TOKEN = os.getenv("INSTAGRAM_VERIFY_TOKEN", "change-me")

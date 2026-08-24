@@ -142,8 +142,24 @@ def ai_globally_active():
     return AISettings.objects.get_or_create(pk=1)[0].is_active
 
 
+def conversation_test_account(conversation):
+    """Suhbat test uchun ajratilgan Instagram akkauntga kelganmi.
+
+    Test akkauntga kim yozsa ham u test suhbati. Ilgari faqat yozgan mijozning
+    username i tekshirilardi va boshqa odam test akkauntga yozganda AI jim
+    qolardi — aslida o'sha akkauntdagi hamma yozishma test.
+    """
+    account_id = str(conversation_instagram_account_id(conversation) or "")
+    if not account_id:
+        message = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+        account_id = str((message.metadata or {}).get("instagram_recipient_id") or "") if message else ""
+    return bool(account_id and account_id in settings.AI_TEST_INSTAGRAM_ACCOUNT_IDS)
+
+
 def ai_allowed_for_conversation(conversation):
     if ai_globally_active():
+        return True
+    if conversation_test_account(conversation):
         return True
     customer = conversation.customer
     username = (customer.instagram_username or "").lower().lstrip("@")

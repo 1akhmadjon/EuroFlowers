@@ -9012,3 +9012,68 @@ class TheSecondRoundOfPromptFixesTests(TestCase):
         self.migration.apply_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, "boshqa prompt")
+
+
+class EveryMessageToTheTestAccountIsATestChatTests(TestCase):
+    """Test akkauntga kim yozsa ham AI javob beradi.
+
+    Ilgari faqat yozgan mijozning username i tekshirilardi. Boshqa odam test
+    akkauntga yozganda AI jim qolardi — serverda saidbek_ab extra_teest ga
+    yozdi va javob olmadi.
+    """
+
+    def setUp(self):
+        AISettings.objects.update_or_create(pk=1, defaults={"is_active": False})
+        self.test_account = "17841476392326035"
+        patcher = override_settings(
+            AI_TEST_INSTAGRAM_ACCOUNT_IDS=[self.test_account],
+            AI_TEST_INSTAGRAM_USERNAMES=["extra_teest"],
+            AI_TEST_INSTAGRAM_USER_IDS=[],
+        )
+        patcher.enable()
+        self.addCleanup(patcher.disable)
+
+    def _conversation(self, username, account_id):
+        customer = Customer.objects.create(instagram_username=username, instagram_user_id=f"ig-{username}")
+        conversation = Conversation.objects.create(customer=customer)
+        Message.objects.create(
+            conversation=conversation, sender="customer", text="Assalomu alaykum",
+            metadata={"instagram_account_id": account_id, "instagram_recipient_id": account_id},
+        )
+        return conversation
+
+    def test_a_stranger_writing_to_the_test_account_gets_the_ai(self):
+        self.assertTrue(ai_allowed_for_conversation(self._conversation("saidbek_ab", self.test_account)))
+
+    def test_the_same_stranger_on_the_live_account_does_not(self):
+        self.assertFalse(ai_allowed_for_conversation(self._conversation("saidbek_ab", "17841460916008920")))
+
+    def test_the_recipient_id_is_enough_when_the_account_id_is_missing(self):
+        customer = Customer.objects.create(instagram_username="kimdir", instagram_user_id="ig-kimdir")
+        conversation = Conversation.objects.create(customer=customer)
+        Message.objects.create(conversation=conversation, sender="customer", text="salom",
+                               metadata={"instagram_recipient_id": self.test_account})
+        self.assertTrue(ai_allowed_for_conversation(conversation))
+
+    def test_the_old_username_allowlist_still_works(self):
+        customer = Customer.objects.create(instagram_username="extra_teest", instagram_user_id="ig-extra")
+        self.assertTrue(ai_allowed_for_conversation(Conversation.objects.create(customer=customer)))
+
+    def test_a_conversation_with_no_metadata_stays_off(self):
+        customer = Customer.objects.create(instagram_username="oddiy", instagram_user_id="ig-oddiy")
+        conversation = Conversation.objects.create(customer=customer)
+        Message.objects.create(conversation=conversation, sender="customer", text="salom", metadata={})
+        self.assertFalse(ai_allowed_for_conversation(conversation))
+
+    def test_the_latest_account_decides(self):
+        conversation = self._conversation("kochma", "17841460916008920")
+        self.assertFalse(ai_allowed_for_conversation(conversation))
+        Message.objects.create(conversation=conversation, sender="customer", text="yana",
+                               metadata={"instagram_account_id": self.test_account})
+        self.assertTrue(ai_allowed_for_conversation(conversation))
+
+    def test_the_reply_task_keeps_the_account_when_it_reschedules(self):
+        source = Path(__file__).with_name("tasks.py").read_text(encoding="utf-8")
+        reschedule = [line for line in source.splitlines() if "apply_async(args=[conversation_id, expected_message_id, recipient_id" in line]
+        self.assertEqual(len(reschedule), 1)
+        self.assertIn("account_id]", reschedule[0], "qayta rejalashtirishda akkaunt tushib qolgan")
