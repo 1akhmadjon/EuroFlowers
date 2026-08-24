@@ -8923,6 +8923,14 @@ class SaleGroupMessageCarriesTheSizeTests(TestCase):
         caption = self._caption(volume="katta", height_cm=60, diameter_cm=45)
         self.assertIn("Hajmi: katta · bo‘yi 60 sm · diametri 45 sm", caption)
 
+    def test_the_english_volume_key_is_written_in_uzbek(self):
+        for stored, shown in [("large", "katta"), ("medium", "o‘rtacha"),
+                              ("small", "kichik"), ("extra_large", "juda katta")]:
+            self.assertIn(f"Hajmi: {shown}", self._caption(volume=stored), f"o'girilmadi: {stored}")
+
+    def test_an_unknown_volume_is_shown_as_written(self):
+        self.assertIn("Hajmi: pastak savat", self._caption(volume="pastak savat"))
+
     def test_it_is_skipped_when_nothing_is_known(self):
         self.assertNotIn("Hajmi", self._caption())
 

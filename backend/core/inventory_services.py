@@ -2266,6 +2266,16 @@ def money_uz(amount):
     return f"{Decimal(amount or 0):,.0f}".replace(",", " ")
 
 
+# Hajm bazada inglizcha kalit bo'lib turadi. Guruhga odam o'qiydigan xabar ketadi,
+# shuning uchun o'zbekchaga o'giriladi. Ro'yxatda yo'q qiymat o'zgarishsiz chiqadi.
+VOLUME_LABELS_UZ = {
+    "small": "kichik",
+    "medium": "o\u2018rtacha",
+    "large": "katta",
+    "extra_large": "juda katta",
+}
+
+
 def sale_group_caption(item, history, payment_type, image_url=""):
     """Guruhga boradigan xabar: nima sotildi, qanchaga, qanday to'landi."""
     from django.utils import timezone
@@ -2285,7 +2295,7 @@ def sale_group_caption(item, history, payment_type, image_url=""):
     # Hajm uch joydan yig'iladi: operator yozgan hajm nomi, bo'yi va diametri.
     # Guruhdagi florist qaysi gul sotilganini shu qatordan aniqlaydi.
     size = " \u00b7 ".join(part for part in (
-        (item.volume or "").strip(),
+        VOLUME_LABELS_UZ.get((item.volume or "").strip().lower(), (item.volume or "").strip()),
         f"bo\u2018yi {item.height_cm} sm" if item.height_cm else "",
         f"diametri {item.diameter_cm} sm" if item.diameter_cm else "",
     ) if part)
