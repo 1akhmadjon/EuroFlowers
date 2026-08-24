@@ -8936,3 +8936,79 @@ class SaleGroupMessageCarriesTheSizeTests(TestCase):
         self.assertIn("Jami olingan: *850 000 so‘m*", caption)
         self.assertIn("To‘lov: *Aralash*", caption)
         self.assertIn("Sotdi: Sotuvchi A", caption)
+
+
+class TheSecondRoundOfPromptFixesTests(TestCase):
+    """Birinchi test to'plamidan keyin qolgan kamchiliklar.
+
+    Ish vaqti yarim aytildi, kelin buketi oddiy yasatma deb qabul qilindi, pion
+    o'rniga pionavidniy ko'rsatildi, salomlashish ikkinchi javobda ham qaytdi,
+    yozuv narxi so'ralganda katalog yuborildi.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0146_ai_prompt_hours_bride_and_greeting")
+
+    def test_working_hours_answer_carries_both_halves(self):
+        self.assertIn("IKKALASI ham aytiladi", self.migration.NEW_HOURS)
+        self.assertIn("Do'kon 24/7 ochiq. Administratorlarimiz esa har kuni operator_hours", self.migration.NEW_HOURS)
+        self.assertIn("administratorlar vaqtini ber", self.migration.NEW_ONLY_HOURS)
+
+    def test_a_bridal_bouquet_is_not_an_ordinary_custom_order(self):
+        block = self.migration.NEW_CUSTOM
+        self.assertIn("KELIN BUKETI BU BO'LIMGA KIRMAYDI", block)
+        self.assertIn("business.operator_telegram", block)
+        self.assertIn("Telefon so'rama, lead yaratma", block)
+
+    def test_a_peony_is_not_a_peony_shaped_rose(self):
+        block = self.migration.NEW_CATALOG
+        self.assertIn("PION va PIONAVIDNIY boshqa-boshqa gul", block)
+        self.assertIn("Pionaviy gullardan tayyor", block)
+        self.assertIn("zakazga olinadi", block)
+        self.assertIn("Yo'qligini aytmasdan katalogni yuborish yarim javob", block)
+
+    def test_the_greeting_does_not_come_back_on_the_second_reply(self):
+        block = self.migration.NEW_GREETING
+        self.assertIn("IKKINCHI va undan keyingi javoblarida", block)
+        self.assertIn("Buket Bambastic — 900 000 so'm", block)
+
+    def test_a_phone_number_is_never_ignored(self):
+        block = self.migration.NEW_GREETING
+        self.assertIn("MIJOZ RAQAM YUBORSA E'TIBORSIZ QOLDIRMA", block)
+        self.assertIn("raqam yo'qoladi", block)
+
+    def test_the_lettering_question_is_not_answered_with_an_album(self):
+        block = self.migration.NEW_LETTER
+        self.assertIn("yozuv va harfning narxi katalogda yo'q", block)
+        self.assertIn("telefon bloki birga yozilmaydi", block)
+
+    def test_every_patch_applies_once_and_only_when_its_anchor_is_there(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "\n".join(old for old, _ in self.migration.PATCHES)
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        for marker in self.migration.MARKERS:
+            self.assertEqual(row.system_prompt.count(marker), 1, f"takrorlandi yoki tushmadi: {marker[:40]}")
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "\n".join(old for old, _ in self.migration.PATCHES)
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
+
+    def test_it_does_nothing_when_the_prompt_has_no_anchors(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "boshqa prompt"
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, "boshqa prompt")
