@@ -8741,3 +8741,49 @@ class CheckTheVerbBeforeWritingAPriceTests(TestCase):
         self.migration.revert_prompt(installed_apps, None)
         row.refresh_from_db()
         self.assertEqual(row.system_prompt, original)
+
+
+class AHaggleReadsTheNoteBeforeTheGenericAnswerTests(TestCase):
+    """Savdolashuvni tanigach izohdagi kelishilgan narx aytiladi, umumiy javob emas.
+
+    0143 dan keyin model savdolashuvni tanidi, lekin izohda 800 000 turgan bo'lsa
+    ham "gullarimizning yangiligi... budjetingiz qancha" degan 10C javobini yozdi.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0144_ai_prompt_haggle_reads_the_note_first")
+
+    def test_it_names_the_two_steps(self):
+        block = self.migration.INSERT
+        self.assertIn("get_catalog chaqirib mijoz gapirayotgan gulni top", block)
+        self.assertIn("Uning izohidagi kelishilgan narxni bitta qatorda ayt", block)
+
+    def test_it_does_not_ask_which_flower_again(self):
+        self.assertIn('"Qaysi gulni nazarda tutyapsiz" deb qayta SO\'RAMA', self.migration.INSERT)
+
+    def test_the_generic_discount_answer_is_ruled_out_when_a_note_price_exists(self):
+        block = self.migration.INSERT
+        self.assertIn("10C dagi umumiy javobni YOZMA", block)
+        self.assertIn("budjetingiz qancha", block)
+        self.assertIn("faqat izohda\nkelishilgan narx bo'lmaganda ishlatiladi", block)
+
+    def test_it_inserts_once_after_the_check(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = "bosh\n" + self.migration.ANCHOR + "oxir"
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count("Fe'l topilgach shu ikki qadamni bajar"), 1)
+
+    def test_it_can_be_reverted(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        original = "bosh\n" + self.migration.ANCHOR + "oxir"
+        row.system_prompt = original
+        row.save()
+        self.migration.apply_prompt(installed_apps, None)
+        self.migration.revert_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt, original)
