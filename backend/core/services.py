@@ -1145,12 +1145,9 @@ def operator_lead_rich_message(lead, conversation):
         html.append("<p>" + "<br/>".join(escape(line) for line in extra) + "</p>")
     if lead.request_uz:
         html.append(f"<p>🧠 So'rov<br/>{escape(lead.request_uz[:1200])}</p>")
-    links = [row["url"] for row in lead_operator_media(lead, conversation)]
-    if links:
-        html.append("<p>🔗 Media havolalar</p><ul>")
-        for url in links:
-            html.append(f'<li><a href="{escape(url)}">{escape(url)}</a></li>')
-        html.append("</ul>")
+    # Media havolalar ro'yxati yozilmaydi: rasmlar yuqorida slideshow bo'lib
+    # ketadi, uzun signed CDN havolalari esa xabarni o'qishga xalaqit qiladi va
+    # bir necha soatdan keyin baribir ochilmaydi.
     return {"html": "\n".join(html), "media": media_items}
 
 

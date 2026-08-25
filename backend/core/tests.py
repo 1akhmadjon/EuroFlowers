@@ -9657,3 +9657,45 @@ class TheMediaInstructionLeavesRoomForACustomOrderTests(TestCase):
         from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION
         self.assertIn("butun katalogni yubor", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
         self.assertIn("Telefon raqami SO'RAMA", MEDIA_MATCH_SIMILAR_INSTRUCTION)
+
+
+class TheGroupMessageCarriesNoMediaLinksTests(TestCase):
+    """Rasmlar slideshow bo'lib ketadi, havolalar ro'yxati yozilmaydi.
+
+    Uzun signed CDN havolalari xabarni o'qishga xalaqit qilardi va bir necha
+    soatdan keyin baribir ochilmaydi.
+    """
+
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Ahmad", phone="+998901234567",
+                                                instagram_username="link_probe", instagram_user_id="ig-link")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        Message.objects.create(
+            conversation=self.conversation, sender="customer", text="shu nechpul",
+            metadata={"attachments": [{"url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=999&signature=Ab1xyz", "kind": "photo"}]},
+        )
+        self.lead = Lead.objects.create(conversation=self.conversation, customer=self.customer,
+                                        request_uz="Mijoz rasm yubordi", source="ai")
+
+    def _html(self):
+        from .services import operator_lead_rich_message
+        return operator_lead_rich_message(self.lead, self.conversation)
+
+    def test_no_link_list_and_no_anchor_tags(self):
+        message = self._html()
+        self.assertNotIn("Media havolalar", message["html"])
+        self.assertNotIn("<a href=", message["html"])
+        self.assertNotIn("lookaside.fbsbx.com", message["html"])
+
+    def test_the_photo_still_travels_as_media(self):
+        message = self._html()
+        self.assertTrue(message["media"], "rasm slideshow'dan ham tushib qolgan")
+        self.assertIn("lookaside.fbsbx.com", message["media"][0]["media"]["media"])
+        self.assertIn("tg://photo", message["html"])
+
+    def test_the_rest_of_the_message_is_untouched(self):
+        html = self._html()["html"]
+        self.assertIn(f"Yangi lead #{self.lead.id}", html)
+        self.assertIn("Ahmad", html)
+        self.assertIn("+998901234567", html)
+        self.assertIn("Mijoz rasm yubordi", html)
