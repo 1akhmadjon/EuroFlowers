@@ -8042,8 +8042,10 @@ class NaturalSalesFlowTests(TestCase):
         with patch("core.services.telegram_send_rich_message_with", return_value={"ok": True}) as send:
             execute_ai_tool("client_lead_create", arguments, self.conversation)
         payload = send.call_args.args[2]
-        self.assertIn(photo, payload["html"])
+        # Rasm slideshow bo'lib ketadi; havolasi matn bo'lib yozilmaydi.
         self.assertEqual([row["media"]["media"] for row in payload["media"]], [photo])
+        self.assertIn("tg://photo", payload["html"])
+        self.assertNotIn(photo, payload["html"])
 
     @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
     def test_a_failing_telegram_send_never_loses_the_lead(self):
