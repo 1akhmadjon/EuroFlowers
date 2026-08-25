@@ -9699,3 +9699,49 @@ class TheGroupMessageCarriesNoMediaLinksTests(TestCase):
         self.assertIn("Ahmad", html)
         self.assertIn("+998901234567", html)
         self.assertIn("Mijoz rasm yubordi", html)
+
+
+class TheGroupMessageCarriesNoCatalogNoteTests(TestCase):
+    """Katalog izohi ichki yozuv — guruhdagi xabarga tushmaydi."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Sardor", phone="+998935556677",
+                                                instagram_username="izoh_probe", instagram_user_id="ig-izoh")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.item = AICatalogItem.objects.create(
+            name="Alfalob Kompazitsia", arrangement_type="bouquet", price=Decimal("1000000"),
+            note="ALfalob gulidan yasalgan, 100 ta guli boladi, narxi:1000000 kelishtirilgan narxi 800000",
+            image_url="https://cdn.example.com/alfalob.jpg", is_active=True,
+        )
+        self.lead = Lead.objects.create(
+            conversation=self.conversation, customer=self.customer, source="ai",
+            request_uz="Mijoz katalogdan tanladi",
+            details={"catalog_items": [{"ai_catalog_item": self.item.id, "catalog_name": self.item.name,
+                                        "price": "1000000", "quantity": 1}]},
+        )
+
+    def test_the_note_is_not_in_the_message(self):
+        from .services import operator_lead_rich_message
+        html = operator_lead_rich_message(self.lead, self.conversation)["html"]
+        self.assertNotIn("kelishtirilgan narxi", html)
+        self.assertNotIn("100 ta guli boladi", html)
+        self.assertNotIn("<i>", html)
+
+    def test_the_name_and_price_stay(self):
+        from .services import operator_lead_rich_message
+        html = operator_lead_rich_message(self.lead, self.conversation)["html"]
+        self.assertIn("Alfalob Kompazitsia", html)
+        self.assertIn("1 000 000 so&#x27;m", html)
+        self.assertIn("Tanlagan mahsuloti", html)
+
+    def test_the_catalog_photo_still_travels(self):
+        from .services import operator_lead_rich_message
+        message = operator_lead_rich_message(self.lead, self.conversation)
+        self.assertIn("https://cdn.example.com/alfalob.jpg",
+                      [row["media"]["media"] for row in message["media"]])
+
+    def test_the_helper_no_longer_returns_a_note(self):
+        from .services import lead_catalog_lines
+        rows = lead_catalog_lines(self.lead)
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("note", rows[0])

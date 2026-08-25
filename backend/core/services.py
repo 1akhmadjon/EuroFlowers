@@ -1076,7 +1076,11 @@ def lead_when_line(lead):
 
 
 def lead_catalog_lines(lead):
-    """Mijoz tanlagan AI katalog mahsulotlari, narxi va operator izohi bilan."""
+    """Mijoz tanlagan AI katalog mahsulotlari va narxi.
+
+    Katalog izohi bu yerga kirmaydi: u ichki yozuv va operatorlar guruhidagi
+    xabarni uzaytirib yuboradi, operator uni CRM da baribir ko'radi.
+    """
     rows = []
     for row in (lead.details or {}).get("catalog_items") or []:
         item = AICatalogItem.objects.filter(id=row.get("ai_catalog_item")).first()
@@ -1088,7 +1092,6 @@ def lead_catalog_lines(lead):
         title = f"{name} × {quantity}" if quantity > 1 else name
         rows.append({
             "text": f"{title} — {money_uz(price)} so'm" if price else title,
-            "note": (item.note or "")[:300] if item else "",
             "image_url": item.image_url if item and item.image_url else "",
         })
     return rows
@@ -1130,10 +1133,7 @@ def operator_lead_rich_message(lead, conversation):
     if catalog_rows:
         html.append("<p>🛍 Tanlagan mahsuloti</p><ul>")
         for row in catalog_rows:
-            line = escape(row["text"])
-            if row["note"]:
-                line += f"<br/><i>{escape(row['note'])}</i>"
-            html.append(f"<li>{line}</li>")
+            html.append(f'<li>{escape(row["text"])}</li>')
         html.append("</ul>")
     if details.get("flowers_text") or details.get("size_text"):
         wanted = " · ".join(value for value in [details.get("flowers_text"), details.get("size_text")] if value)
