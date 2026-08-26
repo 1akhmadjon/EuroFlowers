@@ -1890,7 +1890,8 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     # bema'ni javob beradi, shuning uchun gul tahlilidan oldin rasm saralanadi.
     # Bu tekshiruv link, reklama va story yo'llaridan KEYIN turadi: o'sha
     # yo'llarda javob allaqachon aniq va ko'rish so'rovi umuman kerak emas.
-    if attachment.get("kind") == "photo":
+    # Suhbatda buyurtma bo'lmasa chek ham bo'lmaydi — bekorga so'rov yubormaymiz.
+    if attachment.get("kind") == "photo" and conversation.leads.exists():
         kind = vision_services.classify_customer_image(media_url, api_key=api_key)
         if kind.get("kind") == "payment_receipt" and kind.get("confidence") in {"medium", "high"}:
             return media_match_result(conversation, {

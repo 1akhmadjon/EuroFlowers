@@ -9852,6 +9852,11 @@ class PaymentFlowTests(TestCase):
         self.assertEqual(payload["message_id"], 77)
         self.assertIn("💳 Karta", payload.get("caption") or payload.get("text"))
 
+    def test_a_photo_is_only_classified_once_an_order_exists(self):
+        """Buyurtma bo'lmagan suhbatda chek ham bo'lmaydi — bekorga so'rov ketmaydi."""
+        source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
+        self.assertIn('if attachment.get("kind") == "photo" and conversation.leads.exists():', source)
+
     def test_a_receipt_goes_to_the_group_with_two_buttons(self):
         from .payment_services import register_receipt, save_payment_state
         save_payment_state(self.lead, operator_message_id=77, type="card")
