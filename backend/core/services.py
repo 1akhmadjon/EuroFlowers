@@ -1022,7 +1022,9 @@ def ai_catalog_lead_rows(arguments):
         quantity = int(row.get("quantity") or 1)
         if quantity <= 0:
             continue
-        item = _catalog_item_for_ai(row.get("catalog_name"))
+        item = AICatalogItem.objects.filter(id=row.get("catalog_id"), is_active=True).first() if row.get("catalog_id") else None
+        if not item:
+            item = _catalog_item_for_ai(row.get("catalog_name"))
         rows.append({
             "catalog_name": item.name if item else str(row.get("catalog_name") or "").strip()[:180],
             "quantity": quantity,
@@ -1257,6 +1259,36 @@ def items_matching_link(items, link):
         if catalog_key == key or catalog_key in key or key in catalog_key:
             matched.append(item)
     return matched
+
+
+def items_matching_ads(items, ad_id="", post_id=""):
+    ad_id = str(ad_id or "").strip()
+    post_id = str(post_id or "").strip()
+    if not ad_id and not post_id:
+        return []
+    matched = []
+    for item in items:
+        if ad_id and str(item.instagram_ad_id or "").strip() == ad_id:
+            matched.append(item)
+            continue
+        if post_id and str(item.instagram_ad_post_id or "").strip() == post_id:
+            matched.append(item)
+    return matched
+
+
+def ads_context_from_conversation(conversation, source_url=""):
+    for message in conversation.messages.filter(sender="customer").order_by("-created_at", "-id")[:20]:
+        metadata = message.metadata or {}
+        attachments = metadata.get("attachments") or []
+        if source_url and not any(row.get("url") == source_url for row in attachments):
+            continue
+        referral = metadata.get("instagram_referral") or {}
+        ads_context = referral.get("ads_context_data") or {}
+        ad_id = metadata.get("instagram_ad_id") or referral.get("ad_id") or ""
+        post_id = metadata.get("instagram_ad_post_id") or ads_context.get("post_id") or referral.get("post_id") or ""
+        if ad_id or post_id:
+            return {"ad_id": str(ad_id or ""), "post_id": str(post_id or "")}
+    return {"ad_id": "", "post_id": ""}
 
 
 def customer_shared_our_post(attachment):
@@ -1646,8 +1678,38 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         return {"ok": False, "allow_send": False, "allow_group": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
     media_url = attachment["url"]
 
-    # Mijoz yuborgan story/reel bizning qaysi postimiz ekani ma'lum bo'lsa, o'sha
-    # postga qo'yilgan kataloglar aniq javob — rasmni tahlil qilish shart emas.
+    ads = ads_context_from_conversation(conversation, media_url)
+    ads_linked = items_matching_ads(items, ads.get("ad_id"), ads.get("post_id"))
+    if len(ads_linked) == 1:
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": True,
+            "allow_group": False,
+            "detail": "instagram_ad_matched",
+            "source": attachment,
+            "source_description": "Mijoz reklama orqali yozdi, ad_id katalogdagi mahsulot bilan aynan mos keldi.",
+            "matches": [catalog_match_row(ads_linked[0], reason="instagram ad matched")],
+            "group_matches": [],
+            "near_matches": [],
+            "no_match_reason": "",
+            "own_post": True,
+            "instruction_uz": MEDIA_MATCH_OWN_POST_INSTRUCTION,
+        })
+    if ads_linked:
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": False,
+            "allow_group": True,
+            "detail": "instagram_ad_group",
+            "source": attachment,
+            "source_description": "Mijoz reklama orqali yozdi, bu ad_id bir nechta katalog mahsulotiga bog'langan.",
+            "matches": [],
+            "group_matches": [catalog_match_row(item, reason="instagram ad matched") for item in ads_linked[:MAX_LINK_MATCHES]],
+            "near_matches": [],
+            "no_match_reason": "",
+            "instruction_uz": MEDIA_MATCH_LINK_GROUP_INSTRUCTION,
+        })
+
     own_post = social_post_for_media(attachment)
     linked = direct_ai_catalog_link_matches(items, media_url, attachment=attachment, conversation=conversation)
     story = social_post_answer(own_post) if not linked else None
@@ -1970,10 +2032,11 @@ def ai_tool_definitions():
     lead_catalog_item_schema = {
         "type": "object",
         "properties": {
+            "catalog_id": {"type": ["integer", "null"], "description": "get_catalog, match_ai_catalog_by_media yoki send_catalog_album natijasidagi catalog_id. Ma'lum bo'lsa majburiy yubor."},
             "catalog_name": {"type": "string"},
             "quantity": {"type": "integer"},
         },
-        "required": ["catalog_name", "quantity"],
+        "required": ["catalog_id", "catalog_name", "quantity"],
         "additionalProperties": False,
     }
     lead_request_properties = {
@@ -2916,17 +2979,39 @@ def _catalog_item_for_ai(*values):
             texts.extend(_catalog_text_aliases(compact_match_text(value)))
     available_items = list(available_ai_catalog_queryset())
     for text in texts:
+        exact = [item for item in available_items if compact_match_text(item.name) == text]
+        if len(exact) == 1:
+            return exact[0]
+    substring_matches = []
+    for text in texts:
         for item in available_items:
             name = compact_match_text(item.name)
             if name and name in text:
-                return item
-            tokens = [token for token in name.split() if token not in {"buketi", "buket", "guldasta", "kompozitsiya"}]
-            if len(tokens) >= 2 and all(token in text for token in tokens[:2]):
-                return item
-            if len(tokens) == 1 and len(tokens[0]) >= 4 and tokens[0] in text:
+                substring_matches.append((len(name), item))
+    if substring_matches:
+        return sorted(substring_matches, key=lambda row: row[0], reverse=True)[0][1]
+    scored = []
+    ignored = {"buketi", "buket", "guldasta", "kompozitsiya", "kompazitsia", "kompozitsiya"}
+    for text in texts:
+        text_tokens = set(text.split())
+        for item in available_items:
+            name = compact_match_text(item.name)
+            tokens = [token for token in name.split() if token not in ignored]
+            if not tokens:
+                continue
+            matched = sum(1 for token in tokens if token in text_tokens)
+            if matched >= 2:
+                scored.append((matched, matched / max(len(tokens), 1), len(name), item))
+            if len(tokens) == 1 and len(tokens[0]) >= 4 and tokens[0] in text_tokens:
                 matches = [row for row in available_items if tokens[0] in compact_match_text(row.name).split()]
                 if len(matches) == 1:
                     return item
+    if scored:
+        scored.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+        best = scored[0]
+        tied = [row for row in scored if row[:3] == best[:3]]
+        if len(tied) == 1:
+            return best[3]
     return None
 
 

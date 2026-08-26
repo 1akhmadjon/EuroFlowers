@@ -632,6 +632,8 @@ class AICatalogItem(TimeStampedModel):
     note = models.TextField(blank=True)
     image_url = models.URLField(blank=True)
     instagram_link = models.URLField(blank=True)
+    instagram_ad_id = models.CharField(max_length=120, blank=True)
+    instagram_ad_post_id = models.CharField(max_length=120, blank=True)
     is_active = models.BooleanField(default=True)
     # Rasmning bir marta tahlil qilingan tavsifi. Mijoz rasm yuborganda katalogning
     # hamma rasmini qaytadan modelga bermaslik uchun shu yerda turadi.

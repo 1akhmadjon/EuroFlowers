@@ -363,6 +363,8 @@ def first_media_attachment(message):
 
 def instagram_message_metadata(event, webhook_event=None):
     message = event.get("message", {}) or {}
+    referral = event.get("referral") or message.get("referral") or {}
+    ads_context = referral.get("ads_context_data") or {}
     rows = []
     for attachment in message.get("attachments", []) or []:
         attachment_type = attachment.get("type", "")
@@ -371,14 +373,19 @@ def instagram_message_metadata(event, webhook_event=None):
             rows.append({"kind": attachment_kind("instagram_attachment", attachment_type, url), "type": attachment_type, "url": url, "source": "instagram_attachment"})
     for source, value in [
         ("instagram_message", message),
-        ("instagram_referral", event.get("referral") or message.get("referral") or {}),
+        ("instagram_referral", referral),
         ("instagram_reply_to", message.get("reply_to") or {}),
     ]:
         for url in urls_from_value(value):
             rows.append({"kind": attachment_kind(source, "", url), "type": "", "url": url, "source": source})
     if webhook_event and webhook_event.story_url:
         rows.append({"kind": attachment_kind("instagram_webhook_event", webhook_event.event_type, webhook_event.story_url), "type": webhook_event.event_type, "url": webhook_event.story_url, "source": "instagram_webhook_event"})
-    return {"attachments": unique_attachment_rows(rows)}
+    return {
+        "attachments": unique_attachment_rows(rows),
+        "instagram_referral": referral or {},
+        "instagram_ad_id": str(referral.get("ad_id") or ""),
+        "instagram_ad_post_id": str(ads_context.get("post_id") or referral.get("post_id") or ""),
+    }
 
 
 def save_instagram_webhook_event(payload, entry, event):
@@ -388,7 +395,8 @@ def save_instagram_webhook_event(payload, entry, event):
     story_attachment = first_story_attachment(message)
     media_attachment = first_media_attachment(message)
     extracted = flatten_interesting_payload(event)
-    media_id = first_string_from_keys(referral, ["media_id", "source_id", "id"]) or first_string_from_keys(reply_to, ["media_id", "story_id", "id"]) or nested_get(reply_to, ["story", "id"]) or first_string_from_keys(story_attachment, ["story_media_id", "media_id", "id"]) or media_attachment.get("id", "")
+    ads_context = referral.get("ads_context_data") or {}
+    media_id = first_string_from_keys(referral, ["media_id", "source_id", "id"]) or first_string_from_keys(ads_context, ["post_id"]) or first_string_from_keys(referral, ["ad_id", "post_id"]) or first_string_from_keys(reply_to, ["media_id", "story_id", "id"]) or nested_get(reply_to, ["story", "id"]) or first_string_from_keys(story_attachment, ["story_media_id", "media_id", "id"]) or media_attachment.get("id", "")
     story_id = first_string_from_keys(reply_to, ["story_id", "id"]) or first_string_from_keys(referral, ["story_id"]) or nested_get(reply_to, ["story", "id"]) or first_string_from_keys(story_attachment, ["story_media_id", "story_id", "id"])
     story_url = first_string_from_keys(referral, ["source_url", "url", "link", "permalink"]) or first_string_from_keys(reply_to, ["url", "link", "permalink"]) or nested_get(reply_to, ["story", "url"]) or first_string_from_keys(story_attachment, ["story_media_url", "url", "media_url"]) or media_attachment.get("url", "")
     media_id = media_id or media_id_from_url(story_url)

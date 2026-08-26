@@ -8037,6 +8037,50 @@ class NaturalSalesFlowTests(TestCase):
         self.assertTrue(send.call_args.args[2]["media"])
 
     @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_operator_message_uses_the_selected_ai_catalog_id(self):
+        from unittest.mock import patch
+        wrong = AICatalogItem.objects.create(name="Oq Jumila Atir Gulidan Yasalgan Kompazitsia 100 Tali", arrangement_type="bouquet", price=1000000, quantity=1, image_url="https://cdn.example.com/wrong.jpg")
+        selected = AICatalogItem.objects.create(name="Buket Jumila Va Oq Atir Guldan Yasalgan Kompazitsia", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/right.jpg")
+        arguments = self._lead_arguments(
+            request_text="Buket Jumila Va Oq Atir Guldan Yasalgan Kompazitsia katalogdan 1 dona",
+            estimated_price=199000,
+            catalog_items=[{"catalog_id": selected.id, "catalog_name": selected.name, "quantity": 1}],
+        )
+        with patch("core.services.telegram_send_rich_message_with", return_value={"ok": True}) as send:
+            result = execute_ai_tool("client_lead_create", arguments, self.conversation)
+        lead = Lead.objects.get(id=result["lead_id"])
+        self.assertEqual(lead.details["catalog_items"][0]["ai_catalog_item"], selected.id)
+        self.assertNotEqual(lead.details["catalog_items"][0]["ai_catalog_item"], wrong.id)
+        payload = send.call_args.args[2]
+        self.assertIn(selected.name, payload["html"])
+        self.assertNotIn(wrong.name, payload["html"])
+        self.assertEqual(payload["media"][0]["media"]["media"], selected.image_url)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_media_match_uses_instagram_ad_ids_before_vision(self):
+        from unittest.mock import patch
+        first = AICatalogItem.objects.create(name="Ad Buket Bir", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/1.jpg", instagram_ad_id="ad-1", instagram_ad_post_id="post-1")
+        second = AICatalogItem.objects.create(name="Ad Buket Ikki", arrangement_type="bouquet", price=199000, quantity=1, image_url="https://cdn.example.com/2.jpg", instagram_ad_id="ad-1", instagram_ad_post_id="post-1")
+        conversation = Conversation.objects.create(customer=Customer.objects.create(instagram_user_id="ig-ad-match"))
+        conversation.messages.create(
+            sender="customer",
+            text="Buyurtma bermoqchi edim\nMijoz yuborgan rasm: https://www.facebook.com/ads/image/?d=abc",
+            metadata={
+                "attachments": [{"kind": "photo", "url": "https://www.facebook.com/ads/image/?d=abc"}],
+                "instagram_referral": {"ad_id": "ad-1", "ads_context_data": {"post_id": "post-1"}},
+                "instagram_ad_id": "ad-1",
+                "instagram_ad_post_id": "post-1",
+            },
+        )
+        with patch("core.vision_services.OpenAI") as openai_class:
+            result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "buyurtma"}, conversation)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["allow_group"])
+        self.assertEqual(result["detail"], "instagram_ad_group")
+        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [first.id, second.id])
+        openai_class.assert_not_called()
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
     def test_the_photo_the_customer_sent_goes_to_the_operators_with_the_lead(self):
         """Rasm bo'yicha so'rovda operator mijoz yuborgan rasmni ko'rishi shart."""
         from unittest.mock import patch
