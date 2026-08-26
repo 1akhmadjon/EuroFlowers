@@ -101,6 +101,42 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
         typing_thread.join(timeout=1)
 
 
+def deliver_ai_reply(conversation, reply):
+    """AI javobini mijozga yetkazadi — Instagram yoki Telegram."""
+    from .services import conversation_instagram_account_id
+
+    external_id = conversation.customer.instagram_user_id or ""
+    try:
+        if external_id.startswith("telegram:"):
+            telegram_send(external_id.split(":", 1)[1], reply.text)
+        elif external_id:
+            instagram_send(external_id, reply.text, conversation_instagram_account_id(conversation))
+    except Exception as error:
+        print(f"LOCATION_REPLY_SEND_FAILED conversation={conversation.id} error={error}", flush=True)
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def process_location_reply(conversation_id, message_id):
+    """Manzil kelgach AI o'z navbatida javob beradi.
+
+    Manzil suhbatga mijoz xabari bo'lib yozilgani uchun odatdagi javob yo'li
+    ishlaydi — alohida matn yozilmaydi, AI suhbat holatiga qarab o'zi hal qiladi.
+    """
+    from .models import Conversation
+    from .services import create_ai_reply_for_conversation
+
+    if not should_start_ai_reply(conversation_id, message_id):
+        return None
+    conversation = Conversation.objects.filter(id=conversation_id).first()
+    if not conversation:
+        return None
+    reply = create_ai_reply_for_conversation(conversation)
+    if not reply:
+        return None
+    deliver_ai_reply(conversation, reply)
+    return reply.id
+
+
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def process_lead_recall(lead_id):
     return bool(send_lead_recall(lead_id))

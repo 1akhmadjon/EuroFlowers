@@ -34,7 +34,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AICatalogItem, Debt, Expense, MaterialDelivery, StockDelivery, AISettings, AuditLog, Branch, BusinessSettings, CatalogTransfer, CatalogComposition, CatalogHistory, CatalogItem, CatalogRework, Conversation, Customer, FloristAttendance, FloristProfile, FloristPayment, FloristSalaryEntry, FloristVolumeRate, Flower, FlowerVariant, InstagramSettings, InstagramWebhookEvent, IntegrationSettings, Lead, LeadCatalogUsage, LeadStatus, LeadStockUsage, Message, Notification, Packaging, PackagingMovement, PagePermission, Reservation, ReservationPayment, FloristDayOff, FloristFaceSample, FloristStockBalance, FloristStockIssue, SocialPost, StockBatch, StockMovement, Supplier, SupplierDebtAdjustment, SupplierPayment
 from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
-from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogSaleRestoreRequestSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, StockBatchSellRequestSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristPaymentSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
+from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogSaleRestoreRequestSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, StockBatchSellRequestSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, DeliveryLocationSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristPaymentSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
 from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, sell_stock_batch, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_sale, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
@@ -5531,6 +5531,32 @@ def telegram_webhook(request):
     from .tasks import process_telegram_webhook
     process_telegram_webhook.delay(request.data)
     return Response({"status": "EVENT_RECEIVED"})
+
+
+@extend_schema(request=DeliveryLocationSerializer, responses={200: OpenApiResponse(description="Location handled")})
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def delivery_location(request):
+    """Mijoz xaritada belgilagan manzilni qabul qiladi.
+
+    Sahifani mijoz brauzerda ochadi, shuning uchun endpoint ochiq. O'rniga
+    havoladagi maxfiy kod tekshiriladi: kod leadning o'zida turadi. Lead
+    topilmasa so'rov shunchaki o'tkazib yuboriladi.
+    """
+    from .location_services import accept_location
+
+    serializer = DeliveryLocationSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+    result = accept_location(
+        data["lead_id"], data["token"], data["latitude"], data["longitude"],
+        address=data.get("address", ""),
+    )
+    if result["status"] == "rejected":
+        return Response({"status": "REJECTED"}, status=status.HTTP_403_FORBIDDEN)
+    if result["status"] == "skipped":
+        return Response({"status": "SKIPPED"})
+    return Response({"status": "OK"})
 
 
 @extend_schema(request=inline_serializer(name="OperatorTelegramWebhookPayload", fields={}), responses={200: OpenApiResponse(description="Operator bot event received")})

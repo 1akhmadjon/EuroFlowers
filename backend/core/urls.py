@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
-from .views import AccountingReportView, ExpenseViewSet, AdminFloristsExcelExportView, AdminProfitExcelExportView, AICatalogItemViewSet, AuditLogViewSet, CatalogItemViewSet, CatalogReworkViewSet, ConversationViewSet, CustomerViewSet, DebtViewSet, EuroFlowersTokenObtainPairView, FloristAttendanceViewSet, FloristPaymentViewSet, FloristProfileViewSet, FloristSalaryEntryViewSet, AttendanceDeviceView, BranchReportView, BranchViewSet, CatalogTransferViewSet, FloristDayOffViewSet, FloristFaceSampleViewSet, FloristStockBalanceViewSet, FloristStockIssueViewSet, FloristVolumeRateViewSet, FloristSelfExcelExportView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, InventoryMovementJournalView, LeadStatusViewSet, LeadViewSet, NotificationViewSet, MaterialDeliveryViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, ReservationViewSet, SocialPostViewSet, StockBatchViewSet, StockDeliveryViewSet, StockMovementViewSet, SupplierDebtAdjustmentViewSet, SupplierPaymentViewSet, SupplierViewSet, UserViewSet, ai_settings, analytics, backup_telegram_webhook, business_settings, operator_telegram_webhook, change_password, dashboard, dashboard_excel_export, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
+from .views import AccountingReportView, ExpenseViewSet, AdminFloristsExcelExportView, AdminProfitExcelExportView, AICatalogItemViewSet, AuditLogViewSet, CatalogItemViewSet, CatalogReworkViewSet, ConversationViewSet, CustomerViewSet, DebtViewSet, EuroFlowersTokenObtainPairView, FloristAttendanceViewSet, FloristPaymentViewSet, FloristProfileViewSet, FloristSalaryEntryViewSet, AttendanceDeviceView, BranchReportView, BranchViewSet, CatalogTransferViewSet, FloristDayOffViewSet, FloristFaceSampleViewSet, FloristStockBalanceViewSet, FloristStockIssueViewSet, FloristVolumeRateViewSet, FloristSelfExcelExportView, FlowerVariantViewSet, FlowerViewSet, InstagramWebhookEventViewSet, InventoryMovementJournalView, LeadStatusViewSet, LeadViewSet, NotificationViewSet, MaterialDeliveryViewSet, PackagingMovementViewSet, PackagingViewSet, PagePermissionViewSet, ReservationViewSet, SocialPostViewSet, StockBatchViewSet, StockDeliveryViewSet, StockMovementViewSet, SupplierDebtAdjustmentViewSet, SupplierPaymentViewSet, SupplierViewSet, UserViewSet, ai_settings, analytics, backup_telegram_webhook, business_settings, delivery_location, operator_telegram_webhook, change_password, dashboard, dashboard_excel_export, integrations_settings, instagram_status, instagram_webhook, me, mini_app_catalog, mini_app_lead, mini_app_me, mini_app_quote, telegram_webhook, upload_file
 
 router = DefaultRouter()
 router.register("users", UserViewSet)
@@ -69,6 +69,7 @@ urlpatterns = [
     path("telegram/webhook/", telegram_webhook),
     path("backup/telegram/webhook/", backup_telegram_webhook),
     path("operator/telegram/webhook/", operator_telegram_webhook),
+    path("delivery-location/", delivery_location),
     path("mini-app/catalog/", mini_app_catalog),
     path("mini-app/me/", mini_app_me),
     path("mini-app/quote/", mini_app_quote),

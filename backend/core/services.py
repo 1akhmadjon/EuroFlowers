@@ -2373,6 +2373,20 @@ def ai_tool_definitions():
         },
         {
             "type": "function",
+            "name": "delivery_location_link",
+            "description": (
+                "Yetkazib berish manzilini xaritada belgilash havolasini beradi. Mijoz "
+                "yetkazib berishni tanlagach va suhbatda lead bor bo'lgach chaqiriladi. "
+                "Natijadagi link ni mijozga AYNAN o'sha ko'rinishda yoz, o'zgartirma va "
+                "qisqartirma. Havola bo'lmasa natijada bo'sh keladi — unda mijozdan manzilni "
+                "matn bilan yozishini so'ra. Mijoz manzilni matn bilan yozgan bo'lsa ham "
+                "havola berish zarar qilmaydi: xaritadagi nuqta kuryerga aniqroq."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            "strict": True,
+        },
+        {
+            "type": "function",
             "name": "call_operator",
             "description": (
                 "Operatorlarni chaqiradi. Mijozga \"operatorlarimiz sizga tez orada yozib "
@@ -2767,6 +2781,22 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             source_url=arguments.get("source_url") or "",
             user_text=arguments.get("user_text") or "",
         )
+    if name == "delivery_location_link":
+        from .location_services import location_link
+
+        lead = conversation.leads.order_by("-created_at", "-id").first()
+        if not lead:
+            return {"ok": False, "detail": "no_lead_yet",
+                    "instruction_uz": "Buyurtma hali ochilmagan. Avval mijoz gulni tanlashi kerak."}
+        link = location_link(lead)
+        if not link:
+            return {"ok": False, "detail": "link_not_configured", "link": "",
+                    "instruction_uz": "Xarita havolasi sozlanmagan. Mijozdan manzilni matn bilan "
+                                      "yozib yuborishini so'ra."}
+        return {"ok": True, "link": link, "lead_id": lead.id,
+                "instruction_uz": "Havolani mijozga aynan shu ko'rinishda yoz va xaritada "
+                                  "manzilini belgilab tanlash tugmasini bosishini so'ra. "
+                                  "Bitta qator yetarli, boshqa savol qo'shma."}
     if name == "call_operator":
         return dict(notify_operator_needed(conversation, (arguments.get("reason") or "").strip()),
                     instruction_uz=("Mijozga faqat shu mazmunda javob ber: operatorlarimiz sizga tez "

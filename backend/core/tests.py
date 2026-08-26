@@ -839,7 +839,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "call_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "call_operator", "delivery_location_link", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertIn(AISettings.objects.get(pk=1).system_prompt, kwargs["instructions"])
@@ -870,7 +870,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "call_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "call_operator", "delivery_location_link", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
@@ -8477,8 +8477,9 @@ class NoOperatorHandoffToolTests(TestCase):
         self.assertNotIn("handoff_media_to_operator", names)
         self.assertEqual(sorted(names), sorted([
             "client_leads_get", "client_lead_create", "client_lead_edit",
-            "client_payment_update", "call_operator", "match_ai_catalog_by_media",
-            "get_catalog", "send_catalog_image", "send_post_image", "send_catalog_album",
+            "client_payment_update", "call_operator", "delivery_location_link",
+            "match_ai_catalog_by_media", "get_catalog", "send_catalog_image",
+            "send_post_image", "send_catalog_album",
         ]))
 
     def test_calling_it_anyway_is_refused(self):
@@ -10124,3 +10125,149 @@ class TheCustomerNeverGetsATelegramHandleTests(TestCase):
         self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", block)
         self.assertIn("call_operator NI CHAQIRASAN", block)
         self.assertIn("Gap yozib, tool chaqirmaslik XATO", block)
+
+
+class DeliveryLocationTests(TestCase):
+    """Mijoz xaritada belgilagan manzil."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Ahmad", phone="+998901112233",
+                                                instagram_username="loc_probe", instagram_user_id="ig-loc")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.lead = Lead.objects.create(conversation=self.conversation, customer=self.customer,
+                                        source="ai", request_uz="Buket tanladi")
+        self.client = APIClient()
+
+    def _post(self, **overrides):
+        from .location_services import ensure_token
+        body = {"lead_id": self.lead.id, "token": ensure_token(self.lead),
+                "latitude": "41.2995000000", "longitude": "69.2401000000"}
+        body.update(overrides)
+        return self.client.post("/api/delivery-location/", body, format="json")
+
+    # --- havola ---
+
+    def test_the_token_is_made_once_and_kept(self):
+        from .location_services import ensure_token
+        first = ensure_token(self.lead)
+        self.lead.refresh_from_db()
+        self.assertEqual(ensure_token(self.lead), first)
+        self.assertTrue(len(first) >= 8)
+
+    @override_settings(DELIVERY_LOCATION_URL="https://front.uz/loc/{lead_id}?t={token}")
+    def test_the_link_carries_the_lead_and_the_token(self):
+        from .location_services import location_link, ensure_token
+        link = location_link(self.lead)
+        self.assertIn(f"/loc/{self.lead.id}?t=", link)
+        self.assertIn(ensure_token(self.lead), link)
+
+    @override_settings(DELIVERY_LOCATION_URL="")
+    def test_an_unset_url_gives_no_link(self):
+        from .location_services import location_link
+        self.assertEqual(location_link(self.lead), "")
+
+    @override_settings(DELIVERY_LOCATION_URL="https://front.uz/loc/{lead_id}?t={token}")
+    def test_the_tool_hands_the_link_to_the_ai(self):
+        result = execute_ai_tool("delivery_location_link", {}, self.conversation)
+        self.assertTrue(result["ok"])
+        self.assertIn("front.uz/loc/", result["link"])
+        self.assertIn("aynan shu ko'rinishda", result["instruction_uz"])
+
+    def test_the_tool_refuses_without_a_lead(self):
+        empty = Conversation.objects.create(customer=Customer.objects.create(instagram_user_id="ig-empty"))
+        self.assertEqual(execute_ai_tool("delivery_location_link", {}, empty)["detail"], "no_lead_yet")
+
+    @override_settings(DELIVERY_LOCATION_URL="")
+    def test_an_unset_url_tells_the_ai_to_ask_in_text(self):
+        result = execute_ai_tool("delivery_location_link", {}, self.conversation)
+        self.assertFalse(result["ok"])
+        self.assertIn("matn bilan", result["instruction_uz"])
+
+    # --- API ---
+
+    def test_a_good_request_is_accepted(self):
+        from unittest.mock import patch
+        with patch("core.location_services.send_location_to_group", return_value={"ok": True}), \
+             patch("core.tasks.process_location_reply.delay") as later:
+            response = self._post(address="Chilonzor 5, 12-uy")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "OK")
+        self.lead.refresh_from_db()
+        state = (self.lead.details or {})["location"]
+        self.assertEqual(state["latitude"], "41.2995000000")
+        self.assertEqual(state["longitude"], "69.2401000000")
+        self.assertEqual(self.lead.delivery_address, "Chilonzor 5, 12-uy")
+        self.assertTrue(later.called)
+
+    def test_a_wrong_token_is_refused(self):
+        response = self._post(token="notatoken")
+        self.assertEqual(response.status_code, 403)
+        self.lead.refresh_from_db()
+        self.assertNotIn("latitude", (self.lead.details or {}).get("location", {}))
+
+    def test_an_unknown_lead_is_skipped(self):
+        response = self._post(lead_id=99999999, token="whatever")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "SKIPPED")
+
+    def test_broken_coordinates_are_refused(self):
+        self.assertEqual(self._post(latitude="200").status_code, 400)
+        self.assertEqual(self._post(longitude="abc").status_code, 400)
+
+    def test_a_typed_address_is_not_overwritten(self):
+        from unittest.mock import patch
+        self.lead.delivery_address = "Mijoz o'zi yozgan manzil"
+        self.lead.save(update_fields=["delivery_address"])
+        with patch("core.location_services.send_location_to_group", return_value={"ok": True}), \
+             patch("core.tasks.process_location_reply.delay"):
+            self._post(address="Xaritadan kelgan manzil")
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.delivery_address, "Mijoz o'zi yozgan manzil")
+        self.assertEqual((self.lead.details or {})["location"]["address"], "Xaritadan kelgan manzil")
+
+    # --- guruh va suhbat ---
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_the_location_replies_to_the_lead_message(self):
+        from unittest.mock import patch
+        from .location_services import save_location_state, send_location_to_group
+        from .payment_services import save_payment_state
+        save_payment_state(self.lead, operator_message_id=321)
+        save_location_state(self.lead, latitude="41.2995", longitude="69.2401", address="Chilonzor 5")
+        calls = []
+        with patch("core.location_services.telegram_api_with_token",
+                   side_effect=lambda t, m, p: calls.append((m, p)) or {"ok": True}):
+            self.assertTrue(send_location_to_group(self.lead)["ok"])
+        method, payload = calls[0]
+        self.assertEqual(method, "sendLocation")
+        self.assertEqual(payload["reply_to_message_id"], 321)
+        self.assertAlmostEqual(payload["latitude"], 41.2995, places=4)
+        self.assertAlmostEqual(payload["longitude"], 69.2401, places=4)
+        note = calls[1][1]
+        self.assertIn(f"Lead #{self.lead.id}", note["text"])
+        self.assertIn("Chilonzor 5", note["text"])
+        self.assertEqual(note["reply_to_message_id"], 321)
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_without_coordinates_nothing_is_sent(self):
+        from .location_services import send_location_to_group
+        self.assertEqual(send_location_to_group(self.lead)["detail"], "no_coordinates")
+
+    def test_the_location_lands_in_the_chat_as_a_customer_message(self):
+        from .location_services import save_location_state, record_customer_location_message
+        save_location_state(self.lead, latitude="41.2995", longitude="69.2401", token="secret")
+        message = record_customer_location_message(self.lead, "Chilonzor 5")
+        self.assertEqual(message.sender, "customer")
+        self.assertIn("xaritada belgiladi", message.text)
+        self.assertIn("Chilonzor 5", message.text)
+        # Maxfiy kod suhbatga yozilmaydi.
+        self.assertNotIn("secret", json.dumps(message.metadata))
+
+    def test_the_prompt_block_covers_the_flow(self):
+        migration = importlib.import_module("core.migrations.0158_ai_prompt_delivery_location")
+        block = migration.BLOCK
+        self.assertIn("delivery_location_link", block)
+        self.assertIn("AYNAN o'sha", block)
+        self.assertIn("MATN MANZILNI HAM QABUL QIL", block)
+        self.assertIn("Manzilingizni oldik", block)
+        self.assertIn("Koordinatani mijozga o'qib berma", block)

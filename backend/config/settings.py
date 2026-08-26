@@ -123,6 +123,9 @@ AI_OPERATOR_HANDOFF_THREAD_ID = os.getenv("AI_OPERATOR_HANDOFF_THREAD_ID", "")
 # Eslatma guruhi. Oddiy guruh superguruhga o'tsa id o'zgaradi — yangi id
 # IntegrationSettings.extra ga eslab qolinadi va shu qiymatdan ustun turadi.
 AI_RECALL_GROUP_ID = os.getenv("AI_RECALL_GROUP_ID", "-5385608916")
+# Mijoz manzilni xaritada belgilaydigan sahifa. {lead_id} va {token} o'rniga
+# leadning raqami va maxfiy kodi qo'yiladi. Sozlanmasa AI havola bermaydi.
+DELIVERY_LOCATION_URL = os.getenv("DELIVERY_LOCATION_URL", "")
 FRONTEND_CHAT_URL = os.getenv("FRONTEND_CHAT_URL", "https://euroflowers.cognilabs.org/chat?conversation_id={conversation_id}")
 CELERY_BEAT_SCHEDULE = {
     "lead-recalls-every-minute": {

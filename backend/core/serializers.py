@@ -2896,6 +2896,16 @@ class CatalogSellRequestSerializer(serializers.Serializer):
         return attrs
 
 
+class DeliveryLocationSerializer(serializers.Serializer):
+    """Mijoz xaritada belgilagan manzil. Frontend ochiq sahifadan yuboradi."""
+
+    lead_id = serializers.IntegerField(min_value=1)
+    token = serializers.CharField(max_length=64)
+    latitude = serializers.DecimalField(max_digits=16, decimal_places=10, min_value=Decimal("-90"), max_value=Decimal("90"))
+    longitude = serializers.DecimalField(max_digits=16, decimal_places=10, min_value=Decimal("-180"), max_value=Decimal("180"))
+    address = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
 class CatalogSaleRestoreRequestSerializer(serializers.Serializer):
     sale_history = serializers.PrimaryKeyRelatedField(queryset=CatalogHistory.objects.filter(action="sold", quantity__gt=0), required=False)
     quantity = serializers.IntegerField(min_value=1, required=False)
