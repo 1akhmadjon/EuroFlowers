@@ -4084,12 +4084,6 @@ class LeadViewSet(ScopedViewSet):
                 extra["sort_order"] = next_lead_sort_order(status_value)
             lead = serializer.save(**extra)
             write_audit(self.request.user, "lead_created", lead, before={}, after=instance_snapshot(lead), request=self.request)
-            if lead.status == "won":
-                try:
-                    deduct_lead_stock(lead, self.request.user)
-                    serializer.instance.refresh_from_db()
-                except ValueError as exc:
-                    raise serializers.ValidationError({"detail": str(exc)})
             transaction.on_commit(lambda lead_id=lead.id: schedule_lead_recall(Lead.objects.get(id=lead_id)))
 
     @extend_schema(request=LeadMoveSerializer, responses=LeadSerializer)
@@ -4113,13 +4107,7 @@ class LeadViewSet(ScopedViewSet):
             lead.status = status_value
             lead.sort_order = sort_order
             lead.save(update_fields=["status", "sort_order", "updated_at"])
-            if lead.status == "won" and before_status != "won":
-                try:
-                    deduct_lead_stock(lead, self.request.user)
-                    lead.refresh_from_db()
-                except ValueError as exc:
-                    raise serializers.ValidationError({"detail": str(exc)})
-            elif before_status == "won" and lead.status != "won":
+            if before_status == "won" and lead.status != "won":
                 restore_lead_stock(lead, self.request.user)
                 lead.refresh_from_db()
             after_snapshot = instance_snapshot(lead)
@@ -4156,12 +4144,7 @@ class LeadViewSet(ScopedViewSet):
                 lead.status = status_value
                 lead.sort_order = Decimal(index * 1000)
                 lead.save(update_fields=["status", "sort_order", "updated_at"])
-                if lead.status == "won" and before_status != "won":
-                    try:
-                        deduct_lead_stock(lead, self.request.user)
-                    except ValueError as exc:
-                        raise serializers.ValidationError({"detail": str(exc)})
-                elif before_status == "won" and lead.status != "won":
+                if before_status == "won" and lead.status != "won":
                     restore_lead_stock(lead, self.request.user)
                 lead.refresh_from_db()
                 after_snapshot = instance_snapshot(lead)
@@ -4175,13 +4158,7 @@ class LeadViewSet(ScopedViewSet):
             before_snapshot = instance_snapshot(serializer.instance)
             before_status = serializer.instance.status
             lead = serializer.save()
-            if lead.status == "won" and before_status != "won":
-                try:
-                    deduct_lead_stock(lead, self.request.user)
-                    serializer.instance.refresh_from_db()
-                except ValueError as exc:
-                    raise serializers.ValidationError({"detail": str(exc)})
-            elif before_status == "won" and lead.status != "won":
+            if before_status == "won" and lead.status != "won":
                 restore_lead_stock(lead, self.request.user)
                 serializer.instance.refresh_from_db()
             lead.refresh_from_db()

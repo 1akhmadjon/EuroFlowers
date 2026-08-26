@@ -5749,7 +5749,7 @@ class ApiTests(TestCase):
         self.assertTrue(rows[0]["has_image"])
         self.assertEqual(rows[0]["image_url"], "https://example.com/freedom.jpg")
 
-    def test_manual_lead_create_customer_and_deducts_stock_when_won(self):
+    def test_manual_lead_create_customer_does_not_deduct_stock_when_won(self):
         packaging = Packaging.objects.create(packaging_type="basket", name_uz="Lead savat", quantity=2, sale_price=50000)
         payload = {
                         "status": "new",
@@ -5773,8 +5773,12 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.batch.refresh_from_db()
         packaging.refresh_from_db()
-        self.assertEqual(self.batch.remaining_stems, 96)
-        self.assertEqual(packaging.quantity, 1)
+        lead = Lead.objects.get(id=lead_id)
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(packaging.quantity, 2)
+        self.assertIsNone(lead.stock_deducted_at)
+        self.assertFalse(StockMovement.objects.filter(reference_type="lead", reference_id=lead_id).exists())
+        self.assertFalse(PackagingMovement.objects.filter(reference_type="lead", reference_id=lead_id).exists())
         self.assertEqual(Customer.objects.get(phone="+998901112233").leads.count(), 1)
         response = self.client.patch(f"/api/leads/{lead_id}/", {"status": "lost"}, format="json")
         self.assertEqual(response.status_code, 200)
@@ -5784,16 +5788,16 @@ class ApiTests(TestCase):
         self.assertEqual(self.batch.remaining_stems, 100)
         self.assertEqual(packaging.quantity, 2)
         self.assertIsNone(lead.stock_deducted_at)
-        self.assertTrue(StockMovement.objects.filter(reference_type="lead", reference_id=lead_id, movement_type="adjustment", quantity_stems=4).exists())
-        self.assertTrue(PackagingMovement.objects.filter(reference_type="lead", reference_id=lead_id, movement_type="adjustment", quantity=1).exists())
+        self.assertFalse(StockMovement.objects.filter(reference_type="lead", reference_id=lead_id).exists())
+        self.assertFalse(PackagingMovement.objects.filter(reference_type="lead", reference_id=lead_id).exists())
         response = self.client.patch(f"/api/leads/{lead_id}/", {"status": "won"}, format="json")
         self.assertEqual(response.status_code, 200)
         self.batch.refresh_from_db()
         packaging.refresh_from_db()
-        self.assertEqual(self.batch.remaining_stems, 96)
-        self.assertEqual(packaging.quantity, 1)
+        self.assertEqual(self.batch.remaining_stems, 100)
+        self.assertEqual(packaging.quantity, 2)
 
-    def test_catalog_lead_stock_returns_when_won_is_reverted(self):
+    def test_catalog_lead_does_not_sell_catalog_when_won_is_reverted(self):
         item = CatalogItem.objects.create(name_uz="Catalog buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
         deduct_catalog_stock(item, self.user)
@@ -5813,7 +5817,7 @@ class ApiTests(TestCase):
         self.batch.refresh_from_db()
         item.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 85)
-        self.assertEqual(item.quantity_sold, 2)
+        self.assertEqual(item.quantity_sold, 0)
         self.assertEqual(item.quantity_stock_deducted, 3)
         response = self.client.post(f"/api/leads/{lead_id}/move/", {"status": "new"}, format="json")
         self.assertEqual(response.status_code, 200)
@@ -5824,7 +5828,7 @@ class ApiTests(TestCase):
         self.assertEqual(item.quantity_stock_deducted, 3)
         self.assertEqual(item.status, "available")
 
-    def test_catalog_lead_stock_returns_when_won_is_deleted(self):
+    def test_catalog_lead_delete_does_not_restore_when_won_was_not_deducted(self):
         item = CatalogItem.objects.create(name_uz="Delete buket", arrangement_type="bouquet", price=300000, quantity_total=3, status="available")
         CatalogComposition.objects.create(catalog_item=item, stock_batch=self.batch, quantity_stems=5)
         deduct_catalog_stock(item, self.user)
@@ -5844,7 +5848,7 @@ class ApiTests(TestCase):
         self.batch.refresh_from_db()
         item.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 85)
-        self.assertEqual(item.quantity_sold, 2)
+        self.assertEqual(item.quantity_sold, 0)
         response = self.client.delete(f"/api/leads/{lead_id}/")
         self.assertEqual(response.status_code, 204)
         self.batch.refresh_from_db()
