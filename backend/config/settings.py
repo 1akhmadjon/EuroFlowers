@@ -120,6 +120,9 @@ BACKUP_TELEGRAM_COMMAND = os.getenv("BACKUP_TELEGRAM_COMMAND", "/eurodan_backup_
 AI_OPERATOR_HANDOFF_BOT_TOKEN = os.getenv("AI_OPERATOR_HANDOFF_BOT_TOKEN", "8752325160:AAH4G3mm0ZlPgXI3nRqKhz9nvF5KuOYdixA")
 AI_OPERATOR_HANDOFF_GROUP_ID = os.getenv("AI_OPERATOR_HANDOFF_GROUP_ID", "-5195454751")
 AI_OPERATOR_HANDOFF_THREAD_ID = os.getenv("AI_OPERATOR_HANDOFF_THREAD_ID", "")
+# Eslatma guruhi. Oddiy guruh superguruhga o'tsa id o'zgaradi — yangi id
+# IntegrationSettings.extra ga eslab qolinadi va shu qiymatdan ustun turadi.
+AI_RECALL_GROUP_ID = os.getenv("AI_RECALL_GROUP_ID", "-5385608916")
 FRONTEND_CHAT_URL = os.getenv("FRONTEND_CHAT_URL", "https://euroflowers.cognilabs.org/chat?conversation_id={conversation_id}")
 CELERY_BEAT_SCHEDULE = {
     "lead-recalls-every-minute": {

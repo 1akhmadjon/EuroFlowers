@@ -388,6 +388,13 @@ def send_lead_recall(lead_id):
             telegram_send(group_chat_id, f"{title}\n{body}")
         except Exception as exc:
             print(f"LEAD_RECALL_TELEGRAM_FAILED lead={lead_id} error={exc}", flush=True)
+    # Eslatma guruhiga qisqa karta: kim, qaysi gul, qachon kerak.
+    from .recall_services import send_recall_card
+
+    try:
+        send_recall_card(lead)
+    except Exception as exc:
+        print(f"LEAD_RECALL_CARD_FAILED lead={lead_id} error={exc}", flush=True)
     return notification
 
 

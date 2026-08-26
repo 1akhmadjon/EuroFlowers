@@ -43,11 +43,13 @@ MAX_LINK_MATCHES = 10
 AI_CATALOG_SHORTLIST_FLOOR = 30
 
 
-def operator_telegram_text(handle):
-    handle = (handle or "").strip()
-    if not handle:
-        return ""
-    return f"{handle} Telegrami ga yozing"
+# Mijozga Telegram username berilmaydi. U hech qayerga yozmaydi — operatorning
+# o'zi chatga kirib yozadi, shuning uchun javob shunchaki kutishga chorlaydi.
+OPERATOR_PROMISE_UZ = "Operatorlarimiz sizga tez orada yozib yuborishadi"
+
+
+def operator_telegram_text(handle=""):
+    return OPERATOR_PROMISE_UZ
 
 
 # Guruhga faqat g'olib bilan shu qadar yaqin ballar tushadi. Undan pastdagisi
@@ -1202,6 +1204,49 @@ def notify_operators_about_lead(lead, conversation):
     return {"ok": True, "lead_id": lead.id}
 
 
+def operator_needed_message(conversation, reason=""):
+    """Operatorlar guruhiga ketadigan qisqa chaqiruv."""
+    customer = conversation.customer
+    platform = "Telegram" if customer.instagram_user_id.startswith("telegram:") else "Instagram"
+    lines = ["🙋 Operator kerak", ""]
+    lines.append(f"👤 {customer.name or 'Ism yozilmagan'}")
+    if customer.phone:
+        lines.append(f"📞 {customer.phone}")
+    if customer.instagram_username:
+        lines.append(f"📷 {platform} · @{customer.instagram_username}")
+    else:
+        lines.append(f"📍 {platform}")
+    last = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
+    if last and (last.text or "").strip():
+        lines.append(f"💬 {(last.text or '').strip()[:220]}")
+    if reason:
+        lines.append(f"🧠 {reason[:220]}")
+    return "\n".join(lines)
+
+
+def notify_operator_needed(conversation, reason=""):
+    """AI javob berolmadi — operatorlar guruhiga chat havolasi bilan xabar ketadi.
+
+    Mijozga username berilmaydi, shuning uchun operatorning o'zi chatga kirib
+    yozishi kerak. Xabar ostidagi tugma to'g'ri o'sha chatni ochadi.
+    """
+    token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
+    chat_id = settings.AI_OPERATOR_HANDOFF_GROUP_ID
+    if not token or not chat_id:
+        return {"ok": False, "detail": "operator_group_not_configured"}
+    keyboard = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
+    try:
+        sent = telegram_send_with(token, chat_id, operator_needed_message(conversation, reason),
+                                  reply_markup=keyboard,
+                                  message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+    except Exception as error:
+        print(f"OPERATOR_NEEDED_NOTIFY_FAILED conversation={conversation.id} error={error}", flush=True)
+        return {"ok": False, "detail": "send_failed"}
+    Message.objects.create(conversation=conversation, sender="system", text="",
+                           metadata={"operator_needed": {"reason": reason, "telegram_result": sent}})
+    return {"ok": bool(sent.get("ok")), "detail": ""}
+
+
 def latest_customer_media_attachment(conversation, source_url=""):
     attachments = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
     if source_url:
@@ -2328,6 +2373,29 @@ def ai_tool_definitions():
         },
         {
             "type": "function",
+            "name": "call_operator",
+            "description": (
+                "Operatorlarni chaqiradi. Mijozga \"operatorlarimiz sizga tez orada yozib "
+                "yuborishadi\" deb javob beradigan HAR QANDAY holatda shu tool chaqiriladi: "
+                "javobi senda bo'lmagan savol, rasmdagi gulni topolmaganing, shikoyat, "
+                "kelin buketi, to'y va tadbir bezash, hamkorlik, karta rekvizitlari yo'qligi. "
+                "Tool operatorlar guruhiga mijozning ismi, raqami, username i va oxirgi xabarini "
+                "yuboradi va ostiga shu chatni ochadigan tugma qo'yadi — operator o'zi kirib yozadi. "
+                "Mijozdan telefon SO'RAMA va lead YARATMA. reason ga bir og'iz o'zbekcha yoz: "
+                "operator nima uchun kerak."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "Operator nima uchun kerak, qisqa o'zbekcha."},
+                },
+                "required": ["reason"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "type": "function",
             "name": "client_payment_update",
             "description": (
                 "Mijozning to'lov turi yoki to'lov cheki. Ikki holatda chaqiriladi. "
@@ -2699,6 +2767,11 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             source_url=arguments.get("source_url") or "",
             user_text=arguments.get("user_text") or "",
         )
+    if name == "call_operator":
+        return dict(notify_operator_needed(conversation, (arguments.get("reason") or "").strip()),
+                    instruction_uz=("Mijozga faqat shu mazmunda javob ber: operatorlarimiz sizga tez "
+                                    "orada yozib yuborishadi. Telegram username BERMA, telefon "
+                                    "so'rama, lead yaratma."))
     if name == "client_payment_update":
         from . import payment_services
 
@@ -2791,6 +2864,10 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                 if batch and quantity_stems > 0:
                     LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
         save_conversation_ai_summary(conversation, lead)
+        # Sana keyin aytilgan bo'lsa eslatma shu yerda qo'yiladi.
+        from .recall_services import schedule_from_desired_date
+
+        schedule_from_desired_date(lead)
         return {"ok": True, "lead_id": lead.id}
     if not request_text:
         return {"ok": False, "detail": "request_text_required"}
@@ -2820,6 +2897,10 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             LeadStockUsage.objects.create(lead=lead, stock_batch=batch, quantity_stems=quantity_stems, quantity_bunches=Decimal(str(row.get("quantity_bunches") or 0)))
     Notification.objects.create(notification_type="lead", title_uz=f"Yangi lead: {customer}", title_ru=f"Новый лид: {customer}", body_uz=request_text, body_ru=request_text, reference_type="lead", reference_id=lead.id)
     save_conversation_ai_summary(conversation, lead)
+    # Mijoz sanani aytgan bo'lsa o'sha kun ertalab 9:00 ga eslatma qo'yiladi.
+    from .recall_services import schedule_from_desired_date
+
+    schedule_from_desired_date(lead)
     # Operatorlar leadni CRM ni ochib emas, Telegram guruhida ko'radi. Yuborilmasa
     # buyurtma bazada yotib qoladi va hech kim mijozga qo'ng'iroq qilmaydi.
     notified = notify_operators_about_lead(lead, conversation)

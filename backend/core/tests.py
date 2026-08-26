@@ -836,7 +836,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "call_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertIn(AISettings.objects.get(pk=1).system_prompt, kwargs["instructions"])
@@ -867,7 +867,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "call_operator", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
@@ -8474,8 +8474,8 @@ class NoOperatorHandoffToolTests(TestCase):
         self.assertNotIn("handoff_media_to_operator", names)
         self.assertEqual(sorted(names), sorted([
             "client_leads_get", "client_lead_create", "client_lead_edit",
-            "client_payment_update", "match_ai_catalog_by_media", "get_catalog",
-            "send_catalog_image", "send_post_image", "send_catalog_album",
+            "client_payment_update", "call_operator", "match_ai_catalog_by_media",
+            "get_catalog", "send_catalog_image", "send_post_image", "send_catalog_album",
         ]))
 
     def test_calling_it_anyway_is_refused(self):
@@ -9953,3 +9953,171 @@ class CaptionPriceTests(TestCase):
         with patch("core.services.media_caption_for_attachment", return_value=""):
             rows, price = caption_price_matches([], {"url": "https://www.instagram.com/reel/AAA/", "kind": "reel"})
         self.assertEqual((rows, price), ([], None))
+
+
+class RecallOnTheRequestedDateTests(TestCase):
+    """Mijoz sanani aytsa o'sha kun ertalab 9:00 ga eslatma qo'yiladi."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Ahmad", phone="+998901112233",
+                                                instagram_username="recall_probe", instagram_user_id="ig-recall")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.item = AICatalogItem.objects.create(name="Alfalob Buket", arrangement_type="bouquet",
+                                                 price=Decimal("800000"), is_active=True)
+
+    def _lead(self, **extra):
+        data = {"conversation": self.conversation, "customer": self.customer, "source": "ai",
+                "request_uz": "Mijoz buket tanladi"}
+        data.update(extra)
+        return Lead.objects.create(**data)
+
+    def test_the_recall_lands_at_nine_in_the_morning(self):
+        from datetime import date
+        from .recall_services import schedule_from_desired_date
+        lead = self._lead(desired_date=date(2026, 9, 3))
+        moment = schedule_from_desired_date(lead)
+        local = timezone.localtime(moment)
+        self.assertEqual((local.year, local.month, local.day), (2026, 9, 3))
+        self.assertEqual((local.hour, local.minute), (9, 0))
+        lead.refresh_from_db()
+        self.assertEqual(lead.recall_at, moment)
+
+    def test_no_date_means_no_recall(self):
+        from .recall_services import schedule_from_desired_date
+        self.assertIsNone(schedule_from_desired_date(self._lead()))
+
+    def test_an_operator_time_is_never_overwritten(self):
+        from datetime import date
+        from .recall_services import schedule_from_desired_date
+        chosen = timezone.now()
+        lead = self._lead(desired_date=date(2026, 9, 3), recall_at=chosen)
+        self.assertIsNone(schedule_from_desired_date(lead))
+        lead.refresh_from_db()
+        self.assertEqual(lead.recall_at, chosen)
+
+    def test_the_card_carries_everything_the_operator_needs(self):
+        from datetime import date
+        from .recall_services import recall_card
+        self.conversation.messages.create(sender="customer", text="Ertaga kerak edi")
+        lead = self._lead(desired_date=date(2026, 9, 3), desired_time="14:00",
+                          details={"catalog_items": [{"ai_catalog_item": self.item.id,
+                                                      "catalog_name": self.item.name,
+                                                      "price": "800000", "quantity": 1}]})
+        card = recall_card(lead)
+        self.assertIn(f"Lead #{lead.id}", card)
+        self.assertIn("Ahmad", card)
+        self.assertIn("+998901112233", card)
+        self.assertIn("@recall_probe", card)
+        self.assertIn("Alfalob Buket", card)
+        self.assertIn("03.09.2026", card)
+        self.assertIn("14:00", card)
+        self.assertIn("Yozgan:", card)
+
+    def test_a_custom_order_shows_the_customers_own_words(self):
+        from .recall_services import recall_card
+        lead = self._lead(details={"flowers_text": "Jumila pushti atirgul", "size_text": "51 dona"})
+        self.assertIn("Jumila pushti atirgul · 51 dona", recall_card(lead))
+
+
+class RecallGroupSurvivesASupergroupUpgradeTests(TestCase):
+    """Oddiy guruh superguruhga o'tsa id o'zgaradi — yangi id eslab qolinadi."""
+
+    def setUp(self):
+        patcher = override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_RECALL_GROUP_ID="-5385608916")
+        patcher.enable()
+        self.addCleanup(patcher.disable)
+
+    def test_the_configured_id_is_used_first(self):
+        from .recall_services import recall_group_id
+        self.assertEqual(recall_group_id(), "-5385608916")
+
+    def test_a_remembered_id_wins(self):
+        from .recall_services import recall_group_id, remember_group_id
+        remember_group_id("-1005385608916")
+        self.assertEqual(recall_group_id(), "-1005385608916")
+
+    def test_a_migration_error_is_retried_with_the_new_id(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from .recall_services import send_to_group, recall_group_id
+
+        class Boom(Exception):
+            def __init__(self):
+                self.response = SimpleNamespace(json=lambda: {"parameters": {"migrate_to_chat_id": -1009999}})
+
+        calls = []
+
+        def fake(token, method, payload):
+            calls.append(payload["chat_id"])
+            if len(calls) == 1:
+                raise Boom()
+            return {"ok": True}
+
+        with patch("core.recall_services.telegram_api_with_token", fake):
+            result = send_to_group("tok", "-5385608916", {"text": "salom"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["-5385608916", -1009999])
+        self.assertEqual(recall_group_id(), "-1009999")
+
+    def test_an_ordinary_failure_is_not_retried(self):
+        from unittest.mock import patch
+        from .recall_services import send_to_group
+        with patch("core.recall_services.telegram_api_with_token", side_effect=RuntimeError("tarmoq")):
+            self.assertEqual(send_to_group("tok", "-1", {"text": "x"})["detail"], "send_failed")
+
+    def test_nothing_is_sent_without_a_group(self):
+        from .recall_services import send_to_group
+        self.assertEqual(send_to_group("tok", "", {"text": "x"})["detail"], "recall_group_not_configured")
+
+
+class TheCustomerNeverGetsATelegramHandleTests(TestCase):
+    """Username butunlay olib tashlandi, o'rniga operator chaqiriladi."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(name="Sardor", phone="+998935556677",
+                                                instagram_username="op_probe", instagram_user_id="ig-op")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.conversation.messages.create(sender="customer", text="Kelin buket kerak edi")
+
+    def test_the_ready_phrase_has_no_handle(self):
+        from .services import operator_telegram_text
+        for handle in ["@euroflowerspremium", "", None]:
+            text = operator_telegram_text(handle)
+            self.assertEqual(text, "Operatorlarimiz sizga tez orada yozib yuborishadi")
+            self.assertNotIn("@", text)
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_calling_an_operator_notifies_the_group_with_a_chat_button(self):
+        from unittest.mock import patch
+        with patch("core.services.telegram_send_with", return_value={"ok": True}) as send:
+            result = execute_ai_tool("call_operator", {"reason": "Kelin buketi so'raldi"}, self.conversation)
+        self.assertTrue(result["ok"])
+        body = send.call_args.args[2]
+        self.assertIn("🙋 Operator kerak", body)
+        self.assertIn("Sardor", body)
+        self.assertIn("+998935556677", body)
+        self.assertIn("@op_probe", body)
+        self.assertIn("Kelin buket kerak edi", body)
+        self.assertIn("Kelin buketi so'raldi", body)
+        keyboard = send.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(keyboard["text"], "CRM chatni ochish")
+        self.assertIn(str(self.conversation.id), keyboard["url"])
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_the_instruction_forbids_a_handle_and_a_phone(self):
+        from unittest.mock import patch
+        with patch("core.services.telegram_send_with", return_value={"ok": True}):
+            result = execute_ai_tool("call_operator", {"reason": "x"}, self.conversation)
+        self.assertIn("operatorlarimiz sizga tez orada yozib yuborishadi", result["instruction_uz"])
+        self.assertIn("Telegram username BERMA", result["instruction_uz"])
+
+    def test_the_tool_is_in_the_list(self):
+        self.assertIn("call_operator", [tool["name"] for tool in ai_tool_definitions()])
+
+    def test_the_prompt_block_spells_the_rule_out(self):
+        migration = importlib.import_module("core.migrations.0157_ai_prompt_call_operator")
+        block = migration.BLOCK
+        self.assertIn("MIJOZGA TELEGRAM USERNAME BERILMAYDI", block)
+        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", block)
+        self.assertIn("call_operator NI CHAQIRASAN", block)
+        self.assertIn("Gap yozib, tool chaqirmaslik XATO", block)
