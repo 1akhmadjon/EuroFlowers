@@ -5533,6 +5533,23 @@ def telegram_webhook(request):
     return Response({"status": "EVENT_RECEIVED"})
 
 
+@extend_schema(request=inline_serializer(name="OperatorTelegramWebhookPayload", fields={}), responses={200: OpenApiResponse(description="Operator bot event received")})
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def operator_telegram_webhook(request):
+    """Operatorlar guruhidagi inline tugmalar shu yerga keladi.
+
+    Faqat to'lov tugmalari qayta ishlanadi, boshqa hamma yangilanish e'tiborsiz
+    qoldiriladi — bu bot guruhda boshqa hech narsa qilmaydi.
+    """
+    from .payment_services import handle_callback
+
+    if "callback_query" not in (request.data or {}):
+        return Response({"status": "IGNORED"})
+    result = handle_callback(request.data)
+    return Response({"status": "OK" if result.get("ok") else "IGNORED", "detail": result.get("detail", "")})
+
+
 @extend_schema(request=inline_serializer(name="BackupTelegramWebhookPayload", fields={}), responses={200: OpenApiResponse(description="Backup bot event received")})
 @api_view(["POST"])
 @permission_classes([AllowAny])

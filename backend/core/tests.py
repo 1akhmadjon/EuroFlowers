@@ -9796,3 +9796,155 @@ class TheGroupMessageCarriesNoCatalogNoteTests(TestCase):
         rows = lead_catalog_lines(self.lead)
         self.assertEqual(len(rows), 1)
         self.assertNotIn("note", rows[0])
+
+
+class PaymentFlowTests(TestCase):
+    """To'lov turi, chek va operatorning qarori."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        BusinessSettings.objects.update_or_create(pk=1, defaults={
+            "payment_card_number": "5614 6821 2301 7099", "payment_card_holder": "Toxtasinov Boxodir"})
+        self.customer = Customer.objects.create(name="Ahmad", phone="+998901112233",
+                                                instagram_username="pay_probe", instagram_user_id="ig-pay")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.lead = Lead.objects.create(conversation=self.conversation, customer=self.customer,
+                                        source="ai", request_uz="Buket tanladi")
+        self.calls = []
+        patcher = patch("core.payment_services.telegram_api_with_token",
+                        side_effect=lambda token, method, payload: self.calls.append((method, payload)) or {"ok": True, "result": {"message_id": 500}})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        settings_patch = override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+        settings_patch.enable()
+        self.addCleanup(settings_patch.disable)
+
+    def _methods(self):
+        return [method for method, _ in self.calls]
+
+    def test_cash_needs_no_receipt(self):
+        from .payment_services import set_payment_type
+        result = set_payment_type(self.lead, "cash")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("card", result)
+        self.assertIn("Chek so'rama", result["instruction_uz"])
+
+    def test_card_returns_the_stored_requisites(self):
+        from .payment_services import set_payment_type
+        result = set_payment_type(self.lead, "card")
+        self.assertEqual(result["card"]["number"], "5614 6821 2301 7099")
+        self.assertEqual(result["card"]["holder"], "Toxtasinov Boxodir")
+        self.assertIn("chekining rasmini", result["instruction_uz"])
+
+    def test_an_unset_card_never_invents_a_number(self):
+        from .payment_services import set_payment_type
+        BusinessSettings.objects.filter(pk=1).update(payment_card_number="")
+        result = set_payment_type(self.lead, "card")
+        self.assertEqual(result["card"], {})
+        self.assertIn("o'zingdan yozma", result["instruction_uz"])
+
+    def test_the_payment_type_is_added_to_the_group_message(self):
+        from .payment_services import set_payment_type, save_payment_state
+        save_payment_state(self.lead, operator_message_id=77)
+        set_payment_type(self.lead, "card")
+        method, payload = self.calls[-1]
+        self.assertIn(method, {"editMessageCaption", "editMessageText"})
+        self.assertEqual(payload["message_id"], 77)
+        self.assertIn("💳 Karta", payload.get("caption") or payload.get("text"))
+
+    def test_a_receipt_goes_to_the_group_with_two_buttons(self):
+        from .payment_services import register_receipt, save_payment_state
+        save_payment_state(self.lead, operator_message_id=77, type="card")
+        result = register_receipt(self.lead, "https://cdn.example.com/chek.jpg")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["repeated"])
+        photo = [p for m, p in self.calls if m == "sendPhoto"][0]
+        self.assertEqual(photo["photo"], "https://cdn.example.com/chek.jpg")
+        self.assertEqual(photo["reply_to_message_id"], 77)
+        self.assertIn("To'landi ✅ chekni tekshirish kerak", photo["caption"])
+        labels = [b["text"] for row in photo["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertEqual(labels, ["✅ To'lovni tasdiqlash", "❌ To'lovni rad etish"])
+        data = [b["callback_data"] for row in photo["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertEqual(data, [f"pay:ok:{self.lead.id}", f"pay:no:{self.lead.id}"])
+
+    def test_a_repeated_receipt_is_marked_as_such(self):
+        from .payment_services import register_receipt, save_payment_state, RECEIPT_REJECTED
+        save_payment_state(self.lead, operator_message_id=77, receipt_status=RECEIPT_REJECTED)
+        result = register_receipt(self.lead, "https://cdn.example.com/chek2.jpg")
+        self.assertTrue(result["repeated"])
+        photo = [p for m, p in self.calls if m == "sendPhoto"][0]
+        self.assertIn("Chek qayta yuborildi", photo["caption"])
+        self.assertEqual(photo["reply_to_message_id"], 77)
+
+    def test_confirming_tells_the_customer(self):
+        from unittest.mock import patch
+        from .payment_services import handle_callback, payment_state, RECEIPT_CONFIRMED
+        with patch("core.platform_services.instagram_send", return_value={"ok": True}) as send:
+            result = handle_callback({"callback_query": {"id": "cb1", "data": f"pay:ok:{self.lead.id}",
+                                                         "message": {"message_id": 90, "chat": {"id": -100}}}})
+        self.assertTrue(result["approved"])
+        self.lead.refresh_from_db()
+        self.assertEqual(payment_state(self.lead)["receipt_status"], RECEIPT_CONFIRMED)
+        self.assertIn("To'lovingiz tasdiqlandi", send.call_args.args[1])
+
+    def test_rejecting_asks_for_a_real_receipt(self):
+        from unittest.mock import patch
+        from .payment_services import handle_callback, payment_state, RECEIPT_REJECTED
+        with patch("core.platform_services.instagram_send", return_value={"ok": True}) as send:
+            handle_callback({"callback_query": {"id": "cb2", "data": f"pay:no:{self.lead.id}",
+                                                "message": {"message_id": 90, "chat": {"id": -100}}}})
+        self.lead.refresh_from_db()
+        self.assertEqual(payment_state(self.lead)["receipt_status"], RECEIPT_REJECTED)
+        self.assertIn("qaytadan haqiqiy to'lov chekini yuboring", send.call_args.args[1])
+
+    def test_the_buttons_are_removed_after_a_decision(self):
+        from unittest.mock import patch
+        from .payment_services import handle_callback
+        with patch("core.platform_services.instagram_send", return_value={"ok": True}):
+            handle_callback({"callback_query": {"id": "cb3", "data": f"pay:ok:{self.lead.id}",
+                                                "message": {"message_id": 90, "chat": {"id": -100}}}})
+        markup = [p for m, p in self.calls if m == "editMessageReplyMarkup"]
+        self.assertTrue(markup)
+        self.assertEqual(markup[-1]["reply_markup"], {"inline_keyboard": []})
+
+    def test_a_stray_callback_is_ignored(self):
+        from .payment_services import handle_callback
+        self.assertFalse(handle_callback({"callback_query": {"data": "something:else"}})["ok"])
+        self.assertFalse(handle_callback({"callback_query": {"data": "pay:ok:not-a-number"}})["ok"])
+
+    def test_the_tool_refuses_when_there_is_no_lead(self):
+        empty = Conversation.objects.create(customer=Customer.objects.create(
+            instagram_username="no_lead", instagram_user_id="ig-nolead"))
+        result = execute_ai_tool("client_payment_update", {"payment_type": "card", "receipt_url": None}, empty)
+        self.assertEqual(result["detail"], "no_lead_yet")
+
+
+class CaptionPriceTests(TestCase):
+    """Reel izohidagi narx bo'yicha katalog."""
+
+    def test_prices_are_read_in_every_shape_operators_write(self):
+        from .services import prices_from_caption
+        self.assertEqual(prices_from_caption("Narxi 199 000 so'm"), [Decimal("199000")])
+        self.assertEqual(prices_from_caption("1.600.000 сум"), [Decimal("1600000")])
+        self.assertEqual(prices_from_caption("800 ming"), [Decimal("800000")])
+        self.assertEqual(prices_from_caption("Buket 250000"), [Decimal("250000")])
+
+    def test_small_and_silly_numbers_are_skipped(self):
+        from .services import prices_from_caption
+        self.assertEqual(prices_from_caption("100 ta gul, 60 sm"), [])
+        self.assertEqual(prices_from_caption("2026-yil 25-avgust"), [])
+
+    def test_the_catalog_is_filtered_near_that_price(self):
+        from .services import catalog_items_near_price
+        cheap = AICatalogItem.objects.create(name="Arzon", arrangement_type="bouquet", price=Decimal("199000"))
+        close = AICatalogItem.objects.create(name="Yaqin", arrangement_type="bouquet", price=Decimal("210000"))
+        far = AICatalogItem.objects.create(name="Uzoq", arrangement_type="bouquet", price=Decimal("900000"))
+        rows = catalog_items_near_price([cheap, close, far], Decimal("200000"))
+        self.assertEqual([row.id for row in rows], [cheap.id, close.id])
+
+    def test_a_caption_we_cannot_read_changes_nothing(self):
+        from unittest.mock import patch
+        from .services import caption_price_matches
+        with patch("core.services.media_caption_for_attachment", return_value=""):
+            rows, price = caption_price_matches([], {"url": "https://www.instagram.com/reel/AAA/", "kind": "reel"})
+        self.assertEqual((rows, price), ([], None))

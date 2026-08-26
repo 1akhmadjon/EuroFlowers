@@ -997,6 +997,10 @@ class BusinessSettings(TimeStampedModel):
     # Mijoz AI javob berolmaydigan savol bersa yoki gulini aniqlab bo'lmasa shu
     # akkauntga yo'naltiriladi. Telefon raqami so'ralmaydi.
     operator_telegram = models.CharField(max_length=120, blank=True, default="@euroflowerspremium")
+    # Karta bilan to'laydigan mijozga shu rekvizitlar beriladi. Bo'sh bo'lsa AI
+    # karta raqamini o'zidan to'qib chiqarmasin — mijozni operatorga yo'naltiradi.
+    payment_card_number = models.CharField(max_length=40, blank=True, default="")
+    payment_card_holder = models.CharField(max_length=120, blank=True, default="")
     delivery_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("50000"))
     delivery_area_uz = models.CharField(max_length=255, blank=True, default="Toshkent shahri ichida")
     delivery_area_ru = models.CharField(max_length=255, blank=True, default="в пределах города Ташкента")

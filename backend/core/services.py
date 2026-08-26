@@ -1196,6 +1196,10 @@ def notify_operators_about_lead(lead, conversation):
             print(f"AI_LEAD_NOTIFY_FAILED lead={lead.id} error={fallback_error}", flush=True)
             return {"ok": False, "detail": "telegram_send_failed"}
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"operator_lead_notified": {"lead_id": lead.id, "telegram_result": sent}})
+    # Keyin to'lov holatini shu xabarga qo'shish uchun id si eslab qolinadi.
+    from . import payment_services
+
+    payment_services.remember_operator_message(lead, sent)
     return {"ok": True, "lead_id": lead.id}
 
 
@@ -1670,6 +1674,89 @@ def apply_media_match_safeguard(conversation, result, tool_results):
     return result
 
 
+# Reel izohida narx ko'pincha shu ko'rinishda yoziladi: "199 000 so'm",
+# "1.600.000", "800 ming". Uchalasi ham bitta raqamga keltiriladi.
+CAPTION_PRICE_RE = re.compile(
+    r"(\d[\d\s.,\u00a0]{2,})\s*(?:ming|минг|mln|млн|so\u2018m|so'm|som|сум|сўм|sum)?",
+    re.IGNORECASE,
+)
+# Izohdagi narx katalogdagi narxdan ozgina farq qilishi mumkin, shuning uchun
+# aynan tenglik emas, shu darajadagi yaqinlik qabul qilinadi.
+CAPTION_PRICE_TOLERANCE = Decimal("0.12")
+
+
+def prices_from_caption(caption):
+    """Izohdagi pul summalarini topadi, eng kattasidan boshlab."""
+    found = []
+    for raw, unit in re.findall(r"(\d[\d\s.,\u00a0]{2,})\s*(ming|минг|mln|млн|so\u2018m|so'm|som|сум|сўм|sum)?",
+                                caption or "", re.IGNORECASE):
+        digits = re.sub(r"[^\d]", "", raw)
+        if not digits:
+            continue
+        value = Decimal(digits)
+        unit = (unit or "").lower()
+        if unit in {"ming", "минг"} and value < 10000:
+            value *= 1000
+        elif unit in {"mln", "млн"} and value < 1000:
+            value *= 1000000
+        if value < 50000 or value > 100000000:
+            continue
+        if value not in found:
+            found.append(value)
+    return sorted(found, reverse=True)
+
+
+def media_caption_for_attachment(attachment):
+    """Mijoz yuborgan reel/post bizning postimiz bo'lsa uning izohi.
+
+    Boshqa akkauntning reeli bo'lsa izoh o'qib bo'lmaydi — Graph API faqat o'z
+    postlarimizni beradi. Bunday holatda bo'sh qaytadi va rasm tahlili ishlaydi.
+    """
+    from .platform_services import find_media_by_permalink
+
+    url = (attachment or {}).get("url") or ""
+    if "instagram.com/" not in url:
+        return ""
+    try:
+        media = find_media_by_permalink(url)
+    except Exception as error:
+        print(f"CAPTION_LOOKUP_FAILED url={url[:70]} error={error}", flush=True)
+        return ""
+    return (media or {}).get("caption") or ""
+
+
+def catalog_items_near_price(items, price):
+    """Izohdagi narxga yaqin katalog gullari."""
+    window = price * CAPTION_PRICE_TOLERANCE
+    rows = [item for item in items if item.price is not None and abs(Decimal(item.price) - price) <= window]
+    return sorted(rows, key=lambda item: abs(Decimal(item.price) - price))
+
+
+def caption_price_matches(items, attachment):
+    """Reel izohidagi narx bo'yicha katalogdan tanlangan gullar.
+
+    Mijoz reel yuboradi, o'sha reel tizimga ulanmagan, lekin izohida narxi
+    yozilgan bo'ladi — o'sha narxdagi gullarimizni ko'rsatish rasmni tahlil
+    qilishdan ham aniqroq javob beradi.
+    """
+    caption = media_caption_for_attachment(attachment)
+    if not caption:
+        return [], None
+    for price in prices_from_caption(caption):
+        rows = catalog_items_near_price(items, price)
+        if rows:
+            return rows[:MAX_LINK_MATCHES], price
+    return [], None
+
+
+MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION = (
+    "Mijoz yuborgan reel tizimga ulanmagan, lekin izohida narxi yozilgan. group_matches "
+    "dagi catalog_id larni send_catalog_album bilan yubor va shu mazmunda yoz: yuborgan "
+    "reelingizdagi narxda bizda shu gullar bor, qaysi biri kerak? Bitta gulni tanlab "
+    "\"aynan shu\" dema — mijozning o'zi tanlaydi."
+)
+
+
 def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=MAX_AI_CATALOG_MATCH_CANDIDATES):
     """Mijoz yuborgan rasmni AI katalogdagi mahsulot bilan solishtiradi.
 
@@ -1685,6 +1772,28 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     if not items:
         return {"ok": False, "allow_send": False, "allow_group": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
     media_url = attachment["url"]
+
+    # Mijoz to'lov chekini ham shu yerga yuboradi. Chekni katalogdan qidirish
+    # bema'ni javob beradi, shuning uchun rasm avval saralanadi.
+    if attachment.get("kind") == "photo":
+        kind = vision_services.classify_customer_image(media_url, api_key=openai_api_key())
+        if kind.get("kind") == "payment_receipt" and kind.get("confidence") in {"medium", "high"}:
+            return media_match_result(conversation, {
+                "ok": True,
+                "allow_send": False,
+                "allow_group": False,
+                "detail": "payment_receipt",
+                "source": attachment,
+                "source_description": kind.get("summary", ""),
+                "matches": [],
+                "group_matches": [],
+                "near_matches": [],
+                "instruction_uz": (
+                    "Bu gul rasmi emas, to'lov cheki. Katalog yubormaslik kerak va gul nomi "
+                    "aytilmaydi. client_payment_update ni receipt_url ga shu rasm havolasini "
+                    "yozib chaqir, keyin natijadagi instruction_uz bo'yicha javob ber."
+                ),
+            })
 
     ads = ads_context_from_conversation(conversation, media_url)
     ads_linked = items_matching_ads(items, ads.get("ad_id"), ads.get("post_id"))
@@ -1720,6 +1829,25 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
 
     own_post = social_post_for_media(attachment)
     linked = direct_ai_catalog_link_matches(items, media_url, attachment=attachment, conversation=conversation)
+
+    # Reel tizimga ulanmagan, lekin izohida narxi yozilgan bo'lsa — o'sha narxdagi
+    # gullarimizni ko'rsatish rasm tahlilidan ham aniqroq javob beradi.
+    if not linked and not own_post and attachment.get("kind") in {"reel", "post", "story"}:
+        priced, caption_price = caption_price_matches(items, attachment)
+        if priced:
+            return media_match_result(conversation, {
+                "ok": True,
+                "allow_send": False,
+                "allow_group": True,
+                "detail": "caption_price_group",
+                "source": attachment,
+                "caption_price": str(caption_price),
+                "matches": [],
+                "group_matches": [catalog_match_row(item, reason="caption price matched") for item in priced],
+                "near_matches": [],
+                "instruction_uz": MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION,
+            })
+
     story = social_post_answer(own_post) if not linked else None
     if story:
         # Storyning o'zida nomi va narxi turibdi — bu eng aniq manba.
@@ -2196,6 +2324,31 @@ def ai_tool_definitions():
             },
             "strict": True,
         },
+        {
+            "type": "function",
+            "name": "client_payment_update",
+            "description": (
+                "Mijozning to'lov turi yoki to'lov cheki. Ikki holatda chaqiriladi. "
+                "BIRINCHI: mijoz to'lov turini aytdi — payment_type ga \"cash\" yoki \"card\" yoz. "
+                "Karta bo'lsa natijada karta raqami va egasi keladi, ularni mijozga aytasan va "
+                "to'lov chekining rasmini so'raysan. "
+                "IKKINCHI: mijoz to'lov chekining rasmini yubordi — receipt_url ga o'sha rasm havolasini yoz. "
+                "Chek ekanini match_ai_catalog_by_media natijasi aytadi (detail = payment_receipt); "
+                "gul rasmini chek deb yuborma. "
+                "Bu tool faqat shu suhbatda lead bor bo'lsa ishlaydi. Natijadagi instruction_uz "
+                "nima deyish kerakligini aytadi."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "payment_type": {"type": ["string", "null"], "enum": ["cash", "card", None], "description": "Mijoz aytgan to'lov turi. Aytmagan bo'lsa null."},
+                    "receipt_url": {"type": ["string", "null"], "description": "Mijoz yuborgan chek rasmining havolasi. Chek bo'lmasa null."},
+                },
+                "required": ["payment_type", "receipt_url"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
     ]
 
 
@@ -2544,6 +2697,21 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             source_url=arguments.get("source_url") or "",
             user_text=arguments.get("user_text") or "",
         )
+    if name == "client_payment_update":
+        from . import payment_services
+
+        lead = conversation.leads.order_by("-created_at", "-id").first()
+        if not lead:
+            return {"ok": False, "detail": "no_lead_yet",
+                    "instruction_uz": "Bu suhbatda buyurtma hali yo'q. To'lov haqida gaplashishdan "
+                                      "oldin mijoz gulni tanlashi kerak."}
+        receipt_url = (arguments.get("receipt_url") or "").strip()
+        payment_type = (arguments.get("payment_type") or "").strip()
+        if receipt_url:
+            return dict(payment_services.register_receipt(lead, receipt_url), lead_id=lead.id)
+        if payment_type:
+            return dict(payment_services.set_payment_type(lead, payment_type), lead_id=lead.id)
+        return {"ok": False, "detail": "nothing_to_update"}
     if name not in {"client_lead_create", "client_lead_edit"}:
         return {"ok": False, "detail": "unknown_tool"}
     name_value = (arguments.get("customer_name") or "").strip()

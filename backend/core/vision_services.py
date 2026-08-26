@@ -434,6 +434,71 @@ def vision_json(client, *, schema_name, schema, instructions, content, max_outpu
     raise ValueError(f"vision response was not valid json: {last_error}")
 
 
+# Mijoz bitta chatda ham gul rasmini, ham to'lov chekini yuboradi. Ikkisini
+# aralashtirib yuborish qimmatga tushadi: chekni gul deb katalogdan qidirish ham,
+# gulni chek deb to'lov oqimiga qo'shish ham xato javob beradi.
+IMAGE_KINDS = ["payment_receipt", "flower", "other"]
+
+
+def image_kind_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": IMAGE_KINDS},
+            "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+            "summary": {"type": "string"},
+        },
+        "required": ["kind", "confidence", "summary"],
+        "additionalProperties": False,
+    }
+
+
+def classify_customer_image(image_url, api_key=""):
+    """Mijoz yuborgan rasm to'lov chekimi, gulmi yoki boshqa narsami.
+
+    Chek deb faqat pul o'tkazilganini ko'rsatadigan hujjat hisoblanadi: bank
+    ilovasidagi kvitansiya, terminal cheki, o'tkazma tasdig'i. Gul rasmi,
+    skrinshot yoki tasodifiy surat chek emas.
+    """
+    api_key = api_key or openai_api_key()
+    if not api_key or not image_url:
+        return {}
+    payload = {
+        "task": "Decide what the customer just sent to a flower shop chat.",
+        "kinds": {
+            "payment_receipt": "a proof of payment: bank app receipt, transfer confirmation, "
+                               "terminal slip, screenshot of a completed transfer. It shows an "
+                               "amount, a card or account, a date or a status like success.",
+            "flower": "a bouquet, basket, single flowers or any floral arrangement",
+            "other": "anything else — a person, a room, a document that is not a payment, text only",
+        },
+        "rules": [
+            "A photo of flowers is never a payment_receipt, even if a price is written on it.",
+            "A payment_receipt has no flowers in it.",
+            "If you are unsure between receipt and flower, look for an amount of money and a transfer status.",
+            "Answer with confidence low when the picture is blurry or cropped so the kind cannot be told.",
+        ],
+    }
+    content = [
+        {"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)},
+        {"type": "input_image", "image_url": image_url, "detail": vision_detail()},
+    ]
+    client = OpenAI(api_key=api_key)
+    try:
+        return vision_json(
+            client,
+            schema_name="customer_image_kind",
+            schema=image_kind_schema(),
+            instructions="You sort pictures a flower shop customer sends. Answer only with the schema.",
+            content=content,
+            max_output_tokens=400,
+            reasoning="low",
+        )
+    except Exception as error:
+        print(f"IMAGE_KIND_FAILED url={str(image_url)[:70]} error={error}", flush=True)
+        return {}
+
+
 def analyze_image(image_url, context_text="", instructions="", with_region=False, api_key=""):
     """Bitta rasmni tahlil qilib fingerprint qaytaradi."""
     api_key = api_key or openai_api_key()
