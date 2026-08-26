@@ -1097,11 +1097,10 @@ def lead_catalog_lines(lead):
         name = row.get("catalog_name") or (item.name if item else "")
         if not name:
             continue
-        price = row.get("price") or (str(item.price) if item else "")
         quantity = int(row.get("quantity") or 1)
         title = f"{name} × {quantity}" if quantity > 1 else name
         rows.append({
-            "text": f"{title} — {money_uz(price)} so'm" if price else title,
+            "text": title,
             "image_url": item.image_url if item and item.image_url else "",
         })
     return rows

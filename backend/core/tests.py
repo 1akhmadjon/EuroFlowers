@@ -9778,11 +9778,11 @@ class TheGroupMessageCarriesNoCatalogNoteTests(TestCase):
         self.assertNotIn("100 ta guli boladi", html)
         self.assertNotIn("<i>", html)
 
-    def test_the_name_and_price_stay(self):
+    def test_only_the_catalog_name_stays(self):
         from .services import operator_lead_rich_message
         html = operator_lead_rich_message(self.lead, self.conversation)["html"]
         self.assertIn("Alfalob Kompazitsia", html)
-        self.assertIn("1 000 000 so&#x27;m", html)
+        self.assertNotIn("1 000 000 so&#x27;m", html)
         self.assertIn("Tanlagan mahsuloti", html)
 
     def test_the_catalog_photo_still_travels(self):
