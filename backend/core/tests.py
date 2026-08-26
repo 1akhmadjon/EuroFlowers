@@ -836,7 +836,7 @@ class BusinessRulesTests(TestCase):
             client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="resp_1")
             result = ai_reply(conversation)
         kwargs = client.responses.create.call_args.kwargs
-        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in kwargs["tools"]}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
         self.assertTrue(kwargs["parallel_tool_calls"] is False)
         self.assertEqual(result["reply"], payload["reply"])
         self.assertIn(AISettings.objects.get(pk=1).system_prompt, kwargs["instructions"])
@@ -867,7 +867,7 @@ class BusinessRulesTests(TestCase):
         self.assertNotIn("savat idishi narxi qo'shilishini ayt", prompt)
 
     def test_ai_tool_definitions_are_whitelisted(self):
-        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
+        self.assertEqual({tool["name"] for tool in ai_tool_definitions()}, {"client_leads_get", "client_lead_create", "client_lead_edit", "client_payment_update", "match_ai_catalog_by_media", "get_catalog", "send_catalog_image", "send_catalog_album", "send_post_image"})
 
     def test_get_catalog_tool_filters_baskets(self):
         basket = AICatalogItem.objects.create(name="Oq savat", arrangement_type="basket", price=700000, quantity=1)
@@ -8474,8 +8474,8 @@ class NoOperatorHandoffToolTests(TestCase):
         self.assertNotIn("handoff_media_to_operator", names)
         self.assertEqual(sorted(names), sorted([
             "client_leads_get", "client_lead_create", "client_lead_edit",
-            "match_ai_catalog_by_media", "get_catalog", "send_catalog_image",
-            "send_post_image", "send_catalog_album",
+            "client_payment_update", "match_ai_catalog_by_media", "get_catalog",
+            "send_catalog_image", "send_post_image", "send_catalog_album",
         ]))
 
     def test_calling_it_anyway_is_refused(self):

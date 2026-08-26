@@ -1773,28 +1773,6 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
         return {"ok": False, "allow_send": False, "allow_group": False, "detail": "ai_catalog_empty_or_no_images", "source": attachment, "matches": [], "group_matches": [], "near_matches": []}
     media_url = attachment["url"]
 
-    # Mijoz to'lov chekini ham shu yerga yuboradi. Chekni katalogdan qidirish
-    # bema'ni javob beradi, shuning uchun rasm avval saralanadi.
-    if attachment.get("kind") == "photo":
-        kind = vision_services.classify_customer_image(media_url, api_key=openai_api_key())
-        if kind.get("kind") == "payment_receipt" and kind.get("confidence") in {"medium", "high"}:
-            return media_match_result(conversation, {
-                "ok": True,
-                "allow_send": False,
-                "allow_group": False,
-                "detail": "payment_receipt",
-                "source": attachment,
-                "source_description": kind.get("summary", ""),
-                "matches": [],
-                "group_matches": [],
-                "near_matches": [],
-                "instruction_uz": (
-                    "Bu gul rasmi emas, to'lov cheki. Katalog yubormaslik kerak va gul nomi "
-                    "aytilmaydi. client_payment_update ni receipt_url ga shu rasm havolasini "
-                    "yozib chaqir, keyin natijadagi instruction_uz bo'yicha javob ber."
-                ),
-            })
-
     ads = ads_context_from_conversation(conversation, media_url)
     ads_linked = items_matching_ads(items, ads.get("ad_id"), ads.get("post_id"))
     if len(ads_linked) == 1:
@@ -1907,6 +1885,30 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
     if not text:
         latest_customer = conversation.messages.filter(sender="customer").order_by("-created_at", "-id").first()
         text = latest_customer.text if latest_customer else ""
+
+    # Mijoz to'lov chekini ham shu yerga yuboradi. Chekni katalogdan qidirish
+    # bema'ni javob beradi, shuning uchun gul tahlilidan oldin rasm saralanadi.
+    # Bu tekshiruv link, reklama va story yo'llaridan KEYIN turadi: o'sha
+    # yo'llarda javob allaqachon aniq va ko'rish so'rovi umuman kerak emas.
+    if attachment.get("kind") == "photo":
+        kind = vision_services.classify_customer_image(media_url, api_key=api_key)
+        if kind.get("kind") == "payment_receipt" and kind.get("confidence") in {"medium", "high"}:
+            return media_match_result(conversation, {
+                "ok": True,
+                "allow_send": False,
+                "allow_group": False,
+                "detail": "payment_receipt",
+                "source": attachment,
+                "source_description": kind.get("summary", ""),
+                "matches": [],
+                "group_matches": [],
+                "near_matches": [],
+                "instruction_uz": (
+                    "Bu gul rasmi emas, to'lov cheki. Katalog yubormaslik kerak va gul nomi "
+                    "aytilmaydi. client_payment_update ni receipt_url ga shu rasm havolasini "
+                    "yozib chaqir, keyin natijadagi instruction_uz bo'yicha javob ber."
+                ),
+            })
     try:
         source = vision_services.analyze_image(media_url, context_text=text, with_region=True, api_key=api_key)
     except Exception as error:
