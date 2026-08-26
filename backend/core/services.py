@@ -42,6 +42,14 @@ MAX_LINK_MATCHES = 10
 # modelga umuman aloqasi yo'q rasmni ko'rsatib o'tirishning hojati yo'q.
 AI_CATALOG_SHORTLIST_FLOOR = 30
 
+
+def operator_telegram_text(handle):
+    handle = (handle or "").strip()
+    if not handle:
+        return ""
+    return f"{handle} Telegrami ga yozing"
+
+
 # Guruhga faqat g'olib bilan shu qadar yaqin ballar tushadi. Undan pastdagisi
 # g'olibga yetmagan mahsulot — uni ko'rsatish mijozni chalg'itadi.
 TIED_SCORE_GAP = 6
@@ -80,15 +88,15 @@ MEDIA_MATCH_CUSTOM_ORDER_NOTE = (
     "\"shunaqasini yasang\", \"shu guldan buket qb bering\") — bu yasatma buyurtma, "
     "katalog qidiruvi emas. Unda albom YUBORMA va 00C bo'limidagi javobni ber: "
     "xohlaganingizdek yasab beramiz, yuborgan rasmingizdagi guldan buket bo'yicha "
-    "business.operator_telegram ga yozing, operatorlarimiz shu haqida aniq ma'lumot berishadi."
+    "business.operator_telegram_text matnini ishlat, operatorlarimiz shu haqida aniq ma'lumot berishadi."
 )
 MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "Aynan mos mahsulot topilmadi. Bitta ham katalog rasmini alohida YUBORMA va taxmin "
     "qilib mahsulot nomi yoki narxini aytma. Buning o'rniga send_catalog_album ni "
     "catalog_ids BO'SH massiv bilan chaqirib butun katalogni yubor va shu mazmunda yoz: "
     "hozirda bizda bor gullar shular, shulardan tanlasangiz ham bo'ladi; yoki o'zingiz "
-    "yuborgan gul kerak bo'lsa business.operator_telegram dagi Telegram akkauntimizga "
-    "yozing, operatorlarimiz siz yuborgan gul haqida aniq javob berishadi. Telefon "
+    "yuborgan gul kerak bo'lsa business.operator_telegram_text matnini aynan ishlat, "
+    "operatorlarimiz siz yuborgan gul haqida aniq javob berishadi. Telefon "
     "raqami SO'RAMA va lead yaratma — mijoz katalogdan gul tanlasagina buyurtma bo'ladi."
 ) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
 MEDIA_MATCH_LINK_GROUP_INSTRUCTION = (
@@ -108,7 +116,7 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "o'tirma — send_catalog_album ni catalog_ids BO'SH massiv bilan chaqirib butun "
     "katalogni yubor. Keyin shu mazmunda yoz: hozirda bizda bor gullar shular, "
     "shulardan tanlasangiz ham bo'ladi; yoki siz yuborgan gul ko'proq qiziq bo'lsa "
-    "business.operator_telegram dagi Telegram akkauntimizga yozing, operatorlarimiz "
+    "business.operator_telegram_text matnini aynan ishlat, operatorlarimiz "
     "aniq narxini aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Telefon raqami "
     "SO'RAMA va lead yaratma."
 ) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
@@ -143,7 +151,7 @@ When the flower under discussion came from one of our own stories, "send me the 
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" (with show_whole_catalog) means the exact flower is NOT in the catalog and nothing on the shelf is close enough to offer as a substitute: call send_catalog_album with an empty catalog_ids to send the whole catalog, say these are the flowers available and they are welcome to pick one, and offer to have an operator price the flower they actually sent if they leave a number; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
-allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent they should write to the shop's Telegram account in business.operator_telegram, where an operator will answer them precisely. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
+allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent they should follow the exact ready phrase in business.operator_telegram_text, where an operator will answer them precisely. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -2116,7 +2124,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va mijoz business.operator_telegram dagi Telegram akkauntga yo'naltiriladi. Telefon so'ralmaydi.",
+            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va mijozga business.operator_telegram_text matnini aynan yoz. Telefon so'ralmaydi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2481,8 +2489,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                 "detail": "catalog_already_sent",
                 "instruction_uz": (
                     "Butun katalog bu suhbatda allaqachon yuborilgan, qayta yuborma. "
-                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa business.operator_telegram "
-                    "dagi Telegram akkauntimizga yozishini ayt, operatorlar u yerda aniq javob berishadi. "
+                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa business.operator_telegram_text "
+                    "matnini aynan ishlat, operatorlar u yerda aniq javob berishadi. "
                     "Telefon raqami so'rama."
                 ),
             }
@@ -2511,8 +2519,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                     "catalog_id": item.id,
                     "instruction_uz": (
                         f"{item.name} rasmi ham, butun katalog ham bu suhbatda allaqachon "
-                        "yuborilgan. Hech narsa yuborma. Mijozga business.operator_telegram dagi "
-                        "Telegram akkauntimizga yozishini ayt."
+                        "yuborilgan. Hech narsa yuborma. Mijozga business.operator_telegram_text "
+                        "matnini aynan yoz."
                     ),
                 }
             album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
@@ -2775,6 +2783,7 @@ def ai_reply(conversation):
             "operator_phone": business_settings.operator_phone or business_settings.shop_phone,
             # AI javob berolmaydigan savol yoki aniqlanmagan gul shu akkauntga yo'naltiriladi.
             "operator_telegram": business_settings.operator_telegram,
+            "operator_telegram_text": operator_telegram_text(business_settings.operator_telegram),
             "operator_hours_uz": business_settings.operator_hours,
             "operator_hours_ru": business_settings.operator_hours_ru,
         },

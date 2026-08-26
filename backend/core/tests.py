@@ -447,6 +447,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(context["business"]["operator_phone"], "+998 88 111 22 33")
         self.assertEqual(context["business"]["operator_hours_uz"], "08:00 dan 00:00 gacha")
         self.assertEqual(context["business"]["operator_hours_ru"], "с 08:00 до 00:00")
+        self.assertEqual(context["business"]["operator_telegram_text"], "@euroflowerspremium Telegrami ga yozing")
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_ai_context_uses_business_settings_not_hardcoded_values(self):
