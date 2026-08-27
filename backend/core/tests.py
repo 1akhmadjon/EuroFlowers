@@ -244,7 +244,7 @@ class BusinessRulesTests(TestCase):
     def test_lead_tool_refuses_without_name_or_phone(self):
         customer = Customer.objects.create(instagram_user_id="ig-lead-guard")
         conversation = Conversation.objects.create(customer=customer)
-        payload = {"customer_name": None, "phone": None, "request_text": "50 ta atirgul buket", "arrangement_type": "bouquet", "estimated_price": 800000, "florist_fee": 50000, "fulfillment": None, "delivery_address": None, "desired_date": None, "desired_time": None, "catalog_items": [], "stock_items": [], "note": None}
+        payload = {"customer_name": None, "phone": None, "request_text": "50 ta atirgul buket", "arrangement_type": "bouquet", "estimated_price": 800000, "fulfillment": None, "delivery_address": None, "desired_date": None, "desired_time": None, "catalog_items": [], "stock_items": [], "note": None}
         self.assertEqual(execute_ai_tool("client_lead_create", payload, conversation)["detail"], "customer_name_required")
         payload["customer_name"] = "Ahmad"
         self.assertEqual(execute_ai_tool("client_lead_create", payload, conversation)["detail"], "phone_required")
@@ -253,7 +253,7 @@ class BusinessRulesTests(TestCase):
     def test_lead_tool_persists_fulfillment_address_and_date(self):
         customer = Customer.objects.create(instagram_user_id="ig-lead-full")
         conversation = Conversation.objects.create(customer=customer)
-        payload = {"customer_name": "Ahmad", "phone": "901112233", "request_text": "50 ta Atirgul Mondial oq buket", "arrangement_type": "bouquet", "estimated_price": 800000, "florist_fee": 50000, "fulfillment": "delivery", "delivery_address": "Xadra 9", "desired_date": "2026-07-30", "desired_time": "15:00", "catalog_items": [], "stock_items": [{"batch_id": self.batch.id, "quantity_stems": 50, "quantity_bunches": 0}], "note": None}
+        payload = {"customer_name": "Ahmad", "phone": "901112233", "request_text": "50 ta Atirgul Mondial oq buket", "arrangement_type": "bouquet", "estimated_price": 800000, "fulfillment": "delivery", "delivery_address": "Xadra 9", "desired_date": "2026-07-30", "desired_time": "15:00", "catalog_items": [], "stock_items": [{"batch_id": self.batch.id, "quantity_stems": 50, "quantity_bunches": 0}], "note": None}
         result = execute_ai_tool("client_lead_create", payload, conversation)
         self.assertTrue(result["ok"])
         lead = Lead.objects.get(id=result["lead_id"])
@@ -261,9 +261,10 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(lead.delivery_address, "Xadra 9")
         self.assertEqual(lead.desired_date.isoformat(), "2026-07-30")
         self.assertEqual(lead.desired_time, "15:00")
-        self.assertEqual(lead.florist_fee, Decimal("50000"))
+        # Florist haqini AI yozmaydi — u CRM da operator qo'yadi.
+        self.assertEqual(lead.florist_fee, Decimal("0"))
         self.assertNotIn("custom", lead.request_uz.lower())
-        edited = execute_ai_tool("client_lead_edit", {"lead_id": lead.id, "customer_name": None, "phone": None, "request_text": None, "status": None, "arrangement_type": None, "estimated_price": None, "florist_fee": None, "fulfillment": "pickup", "delivery_address": None, "desired_date": None, "desired_time": None, "catalog_items": None, "stock_items": None, "note": None}, conversation)
+        edited = execute_ai_tool("client_lead_edit", {"lead_id": lead.id, "customer_name": None, "phone": None, "request_text": None, "status": None, "arrangement_type": None, "estimated_price": None, "fulfillment": "pickup", "delivery_address": None, "desired_date": None, "desired_time": None, "catalog_items": None, "stock_items": None, "note": None}, conversation)
         self.assertTrue(edited["ok"])
         lead.refresh_from_db()
         self.assertEqual(lead.fulfillment, "pickup")
@@ -6901,7 +6902,7 @@ class OperatorHandoffTests(TestCase):
         conversation = Conversation.objects.create(customer=stranger)
         result = execute_ai_tool("client_lead_create", {
             "customer_name": None, "phone": None, "request_text": "Savol bor", "arrangement_type": None,
-            "estimated_price": None, "florist_fee": None, "fulfillment": None, "delivery_address": None,
+            "estimated_price": None, "fulfillment": None, "delivery_address": None,
             "desired_date": None, "desired_time": None, "catalog_items": [], "note": None,
             "topic": "question", "flowers_text": None, "size_text": None, "photo_urls": [],
         }, conversation)
@@ -8045,7 +8046,7 @@ class NaturalSalesFlowTests(TestCase):
     def _lead_arguments(self, **overrides):
         arguments = {
             "customer_name": "Ahmad", "phone": "+998901112233", "request_text": "Katalogdan London savatini tanladi",
-            "arrangement_type": "catalog", "estimated_price": 1000000, "florist_fee": None,
+            "arrangement_type": "catalog", "estimated_price": 1000000,
             "fulfillment": "delivery", "delivery_address": "Chilonzor 5", "desired_date": "2026-08-25", "desired_time": "15:00",
             "catalog_items": [{"catalog_name": "London Gulidan Savat", "quantity": 1}], "note": "",
             "topic": "catalog_order", "flowers_text": None, "size_text": None, "photo_urls": [],
@@ -10040,6 +10041,50 @@ class ReplyToOurPhotoTests(TestCase):
             resolve_instagram_event(payload)
         saved = self.conversation.messages.filter(sender="customer").order_by("-id").first()
         self.assertNotIn("javob qildi", saved.text)
+
+
+class NoFloristFeeForTheCustomerTests(TestCase):
+    """Katalog narxiga florist haqi qo'shilmaydi."""
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_context_hands_the_ai_no_florist_fee(self):
+        from unittest.mock import patch
+        BusinessSettings.objects.update_or_create(pk=1, defaults={"default_florist_fee": Decimal("50000")})
+        customer = Customer.objects.create(instagram_user_id="ig-nofee", name="Ahmad", phone="+998901112233")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="nechpul to'lashim kerak")
+        payload = {"reply": "199 000 so'm", "detected_language": "uz", "customer_name": None, "phone": None,
+                   "lead_ready": False, "lead_request": None, "arrangement_type": None, "estimated_price": None,
+                   "handoff": False, "catalog_items": [], "stock_items": []}
+        with patch("core.services.OpenAI") as openai_class:
+            client = openai_class.return_value
+            client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(payload), output=[], id="r1")
+            ai_reply(conversation)
+        sent = client.responses.create.call_args.kwargs["input"][0]["content"]
+        context = json.loads(sent.split("REAL_CONTEXT_JSON:\n", 1)[1])
+        self.assertNotIn("florist_fee", context["business"])
+        self.assertNotIn("50000", json.dumps(context["business"]))
+
+    def test_the_lead_tool_no_longer_takes_a_florist_fee(self):
+        from .services import ai_tool_definitions
+        for tool in ai_tool_definitions():
+            name = tool.get("name") or (tool.get("function") or {}).get("name")
+            if name not in {"client_lead_create", "client_lead_edit"}:
+                continue
+            schema = tool.get("parameters") or (tool.get("function") or {}).get("parameters") or {}
+            self.assertNotIn("florist_fee", schema.get("properties") or {})
+            self.assertNotIn("florist_fee", schema.get("required") or [])
+
+    def test_the_prompt_forbids_adding_it(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("FLORIST HAQI HECH QAYERGA QO'SHILMAYDI", prompt)
+        self.assertIn("QAT'IY TAQIQLANADI", prompt)
+        self.assertNotIn("Kontekstdagi florist_fee ni ham", prompt)
+
+    def test_the_prompt_takes_the_contact_before_the_delivery_choice(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("mahsulot → sana → ISM VA TELEFON → yetkazib berish/kelib olish", prompt)
+        self.assertIn("Manzilingizni xaritada belgilang", prompt)
 
 
 class FreshnessAnswerPromptTests(TestCase):

@@ -2313,7 +2313,6 @@ def ai_tool_definitions():
                     "request_text": {"type": "string"},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
                     "estimated_price": {"type": ["number", "null"], "description": "Faqat katalog mahsulotining aniq narxi. Yasatma buyurtmada null."},
-                    "florist_fee": {"type": ["number", "null"]},
                     "fulfillment": {"type": ["string", "null"], "enum": ["delivery", "pickup", None]},
                     "delivery_address": {"type": ["string", "null"]},
                     "desired_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
@@ -2322,7 +2321,7 @@ def ai_tool_definitions():
                     "note": {"type": ["string", "null"]},
                     **lead_request_properties,
                 },
-                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
+                "required": ["customer_name", "phone", "request_text", "arrangement_type", "estimated_price", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
                 "additionalProperties": False,
             },
             "strict": True,
@@ -2341,7 +2340,6 @@ def ai_tool_definitions():
                     "status": {"type": ["string", "null"]},
                     "arrangement_type": {"type": ["string", "null"], "enum": ["bouquet", "basket", "catalog", None]},
                     "estimated_price": {"type": ["number", "null"]},
-                    "florist_fee": {"type": ["number", "null"]},
                     "fulfillment": {"type": ["string", "null"], "enum": ["delivery", "pickup", None]},
                     "delivery_address": {"type": ["string", "null"]},
                     "desired_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
@@ -2350,7 +2348,7 @@ def ai_tool_definitions():
                     "note": {"type": ["string", "null"]},
                     **lead_request_properties,
                 },
-                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "florist_fee", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
+                "required": ["lead_id", "customer_name", "phone", "request_text", "status", "arrangement_type", "estimated_price", "fulfillment", "delivery_address", "desired_date", "desired_time", "catalog_items", "note"] + lead_request_keys,
                 "additionalProperties": False,
             },
             "strict": True,
@@ -2948,7 +2946,6 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
     request_text = (arguments.get("request_text") or "").strip()
     estimated_price = arguments.get("estimated_price")
     arrangement_type = arguments.get("arrangement_type") or ""
-    florist_fee = arguments.get("florist_fee")
     fulfillment = arguments.get("fulfillment") or ""
     delivery_address = (arguments.get("delivery_address") or "").strip()
     desired_date = parse_lead_date(arguments.get("desired_date"))
@@ -2977,9 +2974,6 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         if estimated_price is not None:
             lead.estimated_price = Decimal(str(estimated_price))
             fields.append("estimated_price")
-        if florist_fee is not None:
-            lead.florist_fee = Decimal(str(florist_fee))
-            fields.append("florist_fee")
         if fulfillment in {"delivery", "pickup"}:
             lead.fulfillment = fulfillment
             fields.append("fulfillment")
@@ -3027,7 +3021,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         request_uz=request_text,
         arrangement_type=arrangement_type,
         estimated_price=Decimal(str(estimated_price)) if estimated_price is not None else None,
-        florist_fee=Decimal(str(florist_fee)) if florist_fee is not None else Decimal("0"),
+        # Florist haqini operator CRM da belgilaydi. AI uni bilmaydi va yozmaydi.
+        florist_fee=Decimal("0"),
         fulfillment=fulfillment if fulfillment in {"delivery", "pickup"} else "",
         delivery_address=delivery_address[:255],
         desired_date=desired_date,
@@ -3176,7 +3171,8 @@ def ai_reply(conversation):
             },
         },
         "business": {
-            "florist_fee": str(business_settings.default_florist_fee),
+            # florist_fee ataylab berilmaydi: raqamni ko'rsa AI uni katalog narxiga
+            # qo'shib "jami" chiqaradi. Ko'rmagan raqamini qo'sha olmaydi.
             "delivery_fee": str(business_settings.delivery_fee),
             "delivery_area_uz": business_settings.delivery_area_uz,
             "delivery_area_ru": business_settings.delivery_area_ru,
