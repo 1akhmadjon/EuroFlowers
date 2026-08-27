@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from .models import AICatalogItem, CatalogItem, Conversation, Customer, InstagramWebhookEvent, IntegrationSettings, Message, SocialPost
 from .platform_services import find_active_story_by_media_url, find_media_by_id, instagram_account_token_pairs, instagram_credentials_for_account, media_id_from_url, normalize_instagram_permalink, telegram_file_url
-from .services import ingest_customer_message
+from .services import ingest_customer_message, replied_to_note
 
 
 def flatten_interesting_payload(value, prefix=""):
@@ -385,6 +385,9 @@ def instagram_message_metadata(event, webhook_event=None):
         "instagram_referral": referral or {},
         "instagram_ad_id": str(referral.get("ad_id") or ""),
         "instagram_ad_post_id": str(ads_context.get("post_id") or referral.get("post_id") or ""),
+        # Mijoz bizning qaysi xabarimizga javob qilgani. Storyga reply bo'lsa
+        # bu bo'sh qoladi — u yuqoridagi story yo'li bilan hal qilinadi.
+        "instagram_reply_to_mid": str((message.get("reply_to") or {}).get("mid") or ""),
     }
 
 
@@ -612,6 +615,9 @@ def resolve_instagram_event(payload):
                 conversation.ai_pause_reason = "instagram_operator_message"
                 conversation.save(update_fields=["last_message_at", "status", "ai_paused_until", "ai_pause_reason", "updated_at"])
                 continue
+            reply_note = replied_to_note(conversation, message_metadata.get("instagram_reply_to_mid", ""))
+            if reply_note:
+                message_text = f"{message_text}\n{reply_note}"
             update_customer_instagram_profile(customer, external_customer_id, recipient_id)
             saved_message = ingest_customer_message(conversation, message_text, message.get("mid", ""), message_metadata)
             if saved_message:

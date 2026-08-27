@@ -2580,6 +2580,7 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         row["caption"] = f"{row['position']}. {row['item'].name} — {money_uz(row['item'].price)} so'm"
     sent_items = []
     sent_message_ids = []
+    sent_groups = []
     messages_sent = 0
     album_chunks = 0
     fallback_chunks = 0
@@ -2588,6 +2589,11 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         delivered, detail, sent = send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=conversation)
         if isinstance(sent, dict) and sent.get("message_id"):
             sent_message_ids.append(sent["message_id"])
+            # Mijoz albomga reply qilsa qaysi mahsulot haqida yozganini shu
+            # bog'lanish aytadi. Bir albom bir necha xabarga bo'linishi mumkin,
+            # shuning uchun har xabar o'z mahsulotlari bilan yoziladi.
+            sent_groups.append({"message_id": sent["message_id"],
+                                "catalog_ids": [row["item"].id for row in chunk]})
             # Darhol yozamiz. Albom yozuvi butun sikl tugagach saqlanadi, Instagram
             # echo'si esa undan oldin yetib keladi va o'z albomimiz "operator yozdi"
             # bo'lib tushadi. Poyga oynasi shu bilan millisekundgacha qisqaradi.
@@ -2624,9 +2630,59 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         # Instagram yuborgan albomimizni webhook orqali qaytaradi. Id lar bazada tursa
         # echo tanilib, o'z albomimiz "operator javob yozdi" deb hisoblanmaydi.
         "sent_message_ids": sent_message_ids,
+        "sent_groups": sent_groups,
     }
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"catalog_album_result": result})
     return ai_catalog_album_result(result)
+
+
+def replied_to_catalog_items(conversation, reply_mid):
+    """Mijoz javob qilgan xabarimizda qaysi katalog mahsuloti borligi.
+
+    Mijoz albomdagi rasmga reply qilib "nechpul qberasla" deb yozadi. Reply
+    bo'lmasa bu savol havoda qoladi: AI qaysi mahsulot haqida gap ketayotganini
+    bilmaydi va umumiy javob beradi. Instagram esa javob qilingan xabarning
+    mid ini yuboradi — o'sha mid bo'yicha mahsulotni topamiz.
+    """
+    reply_mid = (reply_mid or "").strip()
+    if not reply_mid:
+        return []
+    for message in conversation.messages.filter(sender="system").order_by("-created_at", "-id")[:80]:
+        metadata = message.metadata or {}
+        album = metadata.get("catalog_album_result") or {}
+        items = album.get("items") or []
+        for group in album.get("sent_groups") or []:
+            if group.get("message_id") == reply_mid:
+                wanted = set(group.get("catalog_ids") or [])
+                return [row for row in items if row.get("catalog_id") in wanted]
+        sent_ids = album.get("sent_message_ids") or []
+        # sent_groups yozilishidan oldingi albomlar: bitta xabar bo'lsa mahsulotlar aniq.
+        if reply_mid in sent_ids and len(sent_ids) == 1:
+            return list(items)
+        image = metadata.get("image_tool_result") or {}
+        if image.get("catalog_id") and (image.get("sent") or {}).get("message_id") == reply_mid:
+            return [{"catalog_id": image["catalog_id"], "name": image.get("catalog_name") or ""}]
+    return []
+
+
+def replied_to_note(conversation, reply_mid):
+    """Reply qilingan mahsulotni suhbat matniga qo'shiladigan qator qilib beradi."""
+    rows = replied_to_catalog_items(conversation, reply_mid)
+    if not rows:
+        return ""
+    names = []
+    for row in rows[:10]:
+        name = (row.get("name") or "").strip()
+        if not name:
+            continue
+        price = row.get("price")
+        names.append(f"{name} — {money_uz(price)} so'm" if price else name)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"Tizim izohi: mijoz shu mahsulot rasmiga javob qildi — {names[0]}."
+    return ("Tizim izohi: mijoz shu albomga javob qildi — " + "; ".join(names) +
+            ". Qaysi biri ekanini so'ra.")
 
 
 def catalog_album_row(row, delivered, detail):

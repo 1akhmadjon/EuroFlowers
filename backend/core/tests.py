@@ -9966,6 +9966,97 @@ class PaymentFlowTests(TestCase):
         self.assertEqual(lead_payment_type(self.lead), "card")
 
 
+class ReplyToOurPhotoTests(TestCase):
+    """Mijoz yuborgan albomdagi rasmga reply qilib savol bersa."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_user_id="ig-reply", instagram_username="shukhr")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.savat = AICatalogItem.objects.create(
+            name="Katalina Gulidan Savat Kompazitsia", arrangement_type="basket", price=800000,
+            quantity=1, image_url="https://cdn.example.com/katalina.jpg",
+            note="narxi 800000 kelishtirilgan narxi 700000")
+        self.buket = AICatalogItem.objects.create(
+            name="Luchiana Gulidan Buket", arrangement_type="bouquet", price=1000000,
+            quantity=1, image_url="https://cdn.example.com/luchiana.jpg")
+
+    def _album(self, message_id, items):
+        self.conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {
+            "ok": True,
+            "items": [{"catalog_id": row.id, "name": row.name, "price": str(row.price)} for row in items],
+            "sent_message_ids": [message_id],
+            "sent_groups": [{"message_id": message_id, "catalog_ids": [row.id for row in items]}],
+        }})
+
+    def test_a_reply_to_one_photo_names_that_product(self):
+        from .services import replied_to_note
+        self._album("mid-album-1", [self.savat])
+        note = replied_to_note(self.conversation, "mid-album-1")
+        self.assertIn("Katalina Gulidan Savat Kompazitsia", note)
+        self.assertIn("800 000", note)
+
+    def test_a_reply_to_a_whole_album_asks_which_one(self):
+        from .services import replied_to_note
+        self._album("mid-album-2", [self.savat, self.buket])
+        note = replied_to_note(self.conversation, "mid-album-2")
+        self.assertIn("Katalina Gulidan Savat Kompazitsia", note)
+        self.assertIn("Luchiana Gulidan Buket", note)
+        self.assertIn("Qaysi biri", note)
+
+    def test_a_reply_to_a_single_catalog_image_is_resolved(self):
+        from .services import replied_to_note
+        self.conversation.messages.create(sender="system", text="", metadata={"image_tool_result": {
+            "catalog_id": self.savat.id, "catalog_name": self.savat.name,
+            "sent": {"message_id": "mid-single-1"}}})
+        self.assertIn("Katalina", replied_to_note(self.conversation, "mid-single-1"))
+
+    def test_a_reply_to_something_we_never_sent_adds_nothing(self):
+        from .services import replied_to_note
+        self._album("mid-album-3", [self.savat])
+        self.assertEqual(replied_to_note(self.conversation, "mid-somebody-else"), "")
+        self.assertEqual(replied_to_note(self.conversation, ""), "")
+
+    def test_the_webhook_puts_the_product_into_the_message(self):
+        self._album("mid-album-4", [self.savat])
+        payload = {"entry": [{"messaging": [{
+            "sender": {"id": "ig-reply"}, "recipient": {"id": "ig-business"},
+            "message": {"mid": "mid-customer-1", "text": "неч пул кберасила клиентлага",
+                        "reply_to": {"mid": "mid-album-4", "is_self_reply": False}},
+        }]}]}
+        resolve_instagram_event(payload)
+        saved = self.conversation.messages.filter(sender="customer").order_by("-id").first()
+        self.assertIn("неч пул кберасила", saved.text)
+        self.assertIn("Katalina Gulidan Savat Kompazitsia", saved.text)
+        self.assertEqual(saved.metadata["instagram_reply_to_mid"], "mid-album-4")
+
+    def test_a_story_reply_is_left_to_the_story_path(self):
+        payload = {"entry": [{"messaging": [{
+            "sender": {"id": "ig-reply"}, "recipient": {"id": "ig-business"},
+            "message": {"mid": "mid-customer-2", "text": "shu nechpul",
+                        "reply_to": {"story": {"url": "https://lookaside.fbsbx.com/x?asset_id=1"}}},
+        }]}]}
+        from unittest.mock import patch
+        with patch("core.webhook_services.find_active_story_by_media_url", return_value={}):
+            resolve_instagram_event(payload)
+        saved = self.conversation.messages.filter(sender="customer").order_by("-id").first()
+        self.assertNotIn("javob qildi", saved.text)
+
+
+class FreshnessAnswerPromptTests(TestCase):
+    """«качон ясалган» savoli operatorga emas, javobga boradi."""
+
+    def test_the_prompt_answers_when_it_was_made(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("Gullarimiz har doim yangi", prompt)
+        self.assertIn("качон ясалган", prompt)
+        self.assertNotIn('"Qachon yasalgan", "necha kun turadi", "diametri qancha"', prompt)
+
+    def test_the_reply_block_is_in_the_prompt(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("00K. MIJOZ RASMGA JAVOB QILSA", prompt)
+        self.assertIn("mijoz shu mahsulot rasmiga javob qildi", prompt)
+
+
 class CaptionPriceTests(TestCase):
     """Reel izohidagi narx bo'yicha katalog."""
 
