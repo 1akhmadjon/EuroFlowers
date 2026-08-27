@@ -8008,6 +8008,35 @@ class NaturalSalesFlowTests(TestCase):
         self.assertEqual(result["budget"]["cheapest_price"], "199000.00")
         self.assertEqual(result["catalog"][0]["name_uz"], "Buket Alfalob Gulidan")
 
+    def test_a_sum_we_do_not_carry_shows_what_is_around_it(self):
+        """«А можете показать еще букеты за 350?» — 350 000 lik yo'q, 400 va 450 bor."""
+        AICatalogItem.objects.create(name="Qizil Atir Guldan Kompazitsia", arrangement_type="bouquet",
+                                     price=450000, quantity=1, image_url="https://cdn.example.com/450.jpg")
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None,
+                                                 "min_price": 350000, "max_price": 350000}, self.conversation)
+        prices = sorted({row["price"] for row in result["catalog"]})
+        self.assertEqual(prices, ["400000.00", "450000.00"])
+        self.assertFalse(result["budget"]["exact_match"])
+        self.assertEqual(result["budget"]["near_window_min"], "250000")
+        self.assertEqual(result["budget"]["near_window_max"], "450000")
+        # 199 000 ni eslatish mijozni o'zi tanlagan narxdan pastga tortadi.
+        self.assertNotIn("cheapest_price", result["budget"])
+        self.assertIn("HAMMASINI", result["budget"]["instruction_uz"])
+
+    def test_nothing_within_the_window_falls_back_to_the_whole_catalog(self):
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None,
+                                                 "min_price": 3000000, "max_price": 3000000}, self.conversation)
+        self.assertEqual(len(result["catalog"]), 3)
+        self.assertEqual(result["budget"]["cheapest_price"], "199000.00")
+        self.assertNotIn("near_window_min", result["budget"])
+
+    def test_an_explicit_range_that_fits_is_left_alone(self):
+        result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None,
+                                                 "min_price": 300000, "max_price": 500000}, self.conversation)
+        self.assertEqual([row["price"] for row in result["catalog"]], ["400000.00"])
+        self.assertTrue(result["budget"]["exact_match"])
+        self.assertNotIn("near_window_min", result["budget"])
+
     def test_catalog_without_a_budget_keeps_the_newest_first_ordering(self):
         result = execute_ai_tool("get_catalog", {"query": "", "arrangement_type": None, "min_price": None, "max_price": None}, self.conversation)
         self.assertNotIn("budget", result)

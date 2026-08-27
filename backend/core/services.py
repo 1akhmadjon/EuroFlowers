@@ -662,7 +662,13 @@ def catalog_budget_summary(queryset, low, high, exact_match, near_prices=()):
     }
     if exact_match:
         return summary
-    if near_prices:
+    prices = sorted(queryset.values_list("price", flat=True))
+    focus = budget_focus(low, high)
+    # Mijozning budjeti butun katalogdan past bo'lsa radius emas, rostini aytish
+    # kerak: eng arzoni shuncha. Radius esa mijoz katalogdagi narxlar oralig'idagi
+    # summani aytganda ishlaydi — 350 ming so'ralsa 400 va 450 minglik chiqadi.
+    below_everything = bool(prices) and focus is not None and focus < prices[0]
+    if near_prices and not below_everything:
         # Radius ishlagan holat. Bu yerda eng arzon narxni aytish xato bo'ladi:
         # mijoz 350 ming atrofini so'ragan, 199 000 ni eslatish uni pastga tortadi
         # va operator keyin qimmatrog'ini qaytadan taklif qilishga majbur bo'ladi.
@@ -676,7 +682,6 @@ def catalog_budget_summary(queryset, low, high, exact_match, near_prices=()):
             "Eng arzon mahsulot narxini ESLATMA."
         )
         return summary
-    prices = sorted(queryset.values_list("price", flat=True))
     if not prices:
         return summary
     summary["cheapest_price"] = str(prices[0])
@@ -2368,7 +2373,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "get_catalog",
-            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi. Mijoz budjet aytsa (\"250 mingga bormi\", \"200 mingdan 500 minggacha\", \"1 millionlik\", \"arzonrog'i\") min_price va max_price ber. Natijadagi budget.exact_match false bo'lsa o'sha narxda mahsulot yo'q, qatorlar eng yaqinlari — budget.cheapest_price eng arzon mahsulot narxi. query_matched false bo'lsa qidiruv so'zi nomlarga mos kelmagan, lekin qaytgan qatorlar sotuvdagi haqiqiy mahsulotlar — mijozga tayyor mahsulot yo'q deb aytma.",
+            "description": "AI katalogdagi mijozga ko'rsatiladigan tayyor buket/savat/kompozitsiyalarni olish. Har qatordagi note_uz — operator izohi: mahsulot tafsiloti va ba'zan kelishilgan narx shu yerda turadi. Mijoz budjet aytsa (\"250 mingga bormi\", \"200 mingdan 500 minggacha\", \"1 millionlik\", \"arzonrog'i\") min_price va max_price ber. Mijoz BITTA summa aytsa (\"350 mingga\", \"за 350\", \"1 millionlik\") min_price va max_price ga O'SHA summani ikkalasiga ham yoz — shunda o'sha narx atrofidagilar chiqadi. Ikki xil qiymatni faqat mijoz oraliq aytganda yoz (\"200 dan 500 gacha\"). \"350 minggacha\" degan yuqori chegara bo'lsa max_price ga yoz, min_price ni null qoldir. Natijadagi budget.exact_match false bo'lsa o'sha narxda mahsulot yo'q, qatorlar eng yaqinlari — budget.cheapest_price eng arzon mahsulot narxi. query_matched false bo'lsa qidiruv so'zi nomlarga mos kelmagan, lekin qaytgan qatorlar sotuvdagi haqiqiy mahsulotlar — mijozga tayyor mahsulot yo'q deb aytma.",
             "parameters": {
                 "type": "object",
                 "properties": {
