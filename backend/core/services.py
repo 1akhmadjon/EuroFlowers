@@ -2937,6 +2937,19 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
     return {"ok": True, "lead_id": lead.id, "operators_notified": bool(notified.get("ok"))}
 
 
+def lead_payment_type(lead):
+    """Leadda saqlangan to'lov turi: "cash", "card" yoki bo'sh.
+
+    Bo'sh qiymat "to'lov turi hali so'ralmagan" degani — AI shu maydonga qarab
+    savolni takrorlamaydi yoki tashlab ketmaydi.
+    """
+    if not lead:
+        return ""
+    from . import payment_services
+
+    return payment_services.payment_state(lead).get("type") or ""
+
+
 def ai_response_schema():
     return {
         "type": "object",
@@ -3040,6 +3053,8 @@ def ai_reply(conversation):
                 "name": bool(valid_customer_name(customer.name)),
                 "phone": bool(customer.phone),
                 "fulfillment": open_lead.fulfillment if open_lead else "",
+                # Bo'sh bo'lsa to'lov turi hali so'ralmagan — 00J shu maydonga qaraydi.
+                "payment_type": lead_payment_type(open_lead),
                 "delivery_address": bool(open_lead.delivery_address) if open_lead else False,
                 "desired_date": bool(open_lead.desired_date) if open_lead else False,
                 "desired_time": bool(open_lead.desired_time) if open_lead else False,

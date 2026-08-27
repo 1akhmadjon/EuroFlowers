@@ -133,6 +133,7 @@ class BusinessRulesTests(TestCase):
         self.assertTrue(known["name"])
         self.assertTrue(known["phone"])
         self.assertEqual(known["fulfillment"], "pickup")
+        self.assertEqual(known["payment_type"], "")
         self.assertTrue(known["desired_date"])
         self.assertTrue(known["desired_time"])
         self.assertEqual(context["conversation"]["open_lead"]["fulfillment"], "pickup")
@@ -9926,6 +9927,14 @@ class PaymentFlowTests(TestCase):
             instagram_username="no_lead", instagram_user_id="ig-nolead"))
         result = execute_ai_tool("client_payment_update", {"payment_type": "card", "receipt_url": None}, empty)
         self.assertEqual(result["detail"], "no_lead_yet")
+
+    def test_the_context_says_whether_the_payment_type_is_already_known(self):
+        from .services import lead_payment_type
+        from .payment_services import set_payment_type
+        self.assertEqual(lead_payment_type(self.lead), "")
+        self.assertEqual(lead_payment_type(None), "")
+        set_payment_type(self.lead, "card")
+        self.assertEqual(lead_payment_type(self.lead), "card")
 
 
 class CaptionPriceTests(TestCase):
