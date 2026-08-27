@@ -10063,7 +10063,9 @@ class NoFloristFeeForTheCustomerTests(TestCase):
         sent = client.responses.create.call_args.kwargs["input"][0]["content"]
         context = json.loads(sent.split("REAL_CONTEXT_JSON:\n", 1)[1])
         self.assertNotIn("florist_fee", context["business"])
-        self.assertNotIn("50000", json.dumps(context["business"]))
+        # Yetkazib berish narxi qoladi — u mijozga aytiladigan haqiqiy summa.
+        self.assertEqual(context["business"]["delivery_fee"], "50000.00")
+        self.assertNotIn("florist", json.dumps(context))
 
     def test_the_lead_tool_no_longer_takes_a_florist_fee(self):
         from .services import ai_tool_definitions
