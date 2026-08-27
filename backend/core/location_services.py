@@ -11,7 +11,9 @@ qilib joylashuv yuboriladi, va suhbatga mijoz xabari sifatida yozilib AI o'z
 navbatida javob beradi — shunda "manzilingizni oldik" dan keyin nima so'rash
 kerakligini suhbat holatiga qarab o'zi hal qiladi.
 """
+import math
 import secrets
+from urllib.parse import quote
 
 from django.conf import settings
 from django.utils import timezone
@@ -20,6 +22,9 @@ from .models import Lead, Message
 from .platform_services import telegram_api_with_token
 
 TOKEN_BYTES = 5
+# Mijoz belgini bir necha metr surib qayta bossa bu yangi manzil emas. Shu
+# masofadan yaqin nuqta guruhga qayta yuborilmaydi.
+SAME_POINT_METERS = 30
 
 
 def location_state(lead):
@@ -57,10 +62,29 @@ def location_link(lead):
     template = (settings.DELIVERY_LOCATION_URL or "").strip()
     if not template:
         return ""
-    return template.format(lead_id=lead.id, token=ensure_token(lead))
+    # Kod hozir faqat hex, lekin shakli o'zgarsa "+", "/", "=" havolani buzadi.
+    return template.format(lead_id=lead.id, token=quote(ensure_token(lead), safe=""))
 
 
-def send_location_to_group(lead):
+def point_moved(state, latitude, longitude):
+    """Yangi nuqta avvalgisidan sezilarli uzoqdami.
+
+    Avval nuqta bo'lmagan bo'lsa har qanday nuqta yangi hisoblanadi.
+    """
+    try:
+        old_lat = float(state.get("latitude"))
+        old_lon = float(state.get("longitude"))
+        new_lat = float(latitude)
+        new_lon = float(longitude)
+    except (TypeError, ValueError):
+        return True
+    metres_per_degree = 111320.0
+    north = (new_lat - old_lat) * metres_per_degree
+    east = (new_lon - old_lon) * metres_per_degree * math.cos(math.radians(old_lat))
+    return math.hypot(north, east) > SAME_POINT_METERS
+
+
+def send_location_to_group(lead, updated=False):
     """Operatorlar guruhidagi lead xabariga javob qilib joylashuv yuboradi."""
     from .payment_services import payment_state
 
@@ -86,7 +110,7 @@ def send_location_to_group(lead):
     except Exception as error:
         print(f"LOCATION_GROUP_SEND_FAILED lead={lead.id} error={error}", flush=True)
         return {"ok": False, "detail": "send_failed"}
-    caption = location_caption(lead)
+    caption = location_caption(lead, updated=updated)
     if caption:
         note = {"chat_id": chat_id, "text": caption}
         if reply_to:
@@ -100,9 +124,10 @@ def send_location_to_group(lead):
     return {"ok": bool(sent.get("ok")), "detail": ""}
 
 
-def location_caption(lead):
+def location_caption(lead, updated=False):
     state = location_state(lead)
-    lines = [f"📍 Yetkazib berish manzili — Lead #{lead.id}"]
+    title = "📍 Manzil yangilandi" if updated else "📍 Yetkazib berish manzili"
+    lines = [f"{title} — Lead #{lead.id}"]
     address = (state.get("address") or lead.delivery_address or "").strip()
     if address:
         lines.append(address)
@@ -138,6 +163,14 @@ def accept_location(lead_id, token, latitude, longitude, address=""):
         return {"status": "skipped", "detail": "lead_not_found"}
     if not token_matches(lead, token):
         return {"status": "rejected", "detail": "bad_token"}
+    # Havola bir necha marta ishlaydi va frontend bloklamaydi. Har bosishda
+    # guruhga joylashuv yuborib, AI ga "manzilingizni oldik" deb qayta yozdirsak
+    # operator ham mijoz ham takror xabarlarga ko'miladi. Shuning uchun birinchi
+    # manzil to'liq oqimni yuritadi, keyingilari faqat nuqta ko'chganda guruhga
+    # tuzatish bo'lib boradi.
+    previous = location_state(lead)
+    had_point = previous.get("latitude") is not None and previous.get("longitude") is not None
+    moved = point_moved(previous, latitude, longitude)
     save_location_state(
         lead,
         latitude=str(latitude),
@@ -149,7 +182,11 @@ def accept_location(lead_id, token, latitude, longitude, address=""):
     if text_address and not lead.delivery_address:
         lead.delivery_address = text_address[:255]
         lead.save(update_fields=["delivery_address", "updated_at"])
-    send_location_to_group(lead)
+    if had_point and not moved:
+        return {"status": "ok", "lead_id": lead.id, "detail": "same_point"}
+    send_location_to_group(lead, updated=had_point)
+    if had_point:
+        return {"status": "ok", "lead_id": lead.id, "detail": "updated"}
     message = record_customer_location_message(lead, text_address)
     if message:
         from .tasks import process_location_reply

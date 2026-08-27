@@ -10176,6 +10176,20 @@ class DeliveryLocationTests(TestCase):
         self.assertEqual(location_link(self.lead), "")
 
     @override_settings(DELIVERY_LOCATION_URL="https://front.uz/loc/{lead_id}?t={token}")
+    def test_a_token_with_url_characters_is_escaped(self):
+        from .location_services import location_link, save_location_state
+        save_location_state(self.lead, token="A b-_=+/x")
+        self.assertEqual(location_link(self.lead),
+                         "https://front.uz/loc/%d?t=A%%20b-_%%3D%%2B%%2Fx" % self.lead.id)
+
+    def test_a_nudged_pin_is_not_a_new_address(self):
+        from .location_services import point_moved
+        here = {"latitude": "41.2995", "longitude": "69.2401"}
+        self.assertFalse(point_moved(here, "41.29952", "69.24012"))
+        self.assertTrue(point_moved(here, "41.3100", "69.2401"))
+        self.assertTrue(point_moved({}, "41.2995", "69.2401"))
+
+    @override_settings(DELIVERY_LOCATION_URL="https://front.uz/loc/{lead_id}?t={token}")
     def test_the_tool_hands_the_link_to_the_ai(self):
         result = execute_ai_tool("delivery_location_link", {}, self.conversation)
         self.assertTrue(result["ok"])
@@ -10222,6 +10236,37 @@ class DeliveryLocationTests(TestCase):
     def test_broken_coordinates_are_refused(self):
         self.assertEqual(self._post(latitude="200").status_code, 400)
         self.assertEqual(self._post(longitude="abc").status_code, 400)
+
+    def test_pressing_select_again_on_the_same_spot_stays_quiet(self):
+        from unittest.mock import patch
+        with patch("core.location_services.send_location_to_group", return_value={"ok": True}) as to_group, \
+             patch("core.tasks.process_location_reply.delay") as later:
+            self.assertEqual(self._post().json()["status"], "OK")
+            self.assertEqual(self._post().json()["status"], "OK")
+            self.assertEqual(self._post(latitude="41.2995200000").json()["status"], "OK")
+        self.assertEqual(to_group.call_count, 1)
+        self.assertEqual(later.call_count, 1)
+
+    def test_a_moved_pin_corrects_the_group_without_a_second_ai_reply(self):
+        from unittest.mock import patch
+        from .location_services import accept_location, ensure_token
+        token = ensure_token(self.lead)
+        with patch("core.location_services.send_location_to_group", return_value={"ok": True}) as to_group, \
+             patch("core.tasks.process_location_reply.delay") as later:
+            accept_location(self.lead.id, token, "41.2995000000", "69.2401000000")
+            moved = accept_location(self.lead.id, token, "41.3200000000", "69.2401000000")
+        self.assertEqual(moved["detail"], "updated")
+        self.assertEqual(to_group.call_count, 2)
+        self.assertTrue(to_group.call_args.kwargs["updated"])
+        self.assertEqual(later.call_count, 1)
+        self.lead.refresh_from_db()
+        self.assertEqual((self.lead.details or {})["location"]["latitude"], "41.3200000000")
+
+    def test_a_corrected_location_is_labelled_in_the_group(self):
+        from .location_services import location_caption, save_location_state
+        save_location_state(self.lead, latitude="41.2995", longitude="69.2401")
+        self.assertIn("Yetkazib berish manzili", location_caption(self.lead))
+        self.assertIn("Manzil yangilandi", location_caption(self.lead, updated=True))
 
     def test_a_typed_address_is_not_overwritten(self):
         from unittest.mock import patch
