@@ -55,11 +55,14 @@ def save_payment_state(lead, **changes):
     return state
 
 
-def remember_operator_message(lead, telegram_result):
+def remember_operator_message(lead, telegram_result, body="", keyboard=None):
     """Guruhda yuborilgan lead xabarining id sini leadga yozib qo'yadi.
 
     Keyin shu id bo'yicha xabar tahrirlanadi. Id topilmasa hech narsa yozilmaydi
     va tahrir o'rniga oddiy yangi xabar yuboriladi.
+
+    Xabarning asl matni va tugmasi ham saqlanadi: to'lov holati qo'shilganda
+    lead ma'lumotlari o'rniga faqat to'lov qatorlari yozilib qolmasin.
     """
     result = (telegram_result or {}).get("result")
     message_id = None
@@ -70,7 +73,12 @@ def remember_operator_message(lead, telegram_result):
         message_id = ids[-1] if ids else None
     if not message_id:
         return None
-    save_payment_state(lead, operator_message_id=message_id)
+    changes = {"operator_message_id": message_id}
+    if body:
+        changes["operator_body"] = body[:3000]
+    if keyboard:
+        changes["operator_keyboard"] = keyboard
+    save_payment_state(lead, **changes)
     return message_id
 
 
@@ -98,11 +106,25 @@ def payment_summary_lines(lead):
     return lines
 
 
-def update_operator_message(lead, keyboard=None):
-    """Guruhdagi lead xabariga to'lov holatini qo'shadi.
+def operator_message_body(lead):
+    """Lead xabarining asl matni, ostiga to'lov qatorlari qo'shilgan holda."""
+    state = payment_state(lead)
+    lines = payment_summary_lines(lead)
+    base = (state.get("operator_body") or "").strip()
+    if not base:
+        return f"🌸 Lead #{lead.id} — to'lov\n" + "\n".join(lines)
+    return base + "\n\n" + "\n".join(lines)
 
-    Avval xabarning o'zi tahrirlanadi. Tahrir o'tmasa (masalan xabar rasmli
-    albom bo'lsa) o'sha xabarga javob qilib yangi qator yuboriladi.
+
+def update_operator_message(lead):
+    """Guruhdagi lead xabarining matniga to'lov holatini qo'shadi.
+
+    Xabar ALMASHTIRILMAYDI: asl lead matni joyida qoladi, ostiga to'lov
+    qatorlari qo'shiladi. Avval faqat to'lov qatorlari yozilardi va operator
+    ism, raqam, mahsulot va manzilni yo'qotardi.
+
+    Tugma ham o'zgarmaydi — "CRM chatni ochish" joyida qoladi. To'lovni
+    tasdiqlash tugmalari bu xabarga QO'YILMAYDI, ular chek xabarida turadi.
     """
     token, chat_id = operator_bot()
     if not token or not chat_id:
@@ -110,8 +132,10 @@ def update_operator_message(lead, keyboard=None):
     lines = payment_summary_lines(lead)
     if not lines:
         return {"ok": False, "detail": "nothing_to_add"}
-    message_id = payment_state(lead).get("operator_message_id")
-    body = f"🌸 Lead #{lead.id} — to'lov\n" + "\n".join(lines)
+    state = payment_state(lead)
+    message_id = state.get("operator_message_id")
+    keyboard = state.get("operator_keyboard")
+    body = operator_message_body(lead)
     if message_id:
         for method, field in (("editMessageCaption", "caption"), ("editMessageText", "text")):
             payload = {"chat_id": chat_id, "message_id": message_id, field: body}
@@ -192,8 +216,9 @@ def register_receipt(lead, receipt_url):
         receipt_at=timezone.now().isoformat(),
     )
     sent = send_receipt_to_operators(lead, receipt_url, repeated=repeated)
-    if not repeated:
-        update_operator_message(lead, keyboard=operator_keyboard(lead))
+    # Lead xabari faqat matn bilan yangilanadi. Tugmalar yuqoridagi chek
+    # xabarida — operator chekni ko'rib turib bosadi.
+    update_operator_message(lead)
     return {
         "ok": bool(sent.get("ok")),
         "repeated": repeated,
@@ -221,8 +246,13 @@ def decide_payment(lead_id, approved):
 
 
 def notify_customer(lead, text):
-    """Mijozga to'lov qarori haqida xabar yuboradi va suhbatga yozib qo'yadi."""
-    from .services import conversation_instagram_account_id, latin_to_cyrillic
+    """Mijozga to'lov qarori haqida xabar yuboradi va suhbatga yozib qo'yadi.
+
+    Yuborilgan xabarning Instagram id si saqlanadi: aks holda echo qaytganda
+    o'zimizning xabarimiz "operator javob yozdi" bo'lib tushadi va suhbat
+    operatorga o'tib ketadi.
+    """
+    from .services import conversation_instagram_account_id, latin_to_cyrillic, remember_sent_instagram_message
     from .platform_services import instagram_send, telegram_send
 
     conversation = lead.conversation
@@ -232,17 +262,22 @@ def notify_customer(lead, text):
     body = text
     if (customer.language or "") == "uz_cyril":
         body = latin_to_cyrillic(text)
+    response = None
     try:
         if customer.instagram_user_id.startswith("telegram:"):
             telegram_send(customer.instagram_user_id.split(":", 1)[1], body)
         elif customer.instagram_user_id:
-            instagram_send(customer.instagram_user_id, body, conversation_instagram_account_id(conversation))
+            response = instagram_send(customer.instagram_user_id, body, conversation_instagram_account_id(conversation))
         else:
             return False
     except Exception as error:
         print(f"PAYMENT_CUSTOMER_NOTIFY_FAILED lead={lead.id} error={error}", flush=True)
         return False
+    message_id = (response or {}).get("message_id") or (response or {}).get("mid") or ""
+    if message_id:
+        remember_sent_instagram_message({"message_id": message_id})
     Message.objects.create(conversation=conversation, sender="ai", text=body,
+                           instagram_message_id=message_id,
                            metadata={"payment_decision": payment_state(lead)})
     return True
 

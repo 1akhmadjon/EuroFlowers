@@ -1246,12 +1246,15 @@ def notify_operators_about_lead(lead, conversation):
     if not token or not chat_id:
         return {"ok": False, "detail": "operator_group_not_configured"}
     reply_markup = {"inline_keyboard": [[{"text": "CRM chatni ochish", "url": operator_chat_url(conversation)}]]}
+    # To'lov holati keyin shu xabarga qo'shiladi. Asl matn saqlanmasa tahrir
+    # lead ma'lumotlarini o'chirib, o'rniga faqat to'lov qatorini yozib qo'yadi.
+    plain_body = operator_lead_plain_message(lead, conversation)
     try:
         sent = telegram_send_rich_message_with(token, chat_id, operator_lead_rich_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
     except Exception as error:
         print(f"AI_LEAD_RICH_NOTIFY_FAILED lead={lead.id} error={error}", flush=True)
         try:
-            sent = telegram_send_with(token, chat_id, operator_lead_plain_message(lead, conversation), reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
+            sent = telegram_send_with(token, chat_id, plain_body, reply_markup=reply_markup, message_thread_id=settings.AI_OPERATOR_HANDOFF_THREAD_ID)
         except Exception as fallback_error:
             print(f"AI_LEAD_NOTIFY_FAILED lead={lead.id} error={fallback_error}", flush=True)
             return {"ok": False, "detail": "telegram_send_failed"}
@@ -1259,7 +1262,7 @@ def notify_operators_about_lead(lead, conversation):
     # Keyin to'lov holatini shu xabarga qo'shish uchun id si eslab qolinadi.
     from . import payment_services
 
-    payment_services.remember_operator_message(lead, sent)
+    payment_services.remember_operator_message(lead, sent, body=plain_body, keyboard=reply_markup)
     return {"ok": True, "lead_id": lead.id}
 
 

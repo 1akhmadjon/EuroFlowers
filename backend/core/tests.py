@@ -9887,6 +9887,39 @@ class PaymentFlowTests(TestCase):
         self.assertEqual(payload["message_id"], 77)
         self.assertIn("💳 Karta", payload.get("caption") or payload.get("text"))
 
+    def test_the_lead_details_survive_the_payment_update(self):
+        """Avval tahrir lead matnini o'chirib, o'rniga faqat to'lov qatorini yozardi."""
+        from .payment_services import set_payment_type, save_payment_state
+        body = "🌸 Yangi lead #1\n\n👤 Ahmad\n📞 +998901112233\n🛍 Luchiana Gulidan Buket — 900 000 so'm"
+        save_payment_state(self.lead, operator_message_id=77, operator_body=body,
+                           operator_keyboard={"inline_keyboard": [[{"text": "CRM chatni ochish", "url": "https://crm/x"}]]})
+        set_payment_type(self.lead, "card")
+        _, payload = self.calls[-1]
+        written = payload.get("caption") or payload.get("text")
+        self.assertIn("👤 Ahmad", written)
+        self.assertIn("📞 +998901112233", written)
+        self.assertIn("Luchiana Gulidan Buket", written)
+        self.assertIn("💳 Karta", written)
+        # "CRM chatni ochish" tugmasi ham joyida qoladi.
+        self.assertEqual(payload["reply_markup"]["inline_keyboard"][0][0]["text"], "CRM chatni ochish")
+
+    def test_the_lead_message_never_carries_the_payment_buttons(self):
+        from .payment_services import register_receipt, save_payment_state
+        save_payment_state(self.lead, operator_message_id=77, type="card",
+                           operator_body="🌸 Yangi lead #1\n👤 Ahmad",
+                           operator_keyboard={"inline_keyboard": [[{"text": "CRM chatni ochish", "url": "https://crm/x"}]]})
+        register_receipt(self.lead, "https://cdn.example.com/chek.jpg")
+        edits = [p for m, p in self.calls if m in {"editMessageCaption", "editMessageText"}]
+        self.assertTrue(edits)
+        for payload in edits:
+            labels = [b.get("text") for row in (payload.get("reply_markup") or {}).get("inline_keyboard", []) for b in row]
+            self.assertNotIn("✅ To'lovni tasdiqlash", labels)
+            self.assertNotIn("❌ To'lovni rad etish", labels)
+        # Tugmalar faqat alohida yuborilgan chek xabarida.
+        photo = [p for m, p in self.calls if m == "sendPhoto"][0]
+        photo_labels = [b["text"] for row in photo["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertEqual(photo_labels, ["✅ To'lovni tasdiqlash", "❌ To'lovni rad etish"])
+
     def test_a_photo_is_only_classified_once_an_order_exists(self):
         """Buyurtma bo'lmagan suhbatda chek ham bo'lmaydi — bekorga so'rov ketmaydi."""
         source = Path(__file__).with_name("services.py").read_text(encoding="utf-8")
@@ -10041,6 +10074,50 @@ class ReplyToOurPhotoTests(TestCase):
             resolve_instagram_event(payload)
         saved = self.conversation.messages.filter(sender="customer").order_by("-id").first()
         self.assertNotIn("javob qildi", saved.text)
+
+
+class OurOwnEchoIsNotAnOperatorTests(TestCase):
+    """Biz yuborgan xabar echo bo'lib qaytganda suhbat operatorga o'tmasligi kerak."""
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_user_id="ig-echo-loc", instagram_username="ahmad")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+
+    def test_the_location_reply_records_its_message_id(self):
+        from unittest.mock import patch
+        from .tasks import deliver_ai_reply
+        reply = self.conversation.messages.create(sender="ai", text="Manzilingizni oldik.")
+        with patch("core.tasks.instagram_send", return_value={"message_id": "mid-loc-echo"}):
+            deliver_ai_reply(self.conversation, reply)
+        reply.refresh_from_db()
+        self.assertEqual(reply.instagram_message_id, "mid-loc-echo")
+
+    def test_that_echo_is_recognised_and_the_ai_keeps_the_chat(self):
+        from unittest.mock import patch
+        from .tasks import deliver_ai_reply
+        reply = self.conversation.messages.create(sender="ai", text="Manzilingizni oldik.")
+        with patch("core.tasks.instagram_send", return_value={"message_id": "mid-loc-echo-2"}):
+            deliver_ai_reply(self.conversation, reply)
+        payload = {"entry": [{"messaging": [{
+            "sender": {"id": "ig-business"}, "recipient": {"id": "ig-echo-loc"},
+            "message": {"mid": "mid-loc-echo-2", "text": "Manzilingizni oldik.", "is_echo": True},
+        }]}]}
+        with patch("core.webhook_services.instagram_account_token_pairs", return_value={"ig-business": "tok"}):
+            resolve_instagram_event(payload)
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.conversation.status, "ai")
+        self.assertIsNone(self.conversation.ai_paused_until)
+        self.assertFalse(self.conversation.messages.filter(sender="operator").exists())
+
+    def test_the_payment_decision_message_records_its_id_too(self):
+        from unittest.mock import patch
+        from .payment_services import notify_customer
+        lead = Lead.objects.create(conversation=self.conversation, customer=self.customer,
+                                   source="ai", request_uz="Buket")
+        with patch("core.platform_services.instagram_send", return_value={"message_id": "mid-pay-echo"}):
+            self.assertTrue(notify_customer(lead, "To'lovingiz tasdiqlandi."))
+        saved = self.conversation.messages.filter(sender="ai").order_by("-id").first()
+        self.assertEqual(saved.instagram_message_id, "mid-pay-echo")
 
 
 class NoFloristFeeForTheCustomerTests(TestCase):

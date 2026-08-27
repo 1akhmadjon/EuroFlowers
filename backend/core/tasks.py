@@ -102,17 +102,31 @@ def process_delayed_telegram_reply(conversation_id, expected_message_id, chat_id
 
 
 def deliver_ai_reply(conversation, reply):
-    """AI javobini mijozga yetkazadi — Instagram yoki Telegram."""
-    from .services import conversation_instagram_account_id
+    """AI javobini mijozga yetkazadi — Instagram yoki Telegram.
+
+    Yuborilgan xabarning Instagram id si javobga yozilishi SHART. Yozilmasa
+    Instagram qaytargan echo o'zimizning xabarimiz ekani tanilmaydi, u
+    "operator javob yozdi" bo'lib tushadi va AI o'zini o'n besh daqiqaga
+    to'xtatib qo'yadi — mijozning keyingi xabari javobsiz qoladi.
+    """
+    from .services import conversation_instagram_account_id, remember_sent_instagram_message
 
     external_id = conversation.customer.instagram_user_id or ""
     try:
         if external_id.startswith("telegram:"):
             telegram_send(external_id.split(":", 1)[1], reply.text)
-        elif external_id:
-            instagram_send(external_id, reply.text, conversation_instagram_account_id(conversation))
+            return
+        if not external_id:
+            return
+        response = instagram_send(external_id, reply.text, conversation_instagram_account_id(conversation))
     except Exception as error:
         print(f"LOCATION_REPLY_SEND_FAILED conversation={conversation.id} error={error}", flush=True)
+        return
+    message_id = (response or {}).get("message_id") or (response or {}).get("mid")
+    if message_id:
+        remember_sent_instagram_message({"message_id": message_id})
+        reply.instagram_message_id = message_id
+        reply.save(update_fields=["instagram_message_id", "updated_at"])
 
 
 @shared_task(autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
