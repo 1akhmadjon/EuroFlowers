@@ -21,7 +21,9 @@ from django.utils import timezone
 from .models import Lead, Message
 from .platform_services import telegram_api_with_token
 
-TOKEN_BYTES = 5
+# Endpoint ochiq va cheklovsiz, himoya faqat shu kodda. 8 bayt = 64 bit:
+# tasodifiy urinib topish amalda imkonsiz. Eski leadlarning kodi o'zgarmaydi.
+TOKEN_BYTES = 8
 # Mijoz belgini bir necha metr surib qayta bossa bu yangi manzil emas. Shu
 # masofadan yaqin nuqta guruhga qayta yuborilmaydi.
 SAME_POINT_METERS = 30
