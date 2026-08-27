@@ -611,7 +611,40 @@ def catalog_price_bounds(min_price, max_price):
     return bounds[0], bounds[1]
 
 
-def catalog_budget_summary(queryset, low, high, exact_match):
+# Mijoz "350 mingga bormi" desa aynan shu narx katalogda bo'lmasligi mumkin.
+# O'shanda butun katalogni 199 000 dan boshlab yuborish javob emas — mijoz shu
+# summa atrofidagini so'ragan. Shu radius ichidagilar ko'rsatiladi.
+BUDGET_RADIUS = Decimal("100000")
+
+
+def budget_focus(low, high):
+    """Mijoz nazarda tutgan summa: bitta narx yoki so'ralgan oraliqning o'rtasi."""
+    if low is not None and high is not None:
+        return (low + high) / 2
+    return low if low is not None else high
+
+
+def budget_window(low, high):
+    """So'ralgan summa atrofidagi ±100 000 chegara."""
+    focus = budget_focus(low, high)
+    if focus is None:
+        return None, None
+    return focus - BUDGET_RADIUS, focus + BUDGET_RADIUS
+
+
+def catalog_near_budget(queryset, low, high):
+    """So'ralgan narxda mahsulot bo'lmasa radius ichidagilar.
+
+    350 000 so'ralganda 250 000 — 450 000 oynasi ochiladi va 400 000 hamda
+    450 000 lik gullar chiqadi.
+    """
+    window_low, window_high = budget_window(low, high)
+    if window_low is None:
+        return queryset.none()
+    return queryset.filter(price__gte=window_low, price__lte=window_high)
+
+
+def catalog_budget_summary(queryset, low, high, exact_match, near_prices=()):
     """Budjet javobi uchun ma'lumot.
 
     Mos mahsulot topilmasa eng arzonini aytish kerak — "250 mingga bormi" savoliga
@@ -628,6 +661,20 @@ def catalog_budget_summary(queryset, low, high, exact_match):
         "asked_max": str(high) if high is not None else "",
     }
     if exact_match:
+        return summary
+    if near_prices:
+        # Radius ishlagan holat. Bu yerda eng arzon narxni aytish xato bo'ladi:
+        # mijoz 350 ming atrofini so'ragan, 199 000 ni eslatish uni pastga tortadi
+        # va operator keyin qimmatrog'ini qaytadan taklif qilishga majbur bo'ladi.
+        window_low, window_high = budget_window(low, high)
+        summary["near_window_min"] = str(window_low)
+        summary["near_window_max"] = str(window_high)
+        summary["instruction_uz"] = (
+            f"Aynan so'ralgan narxda mahsulot yo'q, lekin {money_uz(window_low)} — "
+            f"{money_uz(window_high)} so'm oralig'ida bor. Qaytgan qatorlarning "
+            "HAMMASINI send_catalog_album bilan yubor va har birining narxini ayt. "
+            "Eng arzon mahsulot narxini ESLATMA."
+        )
         return summary
     prices = sorted(queryset.values_list("price", flat=True))
     if not prices:
@@ -655,6 +702,8 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
             priced = priced.filter(price__gte=low)
         if high is not None:
             priced = priced.filter(price__lte=high)
+        if not priced.exists():
+            priced = catalog_near_budget(queryset, low, high)
         # Budjet aytilgan bo'lsa arzonidan boshlab ko'rsatamiz — mijoz shu tartibda o'ylaydi.
         queryset = (priced if priced.exists() else queryset).order_by("price", "id")
     generic_query_terms = {"vitrina", "katalog", "catalog", "tayyor", "mahsulot", "gulla", "buketlar", "savatlar"}
@@ -705,8 +754,13 @@ def ai_catalog_result(query="", limit=24, arrangement_type="", min_price=None, m
     if low is None and high is None:
         return result
     within = [row for row in rows if (low is None or Decimal(row["price"]) >= low) and (high is None or Decimal(row["price"]) <= high)]
+    window_low, window_high = budget_window(low, high)
+    near_prices = [] if within or window_low is None else [
+        row["price"] for row in rows
+        if window_low <= Decimal(row["price"]) <= window_high
+    ]
     result["budget"] = dict(
-        catalog_budget_summary(available_ai_catalog_queryset(), low, high, bool(within)),
+        catalog_budget_summary(available_ai_catalog_queryset(), low, high, bool(within), near_prices),
         matched=len(within),
         # Budjetga tushgani yo'q bo'lsa qatorlar eng yaqinlari — "aynan shu narxda bor" dema.
         exact_match=bool(within),
