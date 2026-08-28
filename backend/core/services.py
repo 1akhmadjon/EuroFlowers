@@ -3124,6 +3124,13 @@ def ai_reply(conversation):
     # O'zbek kirill suhbatda model lotinda aniqroq yozadi. Kirill matnni lotinga o'girib beramiz,
     # javobni esa oxirida kirillga qaytaramiz. Rus tiliga tegilmaydi.
     customer_script = conversation_script(pending_customer_messages or [latest_customer_text])
+    # Ruscha mijozning qisqa xabarlarida ("На сегодня", "Карта") til belgisi
+    # bo'lmaydi va detect_text_script ularni o'zbekcha deb hisoblaydi. Real
+    # suhbatda shu sabab rus mijozga butun buyurtma o'zbek kirilida yozilgan.
+    # Butun suhbatda ruscha dalil bo'lib, o'zbekchasi umuman bo'lmasa javob
+    # rus tilida ketadi. Qolgan holatlarda yuqoridagi qaror o'zgarmaydi.
+    if conversation_reply_script(conversation) == "ru":
+        customer_script = "ru"
     cyrillic_mode = customer_script == "uz_cyril"
     history = []
     for message in history_messages:

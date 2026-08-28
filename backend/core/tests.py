@@ -10842,6 +10842,15 @@ class RussianReplyLanguageTests(TestCase):
         captions = self._album_captions(["Каерда жойлашгансиз", "доставка"])
         self.assertEqual(captions, ["1. London Gulidan Savat Kompazitsia — 1 500 000 so'm"])
 
+    def test_the_reply_language_follows_the_russian_customer(self):
+        """Real suhbat 1684: Владимир ruscha yozdi, javob o'zbek kirilida ketdi."""
+        customer = Customer.objects.create(instagram_user_id="ig-ru-lang", instagram_username="munvladimir")
+        conversation = Conversation.objects.create(customer=customer)
+        for text in ("Доставка", "Карта", "Оплата при получении можно?",
+                     "Хорошо, давайте наличными. Завтра к 9 отправьте пжст"):
+            conversation.messages.create(sender="customer", text=text)
+        self.assertEqual(services.conversation_reply_script(conversation), "ru")
+
     def test_the_prompt_carries_the_russian_block(self):
         prompt = AISettings.objects.get(pk=1).system_prompt
         self.assertIn("00L. RUS TILIDA JAVOB", prompt)
