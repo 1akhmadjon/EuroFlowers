@@ -4648,9 +4648,21 @@ class ApiTests(TestCase):
             "cost_per_bunch": "24950", "sale_price_per_bunch": "50000",
         }, format="json")
         detail = self.client.get(f"/api/stock-deliveries/{delivery['id']}/")
-        self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("99800.00"))
         self.assertEqual(Decimal(detail.data["total_cost_exact"]), Decimal("99800.00"))
         self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("200.00"))
+
+    def test_supplier_rollup_uses_exact_delivery_cost(self):
+        supplier = Supplier.objects.create(name="Exact supplier")
+        StockBatch.objects.create(
+            variant=self.batch.variant, supplier=supplier, batch_number="EXACT-SUP", height_cm=50,
+            stems_per_bunch=15, received_stems=285, remaining_stems=285,
+            cost_per_bunch=50000, cost_per_stem=3300, cost_per_stem_exact=Decimal("3333.3333"),
+            sale_price_per_stem=10000, sale_price_per_bunch=150000,
+        )
+        detail = self.client.get(f"/api/suppliers/{supplier.id}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(Decimal(detail.data["purchase_total"]), Decimal("950000.00"))
 
     def _batch_with_usage(self, received=100, used=30):
         created = self.client.post("/api/stock-batches/", {

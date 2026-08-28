@@ -9,6 +9,12 @@ def money(value):
     return Decimal(value or 0)
 
 
+def stock_unit_cost(batch):
+    if money(batch.cost_per_bunch) > 0 and int(batch.stems_per_bunch or 0) > 0:
+        return money(batch.cost_per_bunch) / Decimal(batch.stems_per_bunch)
+    return money(batch.cost_per_stem_exact) or money(batch.cost_per_stem)
+
+
 def discount_percent(amount, base):
     base = money(base)
     if base <= 0:
@@ -94,7 +100,7 @@ def catalog_cost_breakdown(item):
     quantity = int(item.quantity_total or 1)
     flower_cost = Decimal("0")
     for row in item.composition.select_related("stock_batch"):
-        flower_cost += Decimal(row.quantity_stems * quantity) * row.stock_batch.cost_per_stem
+        flower_cost += Decimal(row.quantity_stems * quantity) * stock_unit_cost(row.stock_batch)
     material_cost = Decimal("0")
     for row in item.materials.select_related("packaging"):
         material_cost += Decimal(row.quantity * quantity) * row.packaging.cost_price
@@ -2499,7 +2505,7 @@ def create_catalog_rework(florist, florist_amount, sources, stock_inputs, output
                 raise ValueError(f"{batch.batch_number} uchun son 1 dan kam bo‘lmasligi kerak")
             if batch.remaining_stems < stems:
                 raise ValueError(f"{batch.batch_number} partiyasida atigi {batch.remaining_stems} dona qolgan")
-            cost = (Decimal(stems) * money(batch.cost_per_stem)).quantize(Decimal("0.01"))
+            cost = (Decimal(stems) * stock_unit_cost(batch)).quantize(Decimal("0.01"))
             pool[_rework_pool_key(batch.id)] = pool.get(_rework_pool_key(batch.id), 0) + stems
             input_stems += stems
             input_cost += cost

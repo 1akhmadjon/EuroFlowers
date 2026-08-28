@@ -36,7 +36,7 @@ from .pagination import TotalsListMixin, money
 from .permissions import RolePermission, has_page_permission
 from .serializers import AICatalogItemSerializer, FloristCloseSelectedSerializer, CatalogReworkSerializer, CatalogReworkCreateSerializer, backdate_record, ExpenseSerializer, CatalogSaleRestoreRequestSerializer, CatalogWasteRequestSerializer, CatalogSaleRowSerializer, StockBatchVariantChangeSerializer, StockBatchSellRequestSerializer, DebtSerializer, DebtPayRequestSerializer, FloristCloseIssueSerializer, FloristStockIssueBulkRequestSerializer, FloristStockIssueEditSerializer, MaterialDeliverySerializer, MaterialReceiveSerializer, StockDeliverySerializer, AISettingsSerializer, BranchSerializer, CatalogRestoreFlowersSerializer, CatalogTransferRequestSerializer, CatalogTransferSerializer, AIPauseRequestSerializer, AuditLogSerializer, BusinessSettingsSerializer, CatalogItemListSerializer, CatalogItemSerializer, CatalogSellRequestSerializer, ChangePasswordSerializer, ConversationSerializer, CustomerSerializer, DeliveryLocationSerializer, EuroFlowersTokenObtainPairSerializer, FloristAttendanceSerializer, FloristProfileSerializer, FloristDayOffSerializer, FloristDecorationSalarySerializer, FloristFaceSampleSerializer, FloristPaymentSerializer, FloristSalaryEntrySerializer, FloristStockBalanceSerializer, FloristLeftoverRequestSerializer, FloristStockIssueRequestSerializer, FloristStockIssueSerializer, FloristStockReturnRequestSerializer, FloristVolumeRateSerializer, FlowerSerializer, FlowerVariantSerializer, InstagramSettingsSerializer, InstagramWebhookEventSerializer, IntegrationSettingsSerializer, LeadColumnReorderSerializer, LeadMoveSerializer, LeadSerializer, LeadStatusSerializer, MiniAppInitSerializer, MiniAppLeadSerializer, MiniAppQuoteSerializer, MovementRequestSerializer, NotificationSerializer, PackagingMovementRequestSerializer, PackagingMovementSerializer, PackagingSellRequestSerializer, PackagingSerializer, PagePermissionSerializer, ReservationPaymentRequestSerializer, ReservationPaymentSerializer, ReservationSerializer, SendResponseSerializer, SimulateResponseSerializer, SocialPostSerializer, StockBatchSerializer, StockMovementSerializer, SupplierDebtAdjustmentSerializer, SupplierPaymentSerializer, SupplierSerializer, TextRequestSerializer, UploadResponseSerializer, UploadSerializer, UserSerializer, UserWriteSerializer
 from . import face_services
-from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, sell_stock_batch, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_sale, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
+from .inventory_services import add_extra_decoration_salary, adjust_stock_in_movements, close_selected_florist_issues, create_catalog_rework, waste_catalog_item, catalog_unit_cost, store_sale_image, notify_sale_to_group, change_stock_batch_variant, stock_batch_usage_summary, open_debt_for_sale, mark_debt_paid, edit_florist_stock_issue, delete_florist_stock_issue, receive_material_into_delivery, catalog_cost_breakdown, adjust_florist_stems, close_all_florist_issues, close_florist_issue, florist_close_plan, florist_stem_plan, stock_unit_cost, transfer_catalog_to_branch, issue_multiple_stock_to_florist, issue_stock_to_florist, return_stock_from_florist, sell_packaging_item, sell_stock_batch, apply_packaging_movement, apply_stock_movement, deduct_catalog_stock, deduct_lead_stock, mark_catalog_sold, restore_catalog_sale, restore_catalog_flowers, restore_catalog_inventory, restore_lead_stock, sync_reservation_payment_status
 from .platform_services import instagram_send, telegram_send
 from .renderers import to_local
 from .services import flower_variant_display_name, mini_app_custom_quote_ai, normalize_phone, process_customer_message
@@ -80,6 +80,30 @@ def stem_price_expr(rounded_field, exact_field):
     return Case(
         When(**{f"{exact_field}__gt": 0}, then=F(exact_field)),
         default=F(rounded_field),
+        output_field=MONEY_FIELD,
+    )
+
+
+def stock_cost_amount_expr(stems_field):
+    return Case(
+        When(
+            cost_per_bunch__gt=0,
+            stems_per_bunch__gt=0,
+            then=ExpressionWrapper(F(stems_field) * F("cost_per_bunch") / F("stems_per_bunch"), output_field=MONEY_FIELD),
+        ),
+        default=money_product(F(stems_field), stem_price_expr("cost_per_stem", "cost_per_stem_exact")),
+        output_field=MONEY_FIELD,
+    )
+
+
+def stock_sale_amount_expr(stems_field):
+    return Case(
+        When(
+            sale_price_per_bunch__gt=0,
+            stems_per_bunch__gt=0,
+            then=ExpressionWrapper(F(stems_field) * F("sale_price_per_bunch") / F("stems_per_bunch"), output_field=MONEY_FIELD),
+        ),
+        default=money_product(F(stems_field), stem_price_expr("sale_price_per_stem", "sale_price_per_stem_exact")),
         output_field=MONEY_FIELD,
     )
 
@@ -738,7 +762,7 @@ def accounting_report_data(request):
         main_bucket = branch_buckets.setdefault(None, blank_accounting_bucket())
         for movement in waste_movements:
             waste = abs(int(movement.quantity_stems or 0))
-            cost = (Decimal(waste) * Decimal(movement.batch.cost_per_stem or 0)).quantize(Decimal("0.01"))
+            cost = (Decimal(waste) * stock_unit_cost(movement.batch)).quantize(Decimal("0.01"))
             summary["waste_stems"] += waste
             summary["waste_cost_total"] += cost
             main_bucket["waste_stems"] += waste
@@ -1168,7 +1192,7 @@ def supplier_rollup_queryset(date_from=None, date_to=None):
     flower_purchase = Subquery(
         StockBatch.objects.filter(batch_range, supplier=OuterRef("pk"))
         .values("supplier")
-        .annotate(total=Coalesce(Sum(F("received_stems") * F("cost_per_stem"), output_field=money), Value(Decimal("0"), output_field=money)))
+        .annotate(total=money_sum(stock_cost_amount_expr("received_stems")))
         .values("total")[:1],
         output_field=money,
     )
@@ -2289,7 +2313,7 @@ class StockDeliveryViewSet(TotalsListMixin, ScopedViewSet):
         agg = batches.aggregate(
             t_received=int_sum("received_stems"),
             t_remaining=int_sum("remaining_stems"),
-            t_cost=money_sum(money_product(F("received_stems"), stem_price_expr("cost_per_stem", "cost_per_stem_exact"))),
+            t_cost=money_sum(stock_cost_amount_expr("received_stems")),
         )
         return {
             "deliveries": base.count(),
@@ -2326,14 +2350,12 @@ class StockBatchViewSet(TotalsListMixin, ScopedViewSet):
     def get_list_totals(self, queryset):
         """Sklad sahifasi: qancha gul bor, tannarxi va sotuv qiymati qancha."""
         base = queryset.order_by()
-        cost = stem_price_expr("cost_per_stem", "cost_per_stem_exact")
-        sale = stem_price_expr("sale_price_per_stem", "sale_price_per_stem_exact")
         agg = base.aggregate(
             t_received=int_sum("received_stems"),
             t_remaining=int_sum("remaining_stems"),
-            t_received_cost=money_sum(money_product(F("received_stems"), cost)),
-            t_remaining_cost=money_sum(money_product(F("remaining_stems"), cost)),
-            t_remaining_sale=money_sum(money_product(F("remaining_stems"), sale)),
+            t_received_cost=money_sum(stock_cost_amount_expr("received_stems")),
+            t_remaining_cost=money_sum(stock_cost_amount_expr("remaining_stems")),
+            t_remaining_sale=money_sum(stock_sale_amount_expr("remaining_stems")),
         )
         return {
             "batches": base.count(),
@@ -5233,7 +5255,7 @@ def batch_inventory_stats(start, end):
             "total_out_cost_value": Decimal("0"),
         })
         stems = abs(int(movement.quantity_stems or 0))
-        cost_value = (Decimal(stems) * Decimal(batch.cost_per_stem or 0)).quantize(Decimal("0.01"))
+        cost_value = (Decimal(stems) * stock_unit_cost(batch)).quantize(Decimal("0.01"))
         if movement.movement_type == "waste":
             row["waste_stems"] += stems
             row["waste_cost_value"] += cost_value

@@ -711,6 +711,18 @@ class FloristVolumeRateSerializer(serializers.ModelSerializer):
 PRICE_ROUND_STEP = Decimal("100")
 
 
+def batch_unit_cost(batch):
+    if Decimal(batch.cost_per_bunch or 0) > 0 and int(batch.stems_per_bunch or 0) > 0:
+        return Decimal(batch.cost_per_bunch) / Decimal(batch.stems_per_bunch)
+    return Decimal(batch.cost_per_stem_exact or 0) or Decimal(batch.cost_per_stem or 0)
+
+
+def batch_unit_sale(batch):
+    if Decimal(batch.sale_price_per_bunch or 0) > 0 and int(batch.stems_per_bunch or 0) > 0:
+        return Decimal(batch.sale_price_per_bunch) / Decimal(batch.stems_per_bunch)
+    return Decimal(batch.sale_price_per_stem_exact or 0) or Decimal(batch.sale_price_per_stem or 0)
+
+
 def round_stem_price(value):
     """Dona narxini eng yaqin 100 ga yaxlitlaydi: 998 -> 1000, 1060 -> 1100.
 
@@ -755,22 +767,23 @@ class StockDeliverySerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_total_cost(self, obj):
-        """Yaxlitlangan dona narxi bo'yicha — hisob-kitob shu raqam bilan boradi."""
-        return sum((Decimal(row.received_stems) * Decimal(row.cost_per_stem or 0) for row in obj.batches.all()), Decimal("0"))
+        total = Decimal("0")
+        for row in obj.batches.all():
+            total += Decimal(row.received_stems) * batch_unit_cost(row)
+        return total.quantize(Decimal("0.01"))
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_total_cost_exact(self, obj):
         """Yaxlitlanmagan aniq hisob bo'yicha."""
         total = Decimal("0")
         for row in obj.batches.all():
-            exact = Decimal(row.cost_per_stem_exact or 0) or Decimal(row.cost_per_stem or 0)
-            total += Decimal(row.received_stems) * exact
+            total += Decimal(row.received_stems) * batch_unit_cost(row)
         return total.quantize(Decimal("0.01"))
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
     def get_rounding_diff(self, obj):
-        """Yaxlitlash partiya tannarxini qanchaga o'zgartirgani."""
-        return (Decimal(self.get_total_cost(obj)) - Decimal(self.get_total_cost_exact(obj))).quantize(Decimal("0.01"))
+        rounded_total = sum((Decimal(row.received_stems) * Decimal(row.cost_per_stem or 0) for row in obj.batches.all()), Decimal("0"))
+        return (rounded_total - Decimal(self.get_total_cost_exact(obj))).quantize(Decimal("0.01"))
 
 
 class StockBatchSerializer(serializers.ModelSerializer):
@@ -1011,14 +1024,14 @@ class StockMovementSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DecimalField(max_digits=16, decimal_places=2))
     def get_cost_value(self, obj):
         stems = abs(int(obj.quantity_stems or 0))
-        return str((Decimal(stems) * Decimal(obj.batch.cost_per_stem or 0)).quantize(Decimal("0.01")))
+        return str((Decimal(stems) * batch_unit_cost(obj.batch)).quantize(Decimal("0.01")))
 
     @extend_schema_field(serializers.DecimalField(max_digits=16, decimal_places=2))
     def get_sale_value(self, obj):
         if Decimal(obj.sale_amount or 0) > 0:
             return str(Decimal(obj.sale_amount or 0).quantize(Decimal("0.01")))
         stems = abs(int(obj.quantity_stems or 0))
-        return str((Decimal(stems) * Decimal(obj.batch.sale_price_per_stem or 0)).quantize(Decimal("0.01")))
+        return str((Decimal(stems) * batch_unit_sale(obj.batch)).quantize(Decimal("0.01")))
 
 
 class MaterialDeliverySerializer(serializers.ModelSerializer):
