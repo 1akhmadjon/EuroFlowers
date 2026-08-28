@@ -2798,13 +2798,13 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
             return "cash"
         if value in ["karta", "card"]:
             return "card"
-        if value in ["debt", "mixed"]:
+        if value in ["terminal", "debt", "mixed"]:
             return value
         return "unknown"
 
     @extend_schema_field(serializers.CharField())
     def get_payment_label(self, obj):
-        return {"cash": "Naqd", "card": "Karta", "debt": "Qarz", "mixed": "Aralash"}.get(
+        return {"cash": "Naqd", "card": "Karta", "terminal": "Terminal", "debt": "Qarz", "mixed": "Aralash"}.get(
             self.get_payment_type(obj), "Aniqlanmagan")
 
     @extend_schema_field(serializers.DictField())
@@ -2862,7 +2862,7 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, required=False, default=1)
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     discount_reason = serializers.CharField(required=False, allow_blank=True)
-    payment_type = serializers.ChoiceField(choices=["cash", "card", "debt", "mixed"], required=False)
+    payment_type = serializers.ChoiceField(choices=["cash", "card", "terminal", "debt", "mixed"], required=False)
     # Aralash to'lov: bir qismi naqd, bir qismi karta
     cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
     card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))

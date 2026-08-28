@@ -6175,6 +6175,23 @@ class SaleGroupMessageTests(TestCase):
         self.assertIn("100", caption)
         self.assertIn("200", caption)
 
+    def test_terminal_payment_is_accepted_and_shown(self):
+        from unittest.mock import patch
+        from .inventory_services import sale_group_caption
+        self._configure_group()
+        item = self._item(image_url="")
+        with patch("core.platform_services.telegram_send_message_with") as sender:
+            sender.return_value = {"ok": True}
+            response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+                "quantity": 1,
+                "payment_type": "terminal",
+            }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        self.assertEqual((history.snapshot or {}).get("payment_type"), "terminal")
+        self.assertIn("Terminal", sale_group_caption(item, history, "terminal"))
+        self.assertIn("Terminal", sender.call_args[0][2])
+
     def test_branch_sale_goes_to_branch_group_only(self):
         from unittest.mock import patch
         # asosiy filial sozlangan, Parkentniki boshqa bot
@@ -10613,8 +10630,8 @@ class DeliveryLocationTests(TestCase):
         save_payment_state(self.lead, operator_message_id=321)
         save_location_state(self.lead, latitude="41.2995", longitude="69.2401", address="Chilonzor 5")
         calls = []
-        with patch("core.location_services.telegram_api_with_token",
-                   side_effect=lambda t, m, p: calls.append((m, p)) or {"ok": True}):
+        with patch("core.location_services.telegram_api_with_token_and_chat_fallback",
+                   side_effect=lambda t, m, p: calls.append((m, p)) or {"ok": True, "result": {"message_id": len(calls)}}):
             self.assertTrue(send_location_to_group(self.lead)["ok"])
         method, payload = calls[0]
         self.assertEqual(method, "sendLocation")
@@ -10625,6 +10642,40 @@ class DeliveryLocationTests(TestCase):
         self.assertIn(f"Lead #{self.lead.id}", note["text"])
         self.assertIn("Chilonzor 5", note["text"])
         self.assertEqual(note["reply_to_message_id"], 321)
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_location_send_retries_then_records_message_id(self):
+        from unittest.mock import patch
+        from .location_services import save_location_state, send_location_to_group
+        save_location_state(self.lead, latitude="41.2995", longitude="69.2401")
+        calls = []
+        def sender(token, method, payload):
+            calls.append(method)
+            if len(calls) == 1:
+                raise ConnectionError("reset")
+            return {"ok": True, "result": {"message_id": 777 + len(calls)}}
+        with patch("core.location_services.time.sleep"), \
+                patch("core.location_services.telegram_api_with_token_and_chat_fallback", side_effect=sender):
+            self.assertTrue(send_location_to_group(self.lead)["ok"])
+        self.lead.refresh_from_db()
+        state = (self.lead.details or {})["location"]
+        self.assertEqual(state["operator_group_location"]["message_id"], 779)
+        self.assertGreaterEqual(calls.count("sendLocation"), 2)
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_same_location_is_not_sent_twice_to_group(self):
+        from unittest.mock import patch
+        from .location_services import save_location_state, send_location_to_group
+        save_location_state(
+            self.lead,
+            latitude="41.2995000000",
+            longitude="69.2401000000",
+            operator_group_location={"message_id": 555, "latitude": "41.2995", "longitude": "69.2401"},
+        )
+        with patch("core.location_services.telegram_api_with_token_and_chat_fallback") as sender:
+            result = send_location_to_group(self.lead)
+        self.assertEqual(result["detail"], "already_sent")
+        self.assertEqual(sender.call_count, 0)
 
     @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
     def test_without_coordinates_nothing_is_sent(self):

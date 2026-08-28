@@ -13,13 +13,14 @@ kerakligini suhbat holatiga qarab o'zi hal qiladi.
 """
 import math
 import secrets
+import time
 from urllib.parse import quote
 
 from django.conf import settings
 from django.utils import timezone
 
 from .models import Lead, Message
-from .platform_services import telegram_api_with_token
+from .platform_services import telegram_api_with_token_and_chat_fallback
 
 # Endpoint ochiq va cheklovsiz, himoya faqat shu kodda. 8 bayt = 64 bit:
 # tasodifiy urinib topish amalda imkonsiz. Eski leadlarning kodi o'zgarmaydi.
@@ -87,7 +88,6 @@ def point_moved(state, latitude, longitude):
 
 
 def send_location_to_group(lead, updated=False):
-    """Operatorlar guruhidagi lead xabariga javob qilib joylashuv yuboradi."""
     from .payment_services import payment_state
 
     token = settings.AI_OPERATOR_HANDOFF_BOT_TOKEN
@@ -97,6 +97,9 @@ def send_location_to_group(lead, updated=False):
         return {"ok": False, "detail": "operator_group_not_configured"}
     if state.get("latitude") is None or state.get("longitude") is None:
         return {"ok": False, "detail": "no_coordinates"}
+    sent = state.get("operator_group_location") or {}
+    if sent.get("message_id") and not point_moved(sent, state["latitude"], state["longitude"]):
+        return {"ok": True, "detail": "already_sent", "message_id": sent.get("message_id")}
     payload = {
         "chat_id": chat_id,
         "latitude": float(state["latitude"]),
@@ -107,11 +110,35 @@ def send_location_to_group(lead, updated=False):
         payload["reply_to_message_id"] = reply_to
     if settings.AI_OPERATOR_HANDOFF_THREAD_ID:
         payload["message_thread_id"] = settings.AI_OPERATOR_HANDOFF_THREAD_ID
-    try:
-        sent = telegram_api_with_token(token, "sendLocation", payload)
-    except Exception as error:
-        print(f"LOCATION_GROUP_SEND_FAILED lead={lead.id} error={error}", flush=True)
+    last_error = None
+    sent = None
+    for attempt in range(3):
+        try:
+            sent = telegram_api_with_token_and_chat_fallback(token, "sendLocation", payload)
+            break
+        except Exception as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    if sent is None:
+        print(f"LOCATION_GROUP_SEND_FAILED lead={lead.id} error={last_error}", flush=True)
         return {"ok": False, "detail": "send_failed"}
+    message_id = sent.get("result", {}).get("message_id")
+    if message_id:
+        save_location_state(
+            lead,
+            operator_group_location={
+                "message_id": message_id,
+                "latitude": str(state["latitude"]),
+                "longitude": str(state["longitude"]),
+                "address": state.get("address") or "",
+                "sent_at": timezone.now().isoformat(),
+            },
+        )
+    try:
+        lead.refresh_from_db(fields=["details"])
+    except Exception:
+        pass
     caption = location_caption(lead, updated=updated)
     if caption:
         note = {"chat_id": chat_id, "text": caption}
@@ -119,8 +146,15 @@ def send_location_to_group(lead, updated=False):
             note["reply_to_message_id"] = reply_to
         if settings.AI_OPERATOR_HANDOFF_THREAD_ID:
             note["message_thread_id"] = settings.AI_OPERATOR_HANDOFF_THREAD_ID
+        note_key = "operator_group_location_note_message_id"
+        latest_state = location_state(lead)
+        if latest_state.get(note_key) and not updated:
+            return {"ok": bool(sent.get("ok")), "detail": ""}
         try:
-            telegram_api_with_token(token, "sendMessage", note)
+            note_sent = telegram_api_with_token_and_chat_fallback(token, "sendMessage", note)
+            note_message_id = note_sent.get("result", {}).get("message_id")
+            if note_message_id:
+                save_location_state(lead, **{note_key: note_message_id})
         except Exception as error:
             print(f"LOCATION_GROUP_NOTE_FAILED lead={lead.id} error={error}", flush=True)
     return {"ok": bool(sent.get("ok")), "detail": ""}

@@ -2322,6 +2322,7 @@ def sale_group_caption(item, history, payment_type, image_url=""):
         labels = {
             "cash": ("\U0001f4b5", "Naqd"),
             "card": ("\U0001f4b3", "Karta"),
+            "terminal": ("\U0001f4df", "Terminal"),
             "debt": ("\U0001f4dd", "Qarz"),
         }
         icon, label = labels.get(payment_type, ("\u2753", "Aniqlanmagan"))

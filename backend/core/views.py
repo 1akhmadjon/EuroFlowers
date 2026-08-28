@@ -351,6 +351,8 @@ def payment_label(value):
         return "Naqd"
     if value in ["card", "karta"]:
         return "Karta"
+    if value == "terminal":
+        return "Terminal"
     if value == "transfer":
         return "O‘tkazma"
     return "Aniqlanmagan"
@@ -486,15 +488,19 @@ def blank_accounting_bucket(branch_id=None, branch_name=MAIN_BRANCH_LABEL, is_ma
         "total_sales": Decimal("0"),
         "sales_cash_total": Decimal("0"),
         "sales_card_total": Decimal("0"),
+        "sales_terminal_total": Decimal("0"),
         "sales_other_total": Decimal("0"),
         "cash_total": Decimal("0"),
         "card_total": Decimal("0"),
+        "terminal_total": Decimal("0"),
         "unknown_total": Decimal("0"),
         "cash_quantity": 0,
         "card_quantity": 0,
+        "terminal_quantity": 0,
         "unknown_quantity": 0,
         "cash_count": 0,
         "card_count": 0,
+        "terminal_count": 0,
         "unknown_count": 0,
         "mixed_count": 0,
         "mixed_quantity": 0,
@@ -562,7 +568,8 @@ def add_sale_to_bucket(bucket, payment, quantity, stems, sale_total, discount, c
     sale_amounts = catalog_history_sale_payment_amounts(history, sale_total)
     bucket["sales_cash_total"] += sale_amounts.get("cash", Decimal("0"))
     bucket["sales_card_total"] += sale_amounts.get("card", Decimal("0"))
-    bucket["sales_other_total"] += sum((amount for key, amount in sale_amounts.items() if key not in ["cash", "card"]), Decimal("0"))
+    bucket["sales_terminal_total"] += sale_amounts.get("terminal", Decimal("0"))
+    bucket["sales_other_total"] += sum((amount for key, amount in sale_amounts.items() if key not in ["cash", "card", "terminal"]), Decimal("0"))
     amounts, primary, is_mixed = sale_payment_split(history, payment, sale_total)
     for key, amount in amounts.items():
         bucket[f"{key}_total"] += amount
@@ -612,6 +619,7 @@ def accounting_report_data(request):
     by_payment = {
         "cash": {"label": "Naqd", "quantity": 0, "sales": Decimal("0")},
         "card": {"label": "Karta", "quantity": 0, "sales": Decimal("0")},
+        "terminal": {"label": "Terminal", "quantity": 0, "sales": Decimal("0")},
         "unknown": {"label": "Aniqlanmagan", "quantity": 0, "sales": Decimal("0")},
     }
     by_volume = {}
@@ -633,7 +641,9 @@ def accounting_report_data(request):
             payment = "cash"
         elif payment == "karta":
             payment = "card"
-        if payment not in ["cash", "card", "mixed"]:
+        elif payment == "terminal":
+            payment = "terminal"
+        if payment not in ["cash", "card", "terminal", "mixed"]:
             payment = "unknown"
         quantity = int(history.quantity or 0)
         stems = catalog_history_flower_stems(history)
@@ -3458,7 +3468,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         if search:
             rows = rows.filter(catalog_item__name_uz__icontains=search)
         rows = list(rows.order_by("-created_at", "-id"))
-        if payment in ["cash", "card", "debt", "unknown"]:
+        if payment in ["cash", "card", "terminal", "debt", "unknown"]:
             serializer = CatalogSaleRowSerializer()
             rows = [row for row in rows if serializer.get_payment_type(row) == payment]
         return rows, date_from, date_to
@@ -3473,6 +3483,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
             "discount_total": sum((Decimal(row.discount_amount or 0) for row in rows), Decimal("0")),
             "cash_total": Decimal("0"),
             "card_total": Decimal("0"),
+            "terminal_total": Decimal("0"),
             "debt_total": Decimal("0"),
             "mixed_count": 0,
             "delivery_total": Decimal("0"),
@@ -3487,7 +3498,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
                 totals["cash_total"] += parts.get("cash", Decimal("0"))
                 totals["card_total"] += parts.get("card", Decimal("0"))
                 totals["mixed_count"] += 1
-            elif key in ["cash", "card", "debt"]:
+            elif key in ["cash", "card", "terminal", "debt"]:
                 totals[f"{key}_total"] += serializer.get_sale_total(row) + delivery
         totals["received_total"] = totals["revenue"] + totals["delivery_total"]
         return totals
@@ -3496,7 +3507,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
         parameters=[
             OpenApiParameter("date_from", str, description="Sana boshi (YYYY-MM-DD)"),
             OpenApiParameter("date_to", str, description="Sana oxiri"),
-            OpenApiParameter("payment_type", str, description="cash, card, debt yoki unknown"),
+            OpenApiParameter("payment_type", str, description="cash, card, terminal, debt yoki unknown"),
             OpenApiParameter("search", str, description="Katalog nomi bo‘yicha"),
         ],
         responses=CatalogSaleRowSerializer(many=True),
@@ -3864,6 +3875,7 @@ def export_profit_workbook(request):
         ("Umumiy savdo", summary["total_sales"]),
         ("Naqd", summary["cash_total"]),
         ("Karta", summary["card_total"]),
+        ("Terminal", summary["terminal_total"]),
         ("Aniqlanmagan to‘lov", summary["unknown_total"]),
         ("Bron/zaklad to‘lovlari", data["reservation_payments_summary"]["total"]),
         ("Sotuvlar soni", summary["sales_count"]),
@@ -3880,7 +3892,7 @@ def export_profit_workbook(request):
     branch_sheet = workbook.create_sheet("Filiallar")
     branch_sheet.append([
         "Filial", "Sotuvlar soni", "Sotilgan son", "Sotilgan gul donasi", "Savdo",
-        "Naqd", "Naqd soni", "Karta", "Karta soni", "Aniqlanmagan", "Skidka",
+        "Naqd", "Naqd soni", "Karta", "Karta soni", "Terminal", "Terminal soni", "Aniqlanmagan", "Skidka",
         "Skidkali sotuv", "Tannarx", "Sof foyda", "Ulush %",
     ])
     _style_header(branch_sheet)
@@ -3888,7 +3900,8 @@ def export_profit_workbook(request):
         branch_sheet.append([
             row["branch_name"], row["sales_count"], row["total_quantity"], row["flower_stems"],
             money_label(row["total_sales"]), money_label(row["cash_total"]), row["cash_count"],
-            money_label(row["card_total"]), row["card_count"], money_label(row["unknown_total"]),
+            money_label(row["card_total"]), row["card_count"],
+            money_label(row["terminal_total"]), row["terminal_count"], money_label(row["unknown_total"]),
             money_label(row["discount_total"]), row["discounted_sales_count"],
             money_label(row["cost_total"]), money_label(row["net_profit"]), str(row["share_percent"]),
         ])
@@ -4770,7 +4783,7 @@ def dashboard_daily_stats(leads, conversations, start, end, catalog_rows=None):
     return days
 
 
-SOVDA_HEADERS = ["№", "sana", "sovda", "naxt", "karta", "boshqa", "dostavka", "jami tushum", "sotuv", "kotta savat", "sredni savat", "kickina savat", "kotta buket", "sred buket", "kich buket", "oyincho", "shokolad", "zapiska", "kitob", "banketka"]
+SOVDA_HEADERS = ["№", "sana", "sovda", "naxt", "karta", "terminal", "boshqa", "dostavka", "jami tushum", "sotuv", "kotta savat", "sredni savat", "kickina savat", "kotta buket", "sred buket", "kich buket", "oyincho", "shokolad", "zapiska", "kitob", "banketka"]
 RASXOD_HEADERS = ["№", "SANA", "RASXOD", "OBED DEN", "OBED NOCH", "ABO", "BEGZOD", "ISO", "BAKIR", "FATXULLO", "ZAFAR", "SHOHAKBAR", "ABDULAZIZ", "AZIMJON", "IBROHIM", "ABROR", "MUAZZAM", "ZARINA", "RAYXONA", "JAVOXIR", "ABDU", "BEGZOD DOST", "SOBIR OKA", "SODIQ OKA", "DOSTAVKA", "LENTA", "target", "nalog", "svet", "musur", "POKE", "SKOCH"]
 SUPPLIER_PAYMENT_HEADERS = ["№", "SANA", "DOV", "KIYM", "XAYRULLO", "LENTA", "GUL", "VODIY"]
 
@@ -4795,6 +4808,8 @@ def catalog_history_payment_key(history):
         return "cash"
     if value == "Karta" or str(value).lower() == "card":
         return "card"
+    if str(value).lower() == "terminal":
+        return "terminal"
     return "other"
 
 
@@ -4802,7 +4817,7 @@ def catalog_history_sale_payment_amounts(history, sale_total):
     payment_key = catalog_history_payment_key(history)
     payment_value = str(catalog_payment_type(history, history)).lower()
     if payment_value != "mixed":
-        if payment_key in ["cash", "card"]:
+        if payment_key in ["cash", "card", "terminal"]:
             return {payment_key: sale_total}
         return {"other": sale_total}
     snapshot = history.snapshot or {}
@@ -4904,7 +4919,8 @@ def dashboard_excel_stats(start, end, branch=None):
         payment_amounts = catalog_history_sale_payment_amounts(history, sale_total)
         row["naxt"] += payment_amounts.get("cash", Decimal("0"))
         row["karta"] += payment_amounts.get("card", Decimal("0"))
-        row["boshqa"] += sum((amount for key, amount in payment_amounts.items() if key not in ["cash", "card"]), Decimal("0"))
+        row["terminal"] += payment_amounts.get("terminal", Decimal("0"))
+        row["boshqa"] += sum((amount for key, amount in payment_amounts.items() if key not in ["cash", "card", "terminal"]), Decimal("0"))
         item = history.catalog_item
         volume = (item.volume or "").strip().lower()
         if item.arrangement_type == "basket":
@@ -4974,6 +4990,7 @@ def dashboard_excel_stats(start, end, branch=None):
             "sovda": sum((row["sovda"] for row in sovda.values()), Decimal("0")),
             "naxt": sum((row["naxt"] for row in sovda.values()), Decimal("0")),
             "karta": sum((row["karta"] for row in sovda.values()), Decimal("0")),
+            "terminal": sum((row["terminal"] for row in sovda.values()), Decimal("0")),
             "boshqa": sum((row["boshqa"] for row in sovda.values()), Decimal("0")),
             "dostavka": sum((row["dostavka"] for row in sovda.values()), Decimal("0")),
             "jami_tushum": sum((row["jami tushum"] for row in sovda.values()), Decimal("0")),
