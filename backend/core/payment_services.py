@@ -176,6 +176,18 @@ def send_receipt_to_operators(lead, receipt_url, repeated=False):
         return {"ok": False, "detail": "send_failed"}
 
 
+def order_is_for_later(lead):
+    """Buyurtma bugunga emas, keyingi kunga."""
+    return bool(lead.desired_date) and lead.desired_date > timezone.localdate()
+
+
+LATER_REMINDER_UZ = (
+    "Buyurtma keyingi kunga. Rahmat ayt, sanani takrorla va mijozdan o'sha kuni "
+    "bizga yana bir marta yozib qo'yishini iliq iltimos qil — tanlagan guli o'sha "
+    "kunga bo'lmay qolishi mumkin, shuni chiroyli tushuntir."
+)
+
+
 def set_payment_type(lead, payment_type):
     """Mijoz to'lov turini aytdi."""
     if payment_type not in PAYMENT_LABELS:
@@ -183,6 +195,17 @@ def set_payment_type(lead, payment_type):
     save_payment_state(lead, type=payment_type, type_set_at=timezone.now().isoformat())
     update_operator_message(lead)
     result = {"ok": True, "payment_type": payment_type}
+    later = order_is_for_later(lead)
+    if later:
+        # Karta rekvizitlari natijaga QO'YILMAYDI. Promptda taqiqlash yetarli
+        # emasligi ikki marta ko'rindi — model ko'rmagan raqamni yozolmaydi.
+        result["future_order"] = True
+        result["desired_date"] = lead.desired_date.isoformat()
+        result["instruction_uz"] = (
+            "To'lov turi yozildi. Karta raqamini BERMA, chek ham SO'RAMA. "
+            + LATER_REMINDER_UZ
+        )
+        return result
     if payment_type == "card":
         card = payment_card()
         result["card"] = card

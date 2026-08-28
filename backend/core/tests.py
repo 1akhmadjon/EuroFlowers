@@ -9975,6 +9975,37 @@ class PaymentFlowTests(TestCase):
         self.assertEqual(result["card"], {})
         self.assertIn("o'zingdan yozma", result["instruction_uz"])
 
+    def test_a_later_order_never_shows_the_card_number(self):
+        """Buyurtma keyingi kunga — model karta raqamini ko'rmaydi ham."""
+        from .payment_services import set_payment_type
+        self.lead.desired_date = timezone.localdate() + timedelta(days=3)
+        self.lead.save(update_fields=["desired_date"])
+        result = set_payment_type(self.lead, "card")
+        self.assertTrue(result["future_order"])
+        self.assertNotIn("card", result)
+        self.assertNotIn("5614", json.dumps(result))
+        self.assertIn("Karta raqamini BERMA", result["instruction_uz"])
+        self.assertIn("chek ham SO'RAMA", result["instruction_uz"].replace("Chek", "chek"))
+
+    def test_a_later_order_asks_the_customer_to_write_again(self):
+        from .payment_services import set_payment_type
+        self.lead.desired_date = timezone.localdate() + timedelta(days=1)
+        self.lead.save(update_fields=["desired_date"])
+        for payment_type in ("card", "cash"):
+            result = set_payment_type(self.lead, payment_type)
+            self.assertIn("yana bir marta", result["instruction_uz"])
+            self.assertEqual(result["desired_date"], self.lead.desired_date.isoformat())
+
+    def test_todays_order_still_gets_the_card_and_the_receipt(self):
+        """Bugunga bo'lsa oqim o'zgarmaydi."""
+        from .payment_services import set_payment_type
+        self.lead.desired_date = timezone.localdate()
+        self.lead.save(update_fields=["desired_date"])
+        result = set_payment_type(self.lead, "card")
+        self.assertNotIn("future_order", result)
+        self.assertEqual(result["card"]["number"], "5614 6821 2301 7099")
+        self.assertIn("chekining rasmini", result["instruction_uz"])
+
     def test_the_payment_type_is_added_to_the_group_message(self):
         from .payment_services import set_payment_type, save_payment_state
         save_payment_state(self.lead, operator_message_id=77)
@@ -10700,3 +10731,72 @@ class DeliveryLocationTests(TestCase):
         self.assertIn("MATN MANZILNI HAM QABUL QIL", block)
         self.assertIn("Manzilingizni oldik", block)
         self.assertIn("Koordinatani mijozga o'qib berma", block)
+
+
+class RussianReplyLanguageTests(TestCase):
+    """Ruscha yozgan mijozga o'zbekcha so'z ketmasin."""
+
+    def setUp(self):
+        self.item = AICatalogItem.objects.create(
+            name="London Gulidan Savat Kompazitsia", arrangement_type="basket",
+            price=1500000, quantity=1, image_url="https://cdn.example.com/london.jpg")
+
+    def test_the_name_is_rebuilt_in_russian(self):
+        from .services import catalog_name_ru
+        self.assertEqual(catalog_name_ru("London Gulidan Savat Kompazitsia"),
+                         "Корзина-композиция из London")
+        self.assertEqual(catalog_name_ru("Luchiana Gulidan Buket"), "Букет из Luchiana")
+        self.assertEqual(catalog_name_ru("Qizil Atirgul Gulidan Karobka"),
+                         "Коробка из красных роз")
+
+    def test_uzbek_cyrillic_never_reaches_a_russian_reply(self):
+        """Real suhbatda "Оқ Жумила" ruscha javob ichida qolib ketgan."""
+        from .services import catalog_name_ru
+        name = catalog_name_ru("Оқ Жумила")
+        self.assertEqual(name, "Белая Jumila")
+        self.assertFalse(set(name) & set("ўқғҳЎҚҒҲ"))
+
+    def test_the_currency_word_follows_the_language(self):
+        from .services import money_text
+        self.assertEqual(money_text(1500000, "ru"), "1 500 000 сум")
+        self.assertEqual(money_text(1500000, "latin"), "1 500 000 so'm")
+        self.assertEqual(money_text(1500000, "uz_cyril"), "1 500 000 so'm")
+
+    def test_the_catalog_rows_carry_the_russian_name_and_price(self):
+        from .services import ai_catalog_rows
+        row = next(row for row in ai_catalog_rows("") if row["catalog_id"] == self.item.id)
+        self.assertEqual(row["name_ru"], "Корзина-композиция из London")
+        self.assertEqual(row["price_text_ru"], "1 500 000 сум")
+
+    def _album_captions(self, texts):
+        from unittest.mock import patch
+        customer = Customer.objects.create(instagram_user_id="ig-ru-album", instagram_username="asadnabiev")
+        conversation = Conversation.objects.create(customer=customer)
+        for text in texts:
+            conversation.messages.create(sender="customer", text=text)
+        captions = []
+        with patch("core.services.send_catalog_album_chunk",
+                   side_effect=lambda *args, **kwargs: (captions.extend(row["caption"] for row in args[3]), (True, "mocked", None))[1]):
+            services.send_catalog_album(conversation, [self.item])
+        return captions
+
+    def test_the_album_caption_is_russian_for_a_russian_customer(self):
+        captions = self._album_captions(["Можно заказать?", "Сколько стоит"])
+        self.assertEqual(captions, ["1. Корзина-композиция из London — 1 500 000 сум"])
+
+    def test_the_album_caption_is_untouched_for_an_uzbek_customer(self):
+        captions = self._album_captions(["Nechpul", "qanaqa gullar bor"])
+        self.assertEqual(captions, ["1. London Gulidan Savat Kompazitsia — 1 500 000 so'm"])
+
+    def test_the_prompt_carries_the_russian_block(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("00L. RUS TILIDA JAVOB", prompt)
+        self.assertIn("Здравствуйте! Магазин премиум-цветов EuroFlowers", prompt)
+        self.assertIn("price_text emas → price_text_ru", prompt)
+        self.assertIn('"so\'m" so\'zi HECH QACHON yozilmaydi', prompt)
+
+    def test_the_prompt_carries_the_later_order_block(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn("BUYURTMA BUGUNGA EMAS BO'LSA", prompt)
+        self.assertIn("future_order = true", prompt)
+        self.assertIn("Chek ham SO'RAMA", prompt)

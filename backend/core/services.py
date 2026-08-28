@@ -724,6 +724,9 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
         rows.append({
             "catalog_id": row.id,
             "name_uz": row.name,
+            # Ruscha suhbatda javobga shu nom va shu narx qatori yoziladi.
+            "name_ru": catalog_name_ru(row.name),
+            "price_text_ru": money_text(row.price, "ru"),
             "type": row.arrangement_type,
             "quantity": row.quantity,
             "volume": row.volume,
@@ -1333,6 +1336,8 @@ def catalog_match_row(item, score=None, fingerprint=None, verdict="", difference
         "volume": item.volume,
         "price": str(item.price),
         "price_text": f"{money_uz(item.price)} so'm",
+        "name_ru": catalog_name_ru(item.name),
+        "price_text_ru": money_text(item.price, "ru"),
         "note_uz": item.note,
         "has_image": bool(item.image_url),
     }
@@ -1477,6 +1482,8 @@ def social_post_answer(post):
         "description": (post.description_uz or "").strip()[:400],
         "price": str(price),
         "price_text": f"{money_uz(price)} so'm",
+        "title_ru": catalog_name_ru(title),
+        "price_text_ru": money_text(price, "ru"),
         "flower_count": post.flower_count or None,
         "has_image": bool(post.image_url),
     }
@@ -2530,7 +2537,9 @@ def send_catalog_item_image(conversation, item):
     Message.objects.create(conversation=conversation, sender="system", text="", metadata={"image_tool_result": {"catalog_id": item.id, "catalog_name": item_name, "image_url": image_url, "delivered": delivered, "detail": detail, "sent": sent}})
     if not delivered:
         return {"ok": False, "image_sent": False, "detail": detail, "catalog_id": item.id, "catalog_name": item_name}
-    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "price": str(price_value), "price_text": price_text, "note_uz": getattr(item, "note", ""), "image_url": image_url, "reply_instruction": f"{item_name}\nNarxi {price_text}\nSizga qachonga kerak edi?"}
+    name_ru = catalog_name_ru(item_name)
+    price_text_ru = money_text(price_value, "ru") if price_value != "" else ""
+    return {"ok": True, "image_sent": True, "catalog_id": item.id, "catalog_name": item_name, "price": str(price_value), "price_text": price_text, "note_uz": getattr(item, "note", ""), "image_url": image_url, "reply_instruction": f"{item_name}\nNarxi {price_text}\nSizga qachonga kerak edi?", "catalog_name_ru": name_ru, "price_text_ru": price_text_ru, "reply_instruction_ru": f"{name_ru}\n{price_text_ru}\nНа когда вам нужно?"}
 
 
 CATALOG_ALBUM_MAX_PER_MESSAGE = 10
@@ -2574,11 +2583,17 @@ def send_catalog_album(conversation, items, whole_catalog=False):
         return {"ok": False, "detail": "image_not_found", "items": [], "not_sent": not_sent}
     if not chat_id:
         return {"ok": False, "detail": "no_platform_id", "items": [], "not_sent": not_sent}
+    # Sarlavhani kod yuboradi, model orqali o'tmaydi — shuning uchun tili shu
+    # yerda tanlanadi. Ruscha mijoz o'zbekcha nom va "so'm" ni ko'rmaydi.
+    script = conversation_reply_script(conversation)
     position = 0
     for row in rows:
         position += 1
         row["position"] = position
-        row["caption"] = f"{row['position']}. {row['item'].name} — {money_uz(row['item'].price)} so'm"
+        title = catalog_name_ru(row["item"].name) if script == "ru" else row["item"].name
+        row["title"] = f"{row['position']}. {title}"
+        row["subtitle"] = money_text(row["item"].price, script)
+        row["caption"] = f"{row['title']} — {row['subtitle']}"
     sent_items = []
     sent_message_ids = []
     sent_groups = []
@@ -2757,7 +2772,7 @@ def send_catalog_album_chunk(customer, platform, chat_id, chunk, conversation=No
             else:
                 result = telegram_send_media_group(chat_id, [{"image_url": row["image_url"], "caption": row["caption"]} for row in chunk])
         else:
-            result = instagram_send_carousel(chat_id, [{"title": f"{row['position']}. {row['item'].name}", "subtitle": f"{money_uz(row['item'].price)} so'm", "image_url": row["image_url"]} for row in chunk], account_id)
+            result = instagram_send_carousel(chat_id, [{"title": row["title"], "subtitle": row["subtitle"], "image_url": row["image_url"]} for row in chunk], account_id)
     except Exception as error:
         print(f"CATALOG_ALBUM_FAILED customer={customer.id} platform={platform} count={len(chunk)} error={error}", flush=True)
         return False, "album_failed", None
@@ -3440,6 +3455,84 @@ def money_uz(value):
     except Exception:
         return str(value or "")
     return f"{amount:,}".replace(",", " ")
+
+
+def money_text(value, script="latin"):
+    """Narx qatori javob tiliga mos valyuta so'zi bilan."""
+    return f"{money_uz(value)} " + ("сум" if script == "ru" else "so'm")
+
+
+# Katalog nomlari faqat o'zbekcha saqlanadi. Ruscha suhbatda modelga tayyor
+# ruscha nom beriladi — o'zbekcha nomni ko'rmasa uni ko'chirib yozolmaydi.
+CATALOG_TYPE_RU = {
+    "savat": "Корзина", "savatcha": "Корзинка", "buket": "Букет",
+    "karobka": "Коробка", "quti": "Коробка", "box": "Коробка",
+    "kompazitsia": "композиция", "kompazitsiya": "композиция",
+    "kompozitsia": "композиция", "kompozitsiya": "композиция",
+    "katta": "Большая", "kichik": "Маленькая",
+}
+# Rang va gul nomi "iz" dan keyin kelsa ruscha ko'plik qaratqichda bo'ladi.
+CATALOG_WORD_RU = {
+    "oq": ("Белая", "белых"), "qizil": ("Красная", "красных"),
+    "pushti": ("Розовая", "розовых"), "sariq": ("Жёлтая", "жёлтых"),
+    "tilla": ("Золотая", "золотых"), "yashil": ("Зелёная", "зелёных"),
+    "binafsha": ("Фиолетовая", "фиолетовых"), "qora": ("Чёрная", "чёрных"),
+    "ko'k": ("Синяя", "синих"), "kok": ("Синяя", "синих"),
+    "atirgul": ("Роза", "роз"), "lola": ("Тюльпан", "тюльпанов"),
+    "pion": ("Пион", "пионов"), "xrizantema": ("Хризантема", "хризантем"),
+}
+
+
+def catalog_name_ru(name):
+    """O'zbekcha katalog nomining ruscha ko'rinishi.
+
+    Nomlar "London Gulidan Savat Kompazitsia" naqshida yoziladi: chapda nav nomi,
+    "Gulidan" dan keyin mahsulot turi. Ruschada tur oldinga chiqadi, nav nomi
+    lotin yozuvda o'z holida qoladi. Kirill yozilgan nom ("Оқ Жумила") avval
+    lotinga o'giriladi, aks holda javobga o'zbek kirili tushib qoladi.
+    """
+    value = cyrillic_to_latin(name or "").strip()
+    if not value:
+        return ""
+    words = value.split()
+    keys = [word.lower().strip(".,") for word in words]
+    if "gulidan" in keys:
+        cut = keys.index("gulidan")
+        kinds, variety = words[:0] + words[cut + 1:], words[:cut]
+        kind_keys, variety_keys = keys[cut + 1:], keys[:cut]
+    else:
+        kinds, variety = [], words
+        kind_keys, variety_keys = [], keys
+    form = 1 if kinds else 0
+    kinds_ru = [CATALOG_TYPE_RU.get(key, word) for word, key in zip(kinds, kind_keys)]
+    variety_ru = [
+        CATALOG_WORD_RU[key][form] if key in CATALOG_WORD_RU else word
+        for word, key in zip(variety, variety_keys)
+    ]
+    head = re.sub(r"\s+(композиция)", r"-\1", " ".join(kinds_ru))
+    tail = " ".join(variety_ru)
+    if head and tail:
+        return f"{head} из {tail}"
+    return head or tail
+
+
+def conversation_reply_script(conversation):
+    """Suhbatga qaysi tilda javob berilyapti.
+
+    Albom sarlavhalarini kod o'zi yuboradi, model orqali o'tmaydi. Mijoz ruscha
+    yozsa sarlavha ham ruscha bo'lishi kerak — shuning uchun til aynan javob
+    yaratilayotganidagi mantiq bilan aniqlanadi.
+    """
+    messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:12])
+    pending = []
+    for message in messages:
+        if message.sender == "ai":
+            break
+        if message.sender == "customer":
+            pending.append(message.text or "")
+    if not pending:
+        pending = [next((message.text or "" for message in messages if message.sender == "customer"), "")]
+    return conversation_script(pending)
 
 
 def create_ai_reply_for_conversation(conversation):
