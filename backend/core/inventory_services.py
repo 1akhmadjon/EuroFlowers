@@ -2357,14 +2357,14 @@ def sale_group_target(item):
     return (integration.sale_bot_token or "").strip(), (integration.sale_group_chat_id or "").strip()
 
 
-def notify_sale_to_group(item, history, payment_type, image_url=""):
+def notify_sale_to_group(item, history, payment_type, image_url="", photo_override=None):
     """Sotilgan mahsulot rasmini o'z filialining telegram guruhiga yuboradi.
 
     Sotuvda rasm yuklanmagan bo'lsa katalogdagi gul rasmi ketadi.
     """
     from .platform_services import telegram_send_photo_with
 
-    photo = image_url or item.image_url
+    photo = photo_override or image_url or item.image_url
     if not photo:
         print(f"SALE_GROUP_NO_IMAGE catalog={item.id}", flush=True)
         return None

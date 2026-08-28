@@ -3583,10 +3583,18 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
                     snapshot["delivery_amount"] = str(delivery_amount)
                 row.snapshot = snapshot
                 row.save(update_fields=["snapshot", "updated_at"])
+        uploaded_sale_image = serializer.validated_data.get("sale_image")
         image_url = store_sale_image(
-            serializer.validated_data.get("sale_image"),
+            uploaded_sale_image,
             serializer.validated_data.get("sale_image_url", ""),
         )
+        sale_group_photo = image_url
+        if uploaded_sale_image is not None:
+            try:
+                uploaded_sale_image.seek(0)
+                sale_group_photo = uploaded_sale_image.read()
+            except Exception:
+                sale_group_photo = image_url
         history = CatalogHistory.objects.filter(catalog_item=item, action="sold").order_by("-created_at", "-id").first()
         if history:
             if image_url:
@@ -3595,7 +3603,7 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
                 history.snapshot = snapshot
                 history.save(update_fields=["snapshot", "updated_at"])
             # rasm yuklanmagan bo'lsa katalogdagi gul rasmi bilan ketadi
-            notify_sale_to_group(item, history, serializer.validated_data.get("payment_type", ""), image_url)
+            notify_sale_to_group(item, history, serializer.validated_data.get("payment_type", ""), image_url, sale_group_photo)
         if serializer.validated_data.get("payment_type") == "debt":
             try:
                 open_debt_for_sale(

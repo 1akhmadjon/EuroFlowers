@@ -6243,6 +6243,31 @@ class SaleGroupMessageTests(TestCase):
         self.assertEqual(sender.call_count, 1)
         self.assertEqual(sender.call_args[0][2], "https://example.com/katalog.jpg")
 
+    def test_uploaded_sale_photo_is_sent_to_group_as_one_photo_message(self):
+        from unittest.mock import patch
+        self._configure_group()
+        item = self._item()
+        uploaded = SimpleUploadedFile("sold.jpg", b"sale-photo-bytes", content_type="image/jpeg")
+        with patch("core.platform_services.telegram_send_photo_with") as sender:
+            sender.return_value = {"ok": True}
+            response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+                "quantity": 1,
+                "payment_type": "mixed",
+                "cash_amount": "100000",
+                "card_amount": "200000",
+                "sale_image": uploaded,
+            }, format="multipart")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(sender.call_count, 1)
+        args = sender.call_args[0]
+        self.assertEqual(args[0], "test-token")
+        self.assertEqual(args[1], "-100500")
+        self.assertEqual(args[2], b"sale-photo-bytes")
+        self.assertIn("Qizil buket", args[3])
+        self.assertIn("Aralash", args[3])
+        self.assertIn("100 000", args[3])
+        self.assertIn("200 000", args[3])
+
     def test_nothing_is_sent_without_token(self):
         from unittest.mock import patch
         item = self._item()
