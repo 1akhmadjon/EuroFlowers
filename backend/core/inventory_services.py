@@ -2349,10 +2349,19 @@ def sale_group_target(item):
     tushib qolmasligi kerak.
     """
     from .models import IntegrationSettings
+    from django.conf import settings
 
+    env_token = (settings.SALE_TELEGRAM_BOT_TOKEN or "").strip()
+    env_chat_id = (settings.SALE_TELEGRAM_GROUP_CHAT_ID or "").strip()
+    if env_token and env_chat_id:
+        return env_token, env_chat_id
     if item.branch_id:
         branch = item.branch
-        return (branch.sale_bot_token or "").strip(), (branch.sale_group_chat_id or "").strip()
+        branch_token = (branch.sale_bot_token or "").strip()
+        branch_chat_id = (branch.sale_group_chat_id or "").strip()
+        if branch_token and branch_chat_id:
+            return branch_token, branch_chat_id
+        return "", ""
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     return (integration.sale_bot_token or "").strip(), (integration.sale_group_chat_id or "").strip()
 

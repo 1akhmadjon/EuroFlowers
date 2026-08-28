@@ -282,6 +282,40 @@ def telegram_api_with_token(token, method, payload):
     return response.json()
 
 
+def telegram_chat_id_variants(chat_id):
+    value = str(chat_id or "").strip()
+    if not value:
+        return []
+    rows = [value]
+    if value.startswith("-100") and len(value) > 4:
+        rows.append("-" + value[4:])
+    elif value.startswith("-") and value[1:].isdigit():
+        rows.append("-100" + value[1:])
+    return list(dict.fromkeys(rows))
+
+
+def telegram_api_with_token_and_chat_fallback(token, method, payload, files=None):
+    if not token:
+        return {"skipped": True, "reason": "token yo‘q"}
+    variants = telegram_chat_id_variants(payload.get("chat_id"))
+    if not variants:
+        return {"skipped": True, "reason": "chat_id yo‘q"}
+    last_error = None
+    for chat_id in variants:
+        current = dict(payload, chat_id=chat_id)
+        try:
+            url = f"https://api.telegram.org/bot{token}/{method}"
+            if files:
+                response = requests.post(url, data=current, files=files, timeout=30)
+            else:
+                response = requests.post(url, json=current, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as exc:
+            last_error = exc
+    raise last_error
+
+
 def telegram_send(chat_id, text):
     return telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
 
@@ -348,15 +382,12 @@ def telegram_send_photo_with(token, chat_id, photo, caption="", parse_mode="Mark
     """
     if not token or not chat_id:
         return {"skipped": True, "reason": "token yoki chat_id yo‘q"}
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
     data = {"chat_id": str(chat_id), "caption": caption[:1024], "parse_mode": parse_mode}
     if isinstance(photo, (bytes, bytearray)):
-        response = requests.post(url, data=data, files={"photo": ("sale.jpg", photo)}, timeout=30)
+        return telegram_api_with_token_and_chat_fallback(token, "sendPhoto", data, files={"photo": ("sale.jpg", photo)})
     else:
         data["photo"] = photo
-        response = requests.post(url, data=data, timeout=30)
-    response.raise_for_status()
-    return response.json()
+        return telegram_api_with_token_and_chat_fallback(token, "sendPhoto", data)
 
 
 def telegram_sender_action(chat_id, action="typing"):
