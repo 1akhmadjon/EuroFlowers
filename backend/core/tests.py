@@ -10749,6 +10749,50 @@ class RussianReplyLanguageTests(TestCase):
         self.assertEqual(catalog_name_ru("Qizil Atirgul Gulidan Karobka"),
                          "Коробка из красных роз")
 
+    def test_the_messy_real_names_come_out_in_russian(self):
+        """Katalogdagi nomlar erkin yozilgan — hammasi ruscha chiqishi kerak."""
+        from .services import catalog_name_ru
+        self.assertEqual(catalog_name_ru("Oq Atir Guldan Kompazitsia"),
+                         "Композиция из белых роз")
+        self.assertEqual(catalog_name_ru("Qizil Va Oq Atir Guldan Kompazitsia"),
+                         "Композиция из красных и белых роз")
+        self.assertEqual(catalog_name_ru("Aziza Va Luchiana Gulidan Buket"),
+                         "Букет из Aziza и Luchiana")
+        self.assertEqual(catalog_name_ru("Buket Kotta Shoxli Bambastic Gulidan Yasalgan"),
+                         "Большой ветвистый Букет из Bambastic")
+        self.assertEqual(catalog_name_ru("Oq Jumila Atir Gulidan Yasalgan Kompazitsia 100 Tali"),
+                         "Композиция из 100 шт белых роз Jumila")
+        self.assertEqual(catalog_name_ru("Hermossodan Kompazitsia"), "Композиция из Hermosso")
+        self.assertEqual(catalog_name_ru("Savat Kompazitsa"), "Корзина-композиция")
+
+    def test_no_uzbek_word_survives_any_real_catalog_name(self):
+        import re
+        from .services import catalog_name_ru
+        forbidden = {"gul", "gullar", "gulli", "gulidan", "guldan", "gulimizdan",
+                     "gullarimiz", "yasalgan", "savat", "savatli", "buket", "quti",
+                     "kompazitsia", "kompozitsiyasi", "kompazitsa", "oq", "qizil",
+                     "katta", "kotta", "shoxli", "atir", "atirguldan", "ta", "tali", "va"}
+        names = [
+            "London Gulidan Savat Kompazitsia", "All For Love Gulidan Kompazitsia",
+            "Oq Atir Guldan Kompazitsia", "Hermossodan Kompazitsia",
+            "Sendi Avalanch Gulidan Buket", "Aziza Va Luchiana Gulidan Buket",
+            "Jumila Va Qizil Atir Guldan Kompazitsia", "London Va Oq Atirguldan Kompazitsia",
+            "Jumilia Kompozitsiyasi", "Katalina/bables Kompazitsia", "Buket Bambastic",
+            "Katalina Bables Gulidan Yasalgan Kompazitsia", "Savat Bables Gulidan",
+            "Bables Gulidan Savatli Kompazitsia", "London Gulidan Kompazitsia Savat",
+            "Savat Jumila Oq Atir Guldan Yasalgan Kompazitsia", "Shoxli Bambastic",
+            "Buket Aziza Gulidan Yasalgan Kompazitsia 100 Ta Gulli",
+            "London Gulimizdan Kompazitsia 100 Ta Gulli",
+            "Qizil Atir Guldan Kompazitsia 100 Tali Gullarimiz",
+            "Alfalob Gulidan Katta Kompazitsia 100 Tali Gul",
+            "Buket Jumila Va Oq Atir Guldan Yasalgan Kompazitsia",
+        ]
+        for name in names:
+            russian = catalog_name_ru(name)
+            self.assertTrue(russian, name)
+            left = {word.lower() for word in re.findall(r"[A-Za-z']+", russian)} & forbidden
+            self.assertEqual(left, set(), f"{name} -> {russian}")
+
     def test_uzbek_cyrillic_never_reaches_a_russian_reply(self):
         """Real suhbatda "Оқ Жумила" ruscha javob ichida qolib ketgan."""
         from .services import catalog_name_ru

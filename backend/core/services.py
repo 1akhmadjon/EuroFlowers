@@ -3462,58 +3462,105 @@ def money_text(value, script="latin"):
     return f"{money_uz(value)} " + ("сум" if script == "ru" else "so'm")
 
 
-# Katalog nomlari faqat o'zbekcha saqlanadi. Ruscha suhbatda modelga tayyor
-# ruscha nom beriladi — o'zbekcha nomni ko'rmasa uni ko'chirib yozolmaydi.
-CATALOG_TYPE_RU = {
-    "savat": "Корзина", "savatcha": "Корзинка", "buket": "Букет",
-    "karobka": "Коробка", "quti": "Коробка", "box": "Коробка",
-    "kompazitsia": "композиция", "kompazitsiya": "композиция",
-    "kompozitsia": "композиция", "kompozitsiya": "композиция",
-    "katta": "Большая", "kichik": "Маленькая",
+# Katalog nomlari faqat o'zbekcha saqlanadi va erkin yozilgan: "Oq Atir Guldan
+# Kompazitsia", "Buket Kotta Shoxli Bambastic Gulidan Yasalgan". Ruscha suhbatda
+# modelga tayyor ruscha nom beriladi — o'zbekcha nomni ko'rmasa ko'chirolmaydi.
+# Nom uch bo'lakka ajratiladi: mahsulot turi (savat, buket, kompazitsia),
+# sifatlar (katta, shoxli, rang) va nav nomi. Ruschada tur oldinga chiqadi,
+# qolgani "iz" dan keyin qaratqichda yoziladi. Nav nomi lotinda qoladi.
+CATALOG_KIND_RU = {
+    "savat": ("Корзина", "f", 0), "savatli": ("Корзина", "f", 0),
+    "savatcha": ("Корзинка", "f", 0), "buket": ("Букет", "m", 0),
+    "karobka": ("Коробка", "f", 0), "quti": ("Коробка", "f", 0), "box": ("Коробка", "f", 0),
+    "kompazitsia": ("композиция", "f", 1), "kompazitsiya": ("композиция", "f", 1),
+    "kompozitsia": ("композиция", "f", 1), "kompozitsiya": ("композиция", "f", 1),
+    "kompazitsa": ("композиция", "f", 1), "kompozitsiyasi": ("композиция", "f", 1),
+    "kompazitsiyasi": ("композиция", "f", 1),
 }
-# Rang va gul nomi "iz" dan keyin kelsa ruscha ko'plik qaratqichda bo'ladi.
-CATALOG_WORD_RU = {
-    "oq": ("Белая", "белых"), "qizil": ("Красная", "красных"),
-    "pushti": ("Розовая", "розовых"), "sariq": ("Жёлтая", "жёлтых"),
-    "tilla": ("Золотая", "золотых"), "yashil": ("Зелёная", "зелёных"),
-    "binafsha": ("Фиолетовая", "фиолетовых"), "qora": ("Чёрная", "чёрных"),
-    "ko'k": ("Синяя", "синих"), "kok": ("Синяя", "синих"),
-    "atirgul": ("Роза", "роз"), "lola": ("Тюльпан", "тюльпанов"),
-    "pion": ("Пион", "пионов"), "xrizantema": ("Хризантема", "хризантем"),
+# Har juftlik: erkak va ayol rodidagi shakl. Rod mahsulot turidan olinadi —
+# "Букет" erkak, "Корзина" va "композиция" ayol.
+CATALOG_ADJ_RU = {
+    "katta": ("большой", "большая"), "kotta": ("большой", "большая"),
+    "kichik": ("маленький", "маленькая"), "shoxli": ("ветвистый", "ветвистая"),
+}
+# Har juftlik: bosh kelishik va "iz" dan keyingi ko'plik qaratqich shakli.
+CATALOG_COLOR_RU = {
+    "oq": ("белая", "белых"), "qizil": ("красная", "красных"),
+    "pushti": ("розовая", "розовых"), "sariq": ("жёлтая", "жёлтых"),
+    "tilla": ("золотая", "золотых"), "yashil": ("зелёная", "зелёных"),
+    "binafsha": ("фиолетовая", "фиолетовых"), "qora": ("чёрная", "чёрных"),
+    "kok": ("синяя", "синих"), "ko'k": ("синяя", "синих"),
+}
+CATALOG_FLOWER_RU = {
+    "atir": ("Роза", "роз"), "atirgul": ("Роза", "роз"),
+    "atirguldan": ("Роза", "роз"), "atirgulidan": ("Роза", "роз"),
+    "lola": ("Тюльпан", "тюльпанов"), "pion": ("Пион", "пионов"),
+    "xrizantema": ("Хризантема", "хризантем"),
+}
+# Ruschada tarjimasi yo'q, ma'no ham qo'shmaydigan o'zbekcha qo'shimchalar.
+CATALOG_SKIP_RU = {
+    "gul", "gullar", "gulli", "gulidan", "guldan", "gulimizdan", "gullaridan",
+    "guli", "gullarimiz", "gullarimizdan", "yasalgan", "ta", "tali", "tasi", "dona",
 }
 
 
 def catalog_name_ru(name):
     """O'zbekcha katalog nomining ruscha ko'rinishi.
 
-    Nomlar "London Gulidan Savat Kompazitsia" naqshida yoziladi: chapda nav nomi,
-    "Gulidan" dan keyin mahsulot turi. Ruschada tur oldinga chiqadi, nav nomi
-    lotin yozuvda o'z holida qoladi. Kirill yozilgan nom ("Оқ Жумила") avval
-    lotinga o'giriladi, aks holda javobga o'zbek kirili tushib qoladi.
+    Kirill yozilgan nom ("Оқ Жумила") avval lotinga o'giriladi, aks holda ruscha
+    javobga o'zbek kirili tushib qoladi.
     """
     value = cyrillic_to_latin(name or "").strip()
     if not value:
         return ""
-    words = value.split()
-    keys = [word.lower().strip(".,") for word in words]
-    if "gulidan" in keys:
-        cut = keys.index("gulidan")
-        kinds, variety = words[:0] + words[cut + 1:], words[:cut]
-        kind_keys, variety_keys = keys[cut + 1:], keys[:cut]
+    kinds, adjectives = [], []
+    count, colors, flowers, rest = "", [], [], []
+    # "va" tushib qolmasligi uchun qo'shni so'z qaysi ro'yxatga tushsa, "и" ham
+    # o'sha yerga qo'yiladi. Ro'yxatlar keyin qayta tartiblanadi, shuning uchun
+    # ikki xil ro'yxat orasidagi bog'lovchi tashlab yuboriladi — "Композиция iz
+    # красных роз Jumila" bog'lovchisiz ham to'g'ri jumla.
+    pending_and, last_bucket = False, None
+
+    def put(bucket, word):
+        nonlocal pending_and, last_bucket
+        if pending_and and last_bucket is bucket:
+            bucket.append("и")
+        bucket.append(word)
+        pending_and, last_bucket = False, bucket
+
+    for word in value.split():
+        key = word.lower().strip(".,")
+        if key == "va":
+            pending_and = True
+            continue
+        if key in CATALOG_KIND_RU:
+            kinds.append(CATALOG_KIND_RU[key])
+        elif key in CATALOG_ADJ_RU:
+            adjectives.append(CATALOG_ADJ_RU[key])
+        elif key in CATALOG_COLOR_RU:
+            put(colors, CATALOG_COLOR_RU[key])
+        elif key in CATALOG_FLOWER_RU:
+            put(flowers, CATALOG_FLOWER_RU[key])
+        elif key.isdigit():
+            count = f"{word} шт"
+        elif key in CATALOG_SKIP_RU:
+            continue
+        else:
+            # "Hermossodan" — nav nomiga o'zbekcha "-dan" qo'shimchasi qo'shilgan.
+            put(rest, re.sub(r"(?i)dan$", "", word) if len(key) > 6 and key.endswith("dan") else word)
+    kinds = sorted(set(kinds), key=lambda kind: kind[2])
+    gender = 0 if kinds and kinds[0][1] == "m" else 1
+    head = " ".join(adjective[gender] for adjective in adjectives)
+    kind = "-".join(item[0] for item in kinds)
+    forms = lambda words, index: [word if word == "и" else word[index] for word in words]
+    if kind:
+        tail = " ".join(word for word in [count] + forms(colors, 1) + forms(flowers, 1) + rest if word)
+        kind = f"{head} {kind}" if head else kind
+        result = f"{kind} из {tail}" if tail else kind
     else:
-        kinds, variety = [], words
-        kind_keys, variety_keys = [], keys
-    form = 1 if kinds else 0
-    kinds_ru = [CATALOG_TYPE_RU.get(key, word) for word, key in zip(kinds, kind_keys)]
-    variety_ru = [
-        CATALOG_WORD_RU[key][form] if key in CATALOG_WORD_RU else word
-        for word, key in zip(variety, variety_keys)
-    ]
-    head = re.sub(r"\s+(композиция)", r"-\1", " ".join(kinds_ru))
-    tail = " ".join(variety_ru)
-    if head and tail:
-        return f"{head} из {tail}"
-    return head or tail
+        result = " ".join(word for word in
+                          [head] + forms(colors, 0) + forms(flowers, 0) + [count] + rest if word)
+    return result[:1].upper() + result[1:] if result else ""
 
 
 def conversation_reply_script(conversation):
