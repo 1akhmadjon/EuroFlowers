@@ -2367,25 +2367,23 @@ def sale_group_target(item):
 
 
 def notify_sale_to_group(item, history, payment_type, image_url="", photo_override=None):
-    """Sotilgan mahsulot rasmini o'z filialining telegram guruhiga yuboradi.
+    from .platform_services import telegram_send_message_with, telegram_send_photo_with
 
-    Sotuvda rasm yuklanmagan bo'lsa katalogdagi gul rasmi ketadi.
-    """
-    from .platform_services import telegram_send_photo_with
-
-    photo = photo_override or image_url or item.image_url
-    if not photo:
-        print(f"SALE_GROUP_NO_IMAGE catalog={item.id}", flush=True)
-        return None
+    photo = photo_override or image_url
     token, chat_id = sale_group_target(item)
     if not token or not chat_id:
         print(f"SALE_GROUP_NOT_CONFIGURED catalog={item.id}", flush=True)
         return None
     caption = sale_group_caption(item, history, payment_type, photo)
     try:
-        return telegram_send_photo_with(token, chat_id, photo, caption)
+        if photo:
+            result = telegram_send_photo_with(token, chat_id, photo, caption)
+            print(f"SALE_GROUP_SENT_PHOTO catalog={item.id} chat_id={chat_id}", flush=True)
+            return result
+        result = telegram_send_message_with(token, chat_id, caption)
+        print(f"SALE_GROUP_SENT_TEXT catalog={item.id} chat_id={chat_id}", flush=True)
+        return result
     except Exception as error:
-        # xabar ketmasa ham sotuv bekor bo'lmaydi
         print(f"SALE_GROUP_SEND_FAILED catalog={item.id} error={error}", flush=True)
         return None
 

@@ -6181,7 +6181,7 @@ class SaleGroupMessageTests(TestCase):
         self._configure_group()
         branch = Branch.objects.create(name="Parkent", sale_bot_token="parkent-token", sale_group_chat_id="-900900")
         item = self._item(branch=branch)
-        with patch("core.platform_services.telegram_send_photo_with") as sender:
+        with patch("core.platform_services.telegram_send_message_with") as sender:
             sender.return_value = {"ok": True}
             mark_catalog_sold(item, self.user, 1, payment_type="cash")
             from .inventory_services import notify_sale_to_group
@@ -6197,7 +6197,7 @@ class SaleGroupMessageTests(TestCase):
         self._configure_group()
         branch = Branch.objects.create(name="Parkent", sale_bot_token="parkent-token", sale_group_chat_id="-900900")
         item = self._item(branch=branch)
-        with patch("core.platform_services.telegram_send_photo_with") as sender:
+        with patch("core.platform_services.telegram_send_message_with") as sender:
             sender.return_value = {"ok": True}
             mark_catalog_sold(item, self.user, 1, payment_type="cash")
             from .inventory_services import notify_sale_to_group
@@ -6211,21 +6211,22 @@ class SaleGroupMessageTests(TestCase):
         self._configure_group()
         branch = Branch.objects.create(name="Chilonzor")
         item = self._item(branch=branch)
-        with patch("core.platform_services.telegram_send_photo_with") as sender:
+        with patch("core.platform_services.telegram_send_photo_with") as photo_sender, \
+                patch("core.platform_services.telegram_send_message_with") as text_sender:
             mark_catalog_sold(item, self.user, 1, payment_type="cash")
             from .inventory_services import notify_sale_to_group
             history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
             item.refresh_from_db()
             notify_sale_to_group(item, history, "cash")
-        # boshqa filialning guruhiga tushib qolmasligi kerak
-        self.assertEqual(sender.call_count, 0)
+        self.assertEqual(photo_sender.call_count, 0)
+        self.assertEqual(text_sender.call_count, 0)
 
     def test_main_branch_sale_uses_main_settings(self):
         from unittest.mock import patch
         self._configure_group()
         Branch.objects.create(name="Parkent", sale_bot_token="parkent-token", sale_group_chat_id="-900900")
         item = self._item()
-        with patch("core.platform_services.telegram_send_photo_with") as sender:
+        with patch("core.platform_services.telegram_send_message_with") as sender:
             sender.return_value = {"ok": True}
             self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
         self.assertEqual(sender.call_args[0][0], "test-token")
@@ -6247,16 +6248,20 @@ class SaleGroupMessageTests(TestCase):
         item.refresh_from_db()
         self.assertIn("Parkent", sale_group_caption(item, history, "card"))
 
-    def test_catalog_image_is_used_when_no_sale_photo(self):
+    def test_text_message_is_sent_when_no_sale_photo(self):
         from unittest.mock import patch
         self._configure_group()
         item = self._item()
-        with patch("core.platform_services.telegram_send_photo_with") as sender:
-            sender.return_value = {"ok": True}
+        with patch("core.platform_services.telegram_send_photo_with") as photo_sender, \
+                patch("core.platform_services.telegram_send_message_with") as text_sender:
+            text_sender.return_value = {"ok": True}
             response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(sender.call_count, 1)
-        self.assertEqual(sender.call_args[0][2], "https://example.com/katalog.jpg")
+        self.assertEqual(photo_sender.call_count, 0)
+        self.assertEqual(text_sender.call_count, 1)
+        self.assertEqual(text_sender.call_args[0][0], "test-token")
+        self.assertEqual(text_sender.call_args[0][1], "-100500")
+        self.assertIn("Qizil buket", text_sender.call_args[0][2])
 
     def test_uploaded_sale_photo_is_sent_to_group_as_one_photo_message(self):
         from unittest.mock import patch
@@ -6286,15 +6291,17 @@ class SaleGroupMessageTests(TestCase):
     def test_nothing_is_sent_without_token(self):
         from unittest.mock import patch
         item = self._item()
-        with patch("core.platform_services.telegram_send_photo_with") as sender:
+        with patch("core.platform_services.telegram_send_photo_with") as photo_sender, \
+                patch("core.platform_services.telegram_send_message_with") as text_sender:
             self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
-        self.assertEqual(sender.call_count, 0)
+        self.assertEqual(photo_sender.call_count, 0)
+        self.assertEqual(text_sender.call_count, 0)
 
     def test_sale_still_works_when_telegram_fails(self):
         from unittest.mock import patch
         self._configure_group()
         item = self._item()
-        with patch("core.platform_services.telegram_send_photo_with", side_effect=RuntimeError("tarmoq")):
+        with patch("core.platform_services.telegram_send_message_with", side_effect=RuntimeError("tarmoq")):
             response = self.client.post(f"/api/catalog/{item.id}/sell/", {"quantity": 1, "payment_type": "cash"}, format="json")
         self.assertEqual(response.status_code, 200)
         item.refresh_from_db()

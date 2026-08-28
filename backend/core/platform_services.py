@@ -329,6 +329,17 @@ def telegram_send_with(token, chat_id, text, reply_markup=None, message_thread_i
     return telegram_api_with_token(token, "sendMessage", payload)
 
 
+def telegram_send_message_with(token, chat_id, text, parse_mode="Markdown", reply_markup=None, message_thread_id=""):
+    payload = {"chat_id": str(chat_id), "text": text[:4096]}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    if message_thread_id:
+        payload["message_thread_id"] = message_thread_id
+    return telegram_api_with_token_and_chat_fallback(token, "sendMessage", payload)
+
+
 def telegram_send_image(chat_id, image_url, caption=""):
     payload = {"chat_id": chat_id, "photo": image_url}
     if caption:
