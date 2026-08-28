@@ -10832,6 +10832,16 @@ class RussianReplyLanguageTests(TestCase):
         captions = self._album_captions(["Nechpul", "qanaqa gullar bor"])
         self.assertEqual(captions, ["1. London Gulidan Savat Kompazitsia — 1 500 000 so'm"])
 
+    def test_a_short_russian_message_does_not_flip_the_album_to_uzbek(self):
+        """Real suhbat: "На сегодня", "А какая длина" — belgisiz, lekin ruscha."""
+        captions = self._album_captions(["Можно заказать?", "На сегодня", "А какая длина"])
+        self.assertEqual(captions, ["1. Корзина-композиция из London — 1 500 000 сум"])
+
+    def test_one_uzbek_message_keeps_the_album_uzbek(self):
+        """"доставка" deb yozgan o'zbek mijoz ruschaga o'tib ketmasin."""
+        captions = self._album_captions(["Каерда жойлашгансиз", "доставка"])
+        self.assertEqual(captions, ["1. London Gulidan Savat Kompazitsia — 1 500 000 so'm"])
+
     def test_the_prompt_carries_the_russian_block(self):
         prompt = AISettings.objects.get(pk=1).system_prompt
         self.assertIn("00L. RUS TILIDA JAVOB", prompt)

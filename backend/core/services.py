@@ -3563,23 +3563,38 @@ def catalog_name_ru(name):
     return result[:1].upper() + result[1:] if result else ""
 
 
+def script_evidence(text):
+    """Matnda til haqida haqiqiy dalil bormi.
+
+    detect_text_script hech qanday belgi topmasa "uz_cyril" qaytaradi — o'zbek
+    mijozlar ko'p bo'lgani uchun shunday qilingan. Lekin "На сегодня" yoki
+    "А какая длина" da ham belgi yo'q va ular o'zbekcha emas. Shuning uchun
+    dalilsiz xabar ovoz bermaydi, faqat dalillilari sanaladi.
+    """
+    value = text or ""
+    if UZ_CYRIL_LETTERS.search(value) or UZ_CYRIL_MARKERS.search(value) or UZ_CYRIL_SUFFIXES.search(value):
+        return "uz_cyril"
+    if RU_MARKERS.search(value):
+        return "ru"
+    return ""
+
+
 def conversation_reply_script(conversation):
     """Suhbatga qaysi tilda javob berilyapti.
 
-    Albom sarlavhalarini kod o'zi yuboradi, model orqali o'tmaydi. Mijoz ruscha
-    yozsa sarlavha ham ruscha bo'lishi kerak — shuning uchun til aynan javob
-    yaratilayotganidagi mantiq bilan aniqlanadi.
+    Albom sarlavhalarini kod o'zi yuboradi, model orqali o'tmaydi — mijoz ruscha
+    yozsa sarlavha ham ruscha bo'lishi kerak. Bitta xabar yetarli emas: ruscha
+    suhbatda ham belgisiz qisqa xabarlar bo'ladi, shuning uchun oxirgi bir necha
+    xabar birga qaraladi. Bittasi ham o'zbekcha bo'lsa suhbat o'zbekcha qoladi.
     """
-    messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:12])
-    pending = []
-    for message in messages:
-        if message.sender == "ai":
-            break
-        if message.sender == "customer":
-            pending.append(message.text or "")
-    if not pending:
-        pending = [next((message.text or "" for message in messages if message.sender == "customer"), "")]
-    return conversation_script(pending)
+    texts = list(conversation.messages.filter(sender="customer")
+                 .order_by("-created_at", "-id").values_list("text", flat=True)[:8])
+    scripts = [script_evidence(text) for text in texts]
+    if "uz_cyril" in scripts:
+        return "uz_cyril"
+    if "ru" in scripts:
+        return "ru"
+    return conversation_script(texts[:1])
 
 
 def create_ai_reply_for_conversation(conversation):
