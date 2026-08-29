@@ -4650,7 +4650,23 @@ class ApiTests(TestCase):
         detail = self.client.get(f"/api/stock-deliveries/{delivery['id']}/")
         self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("99800.00"))
         self.assertEqual(Decimal(detail.data["total_cost_exact"]), Decimal("99800.00"))
-        self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("200.00"))
+        # Dona narxi endi yaxlitlanmaydi: 24 950 / 25 = 998, farq qolmaydi.
+        self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("0.00"))
+
+    def test_the_stem_price_is_no_longer_rounded_to_a_hundred(self):
+        """50 000 / 15 = 3 333,33 — avval 3 300 bo'lib, partiya summasi kamayardi."""
+        delivery = self.client.post("/api/stock-deliveries/", {"number": "EX-2", "received_at": "2026-08-27"}, format="json").json()
+        created = self.client.post("/api/stock-batches/", {
+            "delivery": delivery["id"], "variant": self.batch.variant_id, "height_cm": 50,
+            "stems_per_bunch": 15, "received_stems": 285,
+            "cost_per_bunch": "50000", "sale_price_per_bunch": "150000",
+        }, format="json").json()
+        self.assertEqual(Decimal(created["cost_per_stem"]), Decimal("3333.33"))
+        self.assertEqual(Decimal(created["cost_per_stem_exact"]), Decimal("3333.3333"))
+        self.assertFalse(created["rounding"]["cost"]["is_rounded"])
+        detail = self.client.get(f"/api/stock-deliveries/{delivery['id']}/")
+        self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("950000.00"))
+        self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("-0.05"))
 
     def test_supplier_rollup_uses_exact_delivery_cost(self):
         supplier = Supplier.objects.create(name="Exact supplier")

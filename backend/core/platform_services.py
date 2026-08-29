@@ -60,6 +60,8 @@ def instagram_user_id(access_token):
     integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
     if integration.instagram_account_id:
         return integration.instagram_account_id
+    if outbound_blocked():
+        return ""
     response = requests.get(f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/me", params={"access_token": access_token, "fields": "id,username"}, timeout=20)
     response.raise_for_status()
     data = response.json()
@@ -95,6 +97,8 @@ def instagram_active_stories(account_id=None):
     rows = []
     for account, access_token in instagram_lookup_accounts(account_id):
         try:
+            if outbound_blocked():
+                return rows
             response = requests.get(
                 f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account}/stories",
                 params={"access_token": access_token, "fields": "id,media_type,media_url,permalink,timestamp"},
@@ -115,6 +119,8 @@ def instagram_recent_media(account_id=None):
         params = {"access_token": access_token, "fields": "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url", "limit": 100}
         try:
             for _ in range(5):
+                if outbound_blocked():
+                    return rows
                 response = requests.get(url, params=params, timeout=20)
                 response.raise_for_status()
                 data = response.json()
@@ -177,6 +183,8 @@ def instagram_send(recipient_id, text, account_id=None):
     if not access_token or not account_id:
         return {"mocked": True}
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
+    if outbound_blocked():
+        return BlockedResponse().json()
     response = requests.post(url, params={"access_token": access_token}, json={"recipient": {"id": recipient_id}, "message": {"text": text}}, timeout=20)
     response.raise_for_status()
     return response.json()
@@ -196,6 +204,8 @@ def instagram_send_image(recipient_id, image_url, account_id=None):
             }
         },
     }
+    if outbound_blocked():
+        return BlockedResponse().json()
     response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -230,6 +240,8 @@ def instagram_send_carousel(recipient_id, elements, account_id=None):
         },
     }
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
+    if outbound_blocked():
+        return BlockedResponse().json()
     response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=40)
     if response.status_code >= 400:
         # Instagram sababni faqat javob tanasida yozadi, status kodda emas.
@@ -243,9 +255,35 @@ def instagram_sender_action(recipient_id, action, account_id=None):
     if not access_token or not account_id:
         return {"mocked": True}
     url = f"https://graph.instagram.com/{settings.INSTAGRAM_API_VERSION}/{account_id}/messages"
+    if outbound_blocked():
+        return BlockedResponse().json()
     response = requests.post(url, params={"access_token": access_token}, json={"recipient": {"id": recipient_id}, "sender_action": action}, timeout=20)
     response.raise_for_status()
     return response.json()
+
+
+def outbound_blocked():
+    """Test paytida haqiqiy tashqi so'rov chiqmasin.
+
+    Sotuv va operator guruhlariga test sotuvlari haqiqiy xabar bo'lib borib
+    turgan edi. Endi test yugurtirilganda tarmoqqa umuman chiqilmaydi.
+
+    Test o'zi requests.post ni patch qilgan bo'lsa to'silmaydi — u so'rov
+    baribir tarmoqqa chiqmaydi, o'sha testning mockiga boradi, va to'sib
+    qo'ysak o'sha testlar ma'nosini yo'qotadi.
+    """
+    from unittest.mock import Mock
+    if not getattr(settings, "TESTING", False):
+        return False
+    return not isinstance(requests.post, Mock) and not isinstance(requests.get, Mock)
+
+
+class BlockedResponse:
+    """Test paytida tarmoq o'rniga qaytadigan javob."""
+
+    @staticmethod
+    def json():
+        return {"ok": True, "mocked": True, "result": {"message_id": 1}}
 
 
 def telegram_bot_token():
@@ -256,6 +294,8 @@ def telegram_bot_token():
 def telegram_file_url(file_id):
     token = telegram_bot_token()
     if not token or not file_id:
+        return ""
+    if outbound_blocked():
         return ""
     response = requests.post(f"https://api.telegram.org/bot{token}/getFile", json={"file_id": file_id}, timeout=20)
     response.raise_for_status()
@@ -269,6 +309,8 @@ def telegram_api(method, payload):
     token = telegram_bot_token()
     if not token:
         return {"mocked": True}
+    if outbound_blocked():
+        return BlockedResponse().json()
     response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=20)
     response.raise_for_status()
     return response.json()
@@ -277,6 +319,8 @@ def telegram_api(method, payload):
 def telegram_api_with_token(token, method, payload):
     if not token:
         return {"skipped": True, "reason": "token yo‘q"}
+    if outbound_blocked():
+        return BlockedResponse().json()
     response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -306,8 +350,12 @@ def telegram_api_with_token_and_chat_fallback(token, method, payload, files=None
         try:
             url = f"https://api.telegram.org/bot{token}/{method}"
             if files:
+                if outbound_blocked():
+                    return BlockedResponse().json()
                 response = requests.post(url, data=current, files=files, timeout=30)
             else:
+                if outbound_blocked():
+                    return BlockedResponse().json()
                 response = requests.post(url, json=current, timeout=30)
             response.raise_for_status()
             return response.json()

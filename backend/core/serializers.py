@@ -724,16 +724,16 @@ def batch_unit_sale(batch):
 
 
 def round_stem_price(value):
-    """Dona narxini eng yaqin 100 ga yaxlitlaydi: 998 -> 1000, 1060 -> 1100.
+    """Dona narxi endi yaxlitlanmaydi — aynan hisoblangan qiymat qoladi.
 
-    Pochka narxini donaga bo'lganda 998 kabi noqulay son chiqib qoladi,
-    shuning uchun natija yaxlitlanadi.
+    Avval eng yaqin 100 ga yaxlitlanardi (50 000 / 15 = 3 333,33 dan 3 300).
+    Ko'rinishi chiroyli bo'lgani bilan yig'indi qog'ozdagi summaga to'g'ri
+    kelmay qolardi, shuning uchun yaxlitlash olib tashlandi.
     """
     amount = Decimal(str(value))
     if amount <= 0:
         return Decimal("0.00")
-    steps = (amount / PRICE_ROUND_STEP).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    return (steps * PRICE_ROUND_STEP).quantize(Decimal("0.01"))
+    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 class StockDeliverySerializer(serializers.ModelSerializer):
