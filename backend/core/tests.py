@@ -10863,3 +10863,187 @@ class RussianReplyLanguageTests(TestCase):
         self.assertIn("BUYURTMA BUGUNGA EMAS BO'LSA", prompt)
         self.assertIn("future_order = true", prompt)
         self.assertIn("Chek ham SO'RAMA", prompt)
+
+
+class AdMessageSendsTheWholeCatalogTests(TestCase):
+    """Reklamadan yozgan mijozga taxmin qilinmaydi, katalog yuboriladi."""
+
+    def setUp(self):
+        self.item = AICatalogItem.objects.create(
+            name="All For Love Gulidan Buket", arrangement_type="bouquet", price=199000,
+            quantity=1, image_url="https://cdn.example.com/love.jpg")
+        self.expensive = AICatalogItem.objects.create(
+            name="Oq Jumila Atir Gulidan Yasalgan Kompazitsia 100 Tali", arrangement_type="bouquet",
+            price=1000000, quantity=1, image_url="https://cdn.example.com/jumila.jpg")
+
+    def _ad_conversation(self):
+        customer = Customer.objects.create(instagram_user_id="ig-ad-probe", instagram_username="asadnabiev")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="Buyurtma bermoqchi edim", metadata={
+            "attachments": [{"kind": "ad", "url": "https://www.facebook.com/ads/image/?d=AQLBZ8Js"}]})
+        return conversation
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_an_unlinked_ad_sends_the_catalog_instead_of_guessing(self):
+        """Real suhbat 1966: reklama 199 000 lik edi, taxmin 1 000 000 ni chiqardi."""
+        from unittest.mock import patch
+        conversation = self._ad_conversation()
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as album:
+            with patch("core.vision_services.analyze_image") as vision:
+                result = services.match_ai_catalog_by_media(conversation)
+        self.assertEqual(result["detail"], "ad_catalog_sent")
+        self.assertFalse(result["allow_send"])
+        self.assertEqual(result["matches"], [])
+        self.assertEqual(result["group_matches"], [])
+        album.assert_called()
+        # Ko'rish so'rovi umuman yuborilmasligi kerak — pul ham, xato ham shundan.
+        vision.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_ad_answer_never_names_a_product_or_a_price(self):
+        from unittest.mock import patch
+        conversation = self._ad_conversation()
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = services.match_ai_catalog_by_media(conversation)
+        instruction = result["instruction_uz"]
+        self.assertIn("nomini ham, narxini ham AYTMA", instruction)
+        self.assertIn("raqami bilan", instruction)
+
+
+class SentPhotoClaimTests(TestCase):
+    """"Albomni yubordim" deb yozib, hech narsa yubormaslik."""
+
+    def setUp(self):
+        self.item = AICatalogItem.objects.create(
+            name="All For Love Gulidan Buket", arrangement_type="bouquet", price=199000,
+            quantity=1, image_url="https://cdn.example.com/love.jpg")
+        customer = Customer.objects.create(instagram_user_id="ig-claim", instagram_username="claim_probe")
+        self.conversation = Conversation.objects.create(customer=customer)
+
+    def test_the_claim_is_read_from_the_reply(self):
+        from .services import reply_claims_a_photo_was_sent
+        self.assertTrue(reply_claims_a_photo_was_sent("Albomda yubordim — 1 va 2 pozitsiya mavjud."))
+        self.assertTrue(reply_claims_a_photo_was_sent("199 mingga eng yaqin variantlarimiz ham bor — albomni yubordim."))
+        self.assertTrue(reply_claims_a_photo_was_sent("Rasmini yubordik, ko'ring."))
+        self.assertTrue(reply_claims_a_photo_was_sent("Отправил альбом, посмотрите."))
+        # Mijozdan SO'RAGAN gaplar da'vo emas.
+        self.assertFalse(reply_claims_a_photo_was_sent("Manzilingizni xaritada belgilab yuborsangiz:"))
+        self.assertFalse(reply_claims_a_photo_was_sent("Rasmini yuboring, operatorlarimiz ko'rib chiqishadi."))
+        self.assertFalse(reply_claims_a_photo_was_sent("Buyurtmangizni qabul qildik."))
+
+    def test_an_empty_claim_sends_the_catalog(self):
+        from unittest.mock import patch
+        from .services import apply_sent_photo_claim_safeguard
+        result = {"reply": "Albomda yubordim — 1 va 2 pozitsiya mavjud."}
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as album:
+            apply_sent_photo_claim_safeguard(self.conversation, result, tool_results)
+        album.assert_called()
+        self.assertEqual(tool_results[-1]["name"], "send_catalog_album")
+        self.assertTrue(tool_results[-1]["arguments"]["safeguard"])
+
+    def test_a_true_claim_sends_nothing_extra(self):
+        from unittest.mock import patch
+        from .services import apply_sent_photo_claim_safeguard
+        result = {"reply": "Albomni yubordim, qaysi biri yoqdi?"}
+        tool_results = [{"name": "send_catalog_album", "arguments": {}, "output": {"ok": True}}]
+        with patch("core.services.send_catalog_album_chunk") as album:
+            apply_sent_photo_claim_safeguard(self.conversation, result, tool_results)
+        album.assert_not_called()
+        self.assertEqual(len(tool_results), 1)
+
+    def test_a_reply_without_a_claim_is_left_alone(self):
+        from unittest.mock import patch
+        from .services import apply_sent_photo_claim_safeguard
+        result = {"reply": "Buyurtmangizni qabul qildik, operatorlarimiz bog'lanishadi."}
+        with patch("core.services.send_catalog_album_chunk") as album:
+            apply_sent_photo_claim_safeguard(self.conversation, result, [])
+        album.assert_not_called()
+
+
+class MixedPaymentWithTerminalTests(TestCase):
+    """Aralash to'lov: naqd, karta va terminal."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("mixed-admin", password="password", is_superuser=True, is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.item = CatalogItem.objects.create(name_uz="Aralash buket", arrangement_type="bouquet",
+                                               price=Decimal("200000"), quantity_total=4, status="available")
+
+    def _sell(self, payload):
+        return self.client.post(f"/api/catalog/{self.item.id}/sell/", payload, format="json")
+
+    def test_cash_and_terminal_split_is_accepted(self):
+        """200 000 ning 100 000 i terminal, 100 000 i naqd."""
+        response = self._sell({"quantity": 1, "sale_price": "200000.00", "payment_type": "mixed",
+                               "cash_amount": "100000.00", "terminal_amount": "100000.00"})
+        self.assertEqual(response.status_code, 200, response.json())
+        history = self.item.history.get(action="sold")
+        self.assertEqual(history.snapshot["payment_terminal"], "100000.00")
+        self.assertEqual(history.snapshot["payment_cash"], "100000.00")
+        self.assertEqual(history.snapshot["payment_card"], "0")
+
+    def test_the_old_cash_and_card_split_still_works(self):
+        response = self._sell({"quantity": 1, "sale_price": "200000.00", "payment_type": "mixed",
+                               "cash_amount": "120000.00", "card_amount": "80000.00"})
+        self.assertEqual(response.status_code, 200, response.json())
+        history = self.item.history.get(action="sold")
+        self.assertEqual(history.snapshot["payment_card"], "80000.00")
+        self.assertEqual(history.snapshot["payment_terminal"], "0")
+
+    def test_one_amount_alone_is_refused(self):
+        response = self._sell({"quantity": 1, "payment_type": "mixed", "terminal_amount": "200000.00"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("kamida ikkita", str(response.json()))
+
+    def test_the_report_counts_the_terminal_share(self):
+        self._sell({"quantity": 1, "sale_price": "200000.00", "payment_type": "mixed",
+                    "cash_amount": "100000.00", "terminal_amount": "100000.00"})
+        report = self.client.get("/api/accounting/")
+        summary = report.data["summary"]
+        self.assertEqual(Decimal(summary["cash_total"]), Decimal("100000"))
+        self.assertEqual(Decimal(summary["terminal_total"]), Decimal("100000"))
+        self.assertEqual(Decimal(summary["card_total"]), Decimal("0"))
+
+    def test_the_breakdown_shows_all_three(self):
+        self._sell({"quantity": 1, "sale_price": "200000.00", "payment_type": "mixed",
+                    "cash_amount": "100000.00", "terminal_amount": "100000.00"})
+        history = self.item.history.get(action="sold")
+        rows = self.client.get("/api/catalog-history/").data
+        rows = rows.get("results", rows)
+        row = next(item for item in rows if item["id"] == history.id)
+        self.assertEqual(set(row["payment_breakdown"]), {"cash", "card", "terminal"})
+        self.assertEqual(Decimal(row["payment_breakdown"]["terminal"]), Decimal("100000"))
+
+
+class BunchToStemRoundingTests(TestCase):
+    """Kasr pochka dona soniga aylantirilganda pul yo'qolmasin."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("stem-admin", password="password", is_superuser=True, is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.flower = Flower.objects.create(name_uz="Atirgul stem", slug="rose-stem")
+        self.delivery = StockDelivery.objects.create(number="ST-1", received_at="2026-08-27")
+
+    def test_a_half_stem_is_no_longer_cut_off(self):
+        """56.7 pochka x 15 dona = 850.5 — avval 850 bo'lib, yarim dona puli yo'qolardi."""
+        response = self.client.post("/api/stock-batches/", {
+            "flower": self.flower.id, "delivery": self.delivery.id, "height_cm": 20,
+            "stems_per_bunch": 15, "received_bunches": "56.70",
+            "cost_per_bunch": "60000.00", "sale_price_per_bunch": "150000.00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        batch = StockBatch.objects.get(id=response.json()["id"])
+        self.assertEqual(batch.received_stems, 851)
+
+    def test_a_whole_bunch_count_is_untouched(self):
+        response = self.client.post("/api/stock-batches/", {
+            "flower": self.flower.id, "delivery": self.delivery.id, "height_cm": 25,
+            "stems_per_bunch": 25, "received_bunches": "14",
+            "cost_per_bunch": "87500.00", "sale_price_per_bunch": "200000.00",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(StockBatch.objects.get(id=response.json()["id"]).received_stems, 350)
+

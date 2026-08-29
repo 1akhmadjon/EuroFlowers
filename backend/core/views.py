@@ -544,19 +544,15 @@ def sale_payment_split(history, payment, sale_total):
     if payment != "mixed":
         return {payment: money_total}, payment, False
     snapshot = (history.snapshot or {}) if history is not None else {}
-    cash = Decimal(str(snapshot.get("payment_cash") or 0))
-    card = Decimal(str(snapshot.get("payment_card") or 0))
-    if cash + card <= 0:
+    parts = {key: Decimal(str(snapshot.get(f"payment_{key}") or 0))
+             for key in ["cash", "card", "terminal"]}
+    paid = sum(parts.values())
+    if paid <= 0:
         return {"unknown": money_total}, "unknown", False
     # yaxlitlash farqi bo'lsa katta ulushga qo'shiladi
-    diff = money_total - (cash + card)
-    if diff:
-        if cash >= card:
-            cash += diff
-        else:
-            card += diff
-    primary = "cash" if cash >= card else "card"
-    return {"cash": cash, "card": card}, primary, True
+    primary = max(parts, key=lambda key: parts[key])
+    parts[primary] += money_total - paid
+    return parts, primary, True
 
 
 def add_sale_to_bucket(bucket, payment, quantity, stems, sale_total, discount, cost_total, cost_breakdown, kind, history=None):
@@ -3588,8 +3584,9 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
                 snapshot = row.snapshot or {}
                 if serializer.validated_data.get("payment_type") == "mixed":
                     snapshot["payment_type"] = "mixed"
-                    snapshot["payment_cash"] = str(serializer.validated_data["cash_amount"])
-                    snapshot["payment_card"] = str(serializer.validated_data["card_amount"])
+                    snapshot["payment_cash"] = str(serializer.validated_data.get("cash_amount") or 0)
+                    snapshot["payment_card"] = str(serializer.validated_data.get("card_amount") or 0)
+                    snapshot["payment_terminal"] = str(serializer.validated_data.get("terminal_amount") or 0)
                 if delivery_amount:
                     snapshot["delivery_amount"] = str(delivery_amount)
                 row.snapshot = snapshot
@@ -4821,15 +4818,19 @@ def catalog_history_sale_payment_amounts(history, sale_total):
             return {payment_key: sale_total}
         return {"other": sale_total}
     snapshot = history.snapshot or {}
-    cash = Decimal(str(snapshot.get("payment_cash") or 0))
-    card = Decimal(str(snapshot.get("payment_card") or 0))
-    if cash + card <= 0:
+    parts = {key: Decimal(str(snapshot.get(f"payment_{key}") or 0))
+             for key in ["cash", "card", "terminal"]}
+    total_paid = sum(parts.values())
+    if total_paid <= 0:
         return {"other": sale_total}
-    total_paid = cash + card
     if total_paid != sale_total:
-        cash = (sale_total * cash / total_paid).quantize(Decimal("1"))
-        card = sale_total - cash
-    return {"cash": cash, "card": card}
+        # Ulushlarni sotuv summasiga moslaymiz, farq eng kattasiga qo'shiladi.
+        scaled = {key: (sale_total * amount / total_paid).quantize(Decimal("1"))
+                  for key, amount in parts.items()}
+        primary = max(parts, key=lambda key: parts[key])
+        scaled[primary] += sale_total - sum(scaled.values())
+        parts = scaled
+    return parts
 
 
 def accessory_key(name):

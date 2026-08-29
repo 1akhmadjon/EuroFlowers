@@ -1734,7 +1734,7 @@ def restore_catalog_sale(item, user, quantity=None, sale_history=None, reason=""
             history.discount_amount = max((Decimal(history.listed_unit_price or 0) - Decimal(history.sold_unit_price or 0)) * Decimal(left_quantity), Decimal("0"))
             history.discount_percent = discount_percent(history.discount_amount, Decimal(history.listed_unit_price or 0) * Decimal(left_quantity))
             snapshot = dict(history.snapshot or {})
-            for key in ["payment_cash", "payment_card", "delivery_amount"]:
+            for key in ["payment_cash", "payment_card", "payment_terminal", "delivery_amount"]:
                 if snapshot.get(key) not in [None, ""]:
                     snapshot[key] = str((Decimal(str(snapshot.get(key) or 0)) * Decimal(left_quantity) / Decimal(original_quantity)).quantize(Decimal("0.01")))
             for row in snapshot.get("sale_materials", []) or []:
@@ -2313,11 +2313,11 @@ def sale_group_caption(item, history, payment_type, image_url=""):
         lines.append(f"\U0001f9ee Jami olingan: *{money_uz(received)} so\u2018m*")
 
     if payment_type == "mixed":
-        cash = Decimal(str(snapshot.get("payment_cash") or 0))
-        card = Decimal(str(snapshot.get("payment_card") or 0))
-        lines.append(
-            f"\U0001f500 To\u2018lov: *Aralash* \u2014 \U0001f4b5 {money_uz(cash)} \u00b7 \U0001f4b3 {money_uz(card)}"
-        )
+        icons = {"cash": "\U0001f4b5", "card": "\U0001f4b3", "terminal": "\U0001f4df"}
+        parts = [f"{icons[key]} {money_uz(snapshot.get(f'payment_{key}') or 0)}"
+                 for key in ["cash", "card", "terminal"]
+                 if Decimal(str(snapshot.get(f"payment_{key}") or 0)) > 0]
+        lines.append("\U0001f500 To\u2018lov: *Aralash* \u2014 " + " \u00b7 ".join(parts))
     else:
         labels = {
             "cash": ("\U0001f4b5", "Naqd"),

@@ -934,7 +934,10 @@ class StockBatchSerializer(serializers.ModelSerializer):
                 data["supplier"] = delivery.supplier_id
         data = self._fill_prices(data)
         if not data.get("received_stems") and data.get("received_bunches") and data.get("stems_per_bunch"):
-            data["received_stems"] = int(Decimal(str(data["received_bunches"])) * Decimal(str(data["stems_per_bunch"])))
+            # int() pastga kesardi: 56.7 pochka x 15 dona = 850.5 dan 850 qolib,
+            # yarim dona puli partiya summasidan tushib qolardi.
+            stems = Decimal(str(data["received_bunches"])) * Decimal(str(data["stems_per_bunch"]))
+            data["received_stems"] = int(stems.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         # Qoldiqni kelgan songa tenglash faqat yangi partiyada to'g'ri.
         # Tahrirda ishlatilgan gul unutilib qolmasligi uchun qoldiq
         # viewset da farq bo'yicha siljitiladi.
@@ -2816,6 +2819,7 @@ class CatalogSaleRowSerializer(serializers.ModelSerializer):
         return {
             "cash": Decimal(str(snapshot.get("payment_cash") or 0)),
             "card": Decimal(str(snapshot.get("payment_card") or 0)),
+            "terminal": Decimal(str(snapshot.get("payment_terminal") or 0)),
         }
 
     @extend_schema_field(serializers.DecimalField(max_digits=14, decimal_places=2))
@@ -2863,9 +2867,11 @@ class CatalogSellRequestSerializer(serializers.Serializer):
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     discount_reason = serializers.CharField(required=False, allow_blank=True)
     payment_type = serializers.ChoiceField(choices=["cash", "card", "terminal", "debt", "mixed"], required=False)
-    # Aralash to'lov: bir qismi naqd, bir qismi karta
+    # Aralash to'lov: summa naqd, karta va terminal orasida bo'linadi.
+    # 200 000 so'mlik gulning 100 000 i terminal, 100 000 i naqd bo'lishi mumkin.
     cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
     card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
+    terminal_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"))
     # Dastafka sotuv summasining ichida bo'ladi: kuryerga ketadi, savdodan ayriladi.
     delivery_amount = serializers.DecimalField(
         max_digits=12, decimal_places=2, required=False, min_value=Decimal("0"),
@@ -2889,16 +2895,16 @@ class CatalogSellRequestSerializer(serializers.Serializer):
         if "materials" in attrs:
             attrs["materials"] = normalize_catalog_material_rows(attrs["materials"])
         if attrs.get("payment_type") == "mixed":
-            cash = attrs.get("cash_amount")
-            card = attrs.get("card_amount")
-            if cash is None or card is None:
+            parts = {key: Decimal(str(attrs.get(f"{key}_amount") or 0))
+                     for key in ["cash", "card", "terminal"]}
+            given = [key for key, amount in parts.items() if amount > 0]
+            if len(given) < 2:
                 raise serializers.ValidationError({
-                    "cash_amount": "Aralash to‘lovda naqd va karta summasini kiriting",
+                    "cash_amount": "Aralash to‘lovda kamida ikkita summani kiriting: "
+                                   "naqd, karta yoki terminal",
                 })
-            if cash <= 0 or card <= 0:
-                raise serializers.ValidationError({
-                    "cash_amount": "Aralash to‘lovda ikkala summa ham noldan katta bo‘lishi kerak",
-                })
+            for key in ["cash", "card", "terminal"]:
+                attrs[f"{key}_amount"] = parts[key]
         if attrs.get("payment_type") == "debt":
             has_customer = attrs.get("customer") is not None
             has_contact = bool((attrs.get("customer_name") or "").strip()) and bool((attrs.get("customer_phone") or "").strip())

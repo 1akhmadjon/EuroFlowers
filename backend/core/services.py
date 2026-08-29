@@ -1767,6 +1767,53 @@ def tool_results_sent_catalog(tool_results, catalog_id):
     return False
 
 
+# "Albomni yubordim", "rasmini yubordim" — javob rasm yuborilgan deb turgan
+# so'zlar. Mijozdan yuborishni SO'RAGAN gaplar ("yuborsangiz", "yuboring") bu
+# yerga tushmaydi: fe'l o'tgan zamon va birinchi shaxsda bo'lishi shart.
+PHOTO_CLAIM_WORDS = re.compile(r"albom|альбом|rasm|surat|фото", re.IGNORECASE)
+PHOTO_CLAIM_VERBS = re.compile(
+    r"yubord(im|ik)|jo['‘’ʻ]?natd(im|ik)|otpravil|отправил|отправила|скинул|прислал",
+    re.IGNORECASE)
+PHOTO_SENDING_TOOLS = {"send_catalog_album", "send_catalog_image", "send_post_image"}
+
+
+def reply_claims_a_photo_was_sent(text):
+    value = text or ""
+    return bool(PHOTO_CLAIM_WORDS.search(value) and PHOTO_CLAIM_VERBS.search(value))
+
+
+def tool_results_sent_any_photo(tool_results):
+    for row in tool_results or []:
+        if row.get("name") in PHOTO_SENDING_TOOLS and (row.get("output") or {}).get("ok"):
+            return True
+    return False
+
+
+def apply_sent_photo_claim_safeguard(conversation, result, tool_results):
+    """"Albomni yubordim" deb yozib, hech narsa yubormaslikning oldini oladi.
+
+    Real suhbat (1966): mijoz 199 000 so'mligini so'radi, AI ikki marta
+    "albomda yubordim" deb yozdi, albom esa yuborilmadi. Mijoz "Yuqku",
+    "Albom kurinmayapti" deb ketdi va buyurtma operatorga qolib ketdi.
+
+    Javob matniga tegilmaydi — matn tizim promptining ishi. Gap yolg'on
+    bo'lib qolmasligi uchun katalog albomi shu yerda yuboriladi.
+    """
+    if not reply_claims_a_photo_was_sent(result.get("reply")):
+        return result
+    if tool_results_sent_any_photo(tool_results):
+        return result
+    if whole_catalog_already_sent(conversation):
+        # Butun katalog bu suhbatda ko'rilgan. Uchinchi marta yuborish spam.
+        return result
+    album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
+    tool_results.append({"name": "send_catalog_album",
+                         "arguments": {"catalog_ids": [], "safeguard": True},
+                         "output": album})
+    result["tool_results"] = tool_results
+    return result
+
+
 def apply_media_match_safeguard(conversation, result, tool_results):
     """Aniq mos kelgan mahsulot rasmi yuborilmay qolgan bo'lsa, o'zi yuboradi.
 
@@ -1862,6 +1909,14 @@ def caption_price_matches(items, attachment):
     return [], None
 
 
+MEDIA_MATCH_AD_CATALOG_INSTRUCTION = (
+    "Mijoz reklama orqali yozdi va reklamadagi mahsulot katalogga ulanmagan. "
+    "Butun katalog albom qilib ALLAQACHON yuborildi — sen faqat yozasan. "
+    "Reklamadagi gulning nomini ham, narxini ham AYTMA va taxmin qilma: qaysi "
+    "biri ekanini bilmaysan. Mijozga qisqa ayt: hozirda bor gullarimiz shular, "
+    "qaysi biri kerakligini raqami bilan yozsin. Boshqa albom yuborma."
+)
+
 MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION = (
     "Mijoz yuborgan reel tizimga ulanmagan, lekin izohida narxi yozilgan. group_matches "
     "dagi catalog_id larni send_catalog_album bilan yubor va shu mazmunda yoz: yuborgan "
@@ -1916,6 +1971,27 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "near_matches": [],
             "no_match_reason": "",
             "instruction_uz": MEDIA_MATCH_LINK_GROUP_INSTRUCTION,
+        })
+
+    if attachment.get("kind") == "ad":
+        # Reklama bannerini ko'rish orqali topishga urinish real suhbatda
+        # (1966) 199 000 so'mlik e'lonni 1 000 000 va 400 000 so'mlik
+        # mahsulotlarga bog'lab qo'ydi va mijoz ketib qoldi. ad_id katalogga
+        # ulanmagan bo'lsa taxmin qilmaymiz — reel topilmagandagi kabi butun
+        # katalogni yuboramiz, mijoz o'zi tanlaydi.
+        album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": False,
+            "allow_group": False,
+            "detail": "ad_catalog_sent",
+            "source": attachment,
+            "source_description": "Mijoz reklama orqali yozdi, reklama katalogdagi mahsulotga ulanmagan.",
+            "matches": [],
+            "group_matches": [],
+            "near_matches": [],
+            "album": album,
+            "instruction_uz": MEDIA_MATCH_AD_CATALOG_INSTRUCTION,
         })
 
     own_post = social_post_for_media(attachment)
@@ -3289,6 +3365,9 @@ def ai_reply(conversation):
     if tool_results:
         result["tool_results"] = tool_results
         result = apply_media_match_safeguard(conversation, result, tool_results)
+    # Bu qorovul tool ishlamagan navbatda ham kerak — aynan o'shanda AI hech
+    # narsa yubormay turib "yubordim" deb yozib qo'ygan edi.
+    result = apply_sent_photo_claim_safeguard(conversation, result, tool_results)
     if cyrillic_mode and result.get("reply"):
         result["reply_latin"] = result["reply"]
         result["reply"] = latin_to_cyrillic(result["reply"])
