@@ -262,20 +262,25 @@ def instagram_sender_action(recipient_id, action, account_id=None):
     return response.json()
 
 
+# Haqiqiy funksiyalar import paytida eslab qolinadi. Test ularni almashtirgan
+# bo'lsa so'rov tarmoqqa emas, o'sha testning o'rnini bosuvchisiga ketadi.
+REAL_HTTP_POST = requests.post
+REAL_HTTP_GET = requests.get
+
+
 def outbound_blocked():
     """Test paytida haqiqiy tashqi so'rov chiqmasin.
 
     Sotuv va operator guruhlariga test sotuvlari haqiqiy xabar bo'lib borib
     turgan edi. Endi test yugurtirilganda tarmoqqa umuman chiqilmaydi.
 
-    Test o'zi requests.post ni patch qilgan bo'lsa to'silmaydi — u so'rov
-    baribir tarmoqqa chiqmaydi, o'sha testning mockiga boradi, va to'sib
-    qo'ysak o'sha testlar ma'nosini yo'qotadi.
+    Test o'zi requests.post yoki requests.get ni almashtirgan bo'lsa
+    to'silmaydi — u so'rov baribir tarmoqqa chiqmaydi, va to'sib qo'ysak
+    o'sha testlar tekshirayotgan narsasini yo'qotadi.
     """
-    from unittest.mock import Mock
     if not getattr(settings, "TESTING", False):
         return False
-    return not isinstance(requests.post, Mock) and not isinstance(requests.get, Mock)
+    return requests.post is REAL_HTTP_POST and requests.get is REAL_HTTP_GET
 
 
 class BlockedResponse:
