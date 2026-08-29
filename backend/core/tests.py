@@ -4598,8 +4598,8 @@ class ApiTests(TestCase):
         # pochka narxi kiritilgani o'zgarmay saqlanadi
         self.assertEqual(Decimal(response.json()["cost_per_bunch"]), Decimal("24950.00"))
 
-    def test_exact_price_is_kept_next_to_rounded(self):
-        # 24 950 / 25 = 998 -> yaxlitlangani 1 000, aniq hisob 998 saqlanadi
+    def test_the_stored_price_matches_the_exact_one(self):
+        # 24 950 / 25 = 998 — yaxlitlash yo'q, ikkala maydon ham 998
         response = self.client.post("/api/stock-batches/", {
             "batch_number": "EXACT-1", "variant": self.batch.variant_id, "height_cm": 50,
             "stems_per_bunch": 25, "received_stems": 100,
@@ -4607,16 +4607,16 @@ class ApiTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 201, response.json())
         data = response.json()
-        self.assertEqual(Decimal(data["cost_per_stem"]), Decimal("1000.00"))
+        self.assertEqual(Decimal(data["cost_per_stem"]), Decimal("998.00"))
         self.assertEqual(Decimal(data["cost_per_stem_exact"]), Decimal("998.0000"))
-        self.assertEqual(Decimal(data["sale_price_per_stem"]), Decimal("1100.00"))
+        self.assertEqual(Decimal(data["sale_price_per_stem"]), Decimal("1060.00"))
         self.assertEqual(Decimal(data["sale_price_per_stem_exact"]), Decimal("1060.0000"))
         rounding = data["rounding"]["cost"]
-        self.assertEqual(Decimal(rounding["per_stem_diff"]), Decimal("2.0000"))
+        self.assertEqual(Decimal(rounding["per_stem_diff"]), Decimal("0.0000"))
         self.assertEqual(Decimal(rounding["total_exact"]), Decimal("99800.00"))
-        self.assertEqual(Decimal(rounding["total_rounded"]), Decimal("100000.00"))
-        self.assertEqual(Decimal(rounding["total_diff"]), Decimal("200.00"))
-        self.assertTrue(rounding["is_rounded"])
+        self.assertEqual(Decimal(rounding["total_rounded"]), Decimal("99800.00"))
+        self.assertEqual(Decimal(rounding["total_diff"]), Decimal("0.00"))
+        self.assertFalse(rounding["is_rounded"])
 
     def test_exact_price_equals_rounded_when_it_divides(self):
         response = self.client.post("/api/stock-batches/", {
