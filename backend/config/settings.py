@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 import dj_database_url
 from celery.schedules import crontab
@@ -110,6 +111,11 @@ INSTAGRAM_VERIFY_TOKEN = os.getenv("INSTAGRAM_VERIFY_TOKEN", "change-me")
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0")
 INSTAGRAM_ACCOUNT_ACCESS_TOKENS = [value.strip() for value in os.getenv("INSTAGRAM_ACCOUNT_ACCESS_TOKENS", "").split(",") if value.strip()]
 TELEGRAM_GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "")
+# Test paytida hech qanday tashqi xabar ketmasligi kerak. Sotuv guruhiga
+# yuboriladigan xabar tokenni .env dan oladi, shuning uchun test yugurtirilganda
+# haqiqiy Telegram guruhiga test sotuvlari tushib qolardi.
+TESTING = "test" in sys.argv
+
 SALE_TELEGRAM_BOT_TOKEN = os.getenv("SALE_TELEGRAM_BOT_TOKEN", "")
 SALE_TELEGRAM_GROUP_CHAT_ID = os.getenv("SALE_TELEGRAM_GROUP_CHAT_ID", "")
 CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
