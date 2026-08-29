@@ -11010,7 +11010,7 @@ class MixedPaymentWithTerminalTests(TestCase):
         self._sell({"quantity": 1, "sale_price": "200000.00", "payment_type": "mixed",
                     "cash_amount": "100000.00", "terminal_amount": "100000.00"})
         history = self.item.history.get(action="sold")
-        rows = self.client.get("/api/catalog-history/").data
+        rows = self.client.get("/api/catalog/sales/").data
         rows = rows.get("results", rows)
         row = next(item for item in rows if item["id"] == history.id)
         self.assertEqual(set(row["payment_breakdown"]), {"cash", "card", "terminal"})

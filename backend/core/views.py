@@ -3554,13 +3554,14 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
                                    f"Sotuv: {received}, dastafka: {delivery_amount}",
             }, status=status.HTTP_400_BAD_REQUEST)
         if serializer.validated_data.get("payment_type") == "mixed":
-            # aralash to'lovda naqd va karta yig'indisi mijozdan olinadigan
-            # summaga teng bo'lishi kerak — dastafka ham shu summaning ichida
-            given = (serializer.validated_data["cash_amount"] + serializer.validated_data["card_amount"]).quantize(Decimal("0.01"))
+            # aralash to'lovda naqd, karta va terminal yig'indisi mijozdan
+            # olinadigan summaga teng bo'lishi kerak — dastafka shu summa ichida
+            given = sum((serializer.validated_data.get(f"{key}_amount") or Decimal("0")
+                         for key in ["cash", "card", "terminal"]), Decimal("0")).quantize(Decimal("0.01"))
             if given != received:
                 extra = f" (shundan {delivery_amount} dastafka)" if delivery_amount else ""
                 return Response({
-                    "detail": f"Naqd va karta yig‘indisi olinadigan summaga teng emas. "
+                    "detail": f"Naqd, karta va terminal yig‘indisi olinadigan summaga teng emas. "
                               f"Olinadi: {received}{extra}, kiritilgan: {given}",
                 }, status=status.HTTP_400_BAD_REQUEST)
         try:
