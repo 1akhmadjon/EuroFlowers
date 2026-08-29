@@ -267,7 +267,7 @@ def telegram_file_url(file_id):
 
 def telegram_api(method, payload):
     token = telegram_bot_token()
-    if not token or settings.TESTING:
+    if not token:
         return {"mocked": True}
     response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=20)
     response.raise_for_status()
@@ -277,8 +277,6 @@ def telegram_api(method, payload):
 def telegram_api_with_token(token, method, payload):
     if not token:
         return {"skipped": True, "reason": "token yo‘q"}
-    if settings.TESTING:
-        return {"ok": True, "mocked": True, "result": {"message_id": 1}}
     response = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=30)
     response.raise_for_status()
     return response.json()
@@ -299,8 +297,6 @@ def telegram_chat_id_variants(chat_id):
 def telegram_api_with_token_and_chat_fallback(token, method, payload, files=None):
     if not token:
         return {"skipped": True, "reason": "token yo‘q"}
-    if settings.TESTING:
-        return {"ok": True, "mocked": True, "result": {"message_id": 1}}
     variants = telegram_chat_id_variants(payload.get("chat_id"))
     if not variants:
         return {"skipped": True, "reason": "chat_id yo‘q"}

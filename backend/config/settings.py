@@ -131,6 +131,21 @@ AI_OPERATOR_HANDOFF_THREAD_ID = os.getenv("AI_OPERATOR_HANDOFF_THREAD_ID", "")
 # Eslatma guruhi. Oddiy guruh superguruhga o'tsa id o'zgaradi — yangi id
 # IntegrationSettings.extra ga eslab qolinadi va shu qiymatdan ustun turadi.
 AI_RECALL_GROUP_ID = os.getenv("AI_RECALL_GROUP_ID", "-5385608916")
+
+if TESTING:
+    # Test yugurtirilganda tashqi guruhlarga hech narsa ketmasin. Avval sotuv
+    # guruhiga har bir test sotuvi haqiqiy xabar bo'lib borardi. Tokensiz
+    # yuborish yo'llari o'zi to'xtaydi. Guruh kerak bo'lgan testlar qiymatni
+    # override_settings bilan o'zi beradi.
+    SALE_TELEGRAM_BOT_TOKEN = ""
+    SALE_TELEGRAM_GROUP_CHAT_ID = ""
+    TELEGRAM_GROUP_CHAT_ID = ""
+    BACKUP_BOT_TOKEN = ""
+    BACKUP_TELEGRAM_GROUP_ID = ""
+    AI_OPERATOR_HANDOFF_BOT_TOKEN = ""
+    AI_OPERATOR_HANDOFF_GROUP_ID = ""
+    AI_RECALL_GROUP_ID = ""
+    INSTAGRAM_ACCESS_TOKEN = ""
 # Mijoz manzilni xaritada belgilaydigan sahifa. {lead_id} va {token} o'rniga
 # leadning raqami va maxfiy kodi qo'yiladi. Sozlanmasa AI havola bermaydi.
 DELIVERY_LOCATION_URL = os.getenv("DELIVERY_LOCATION_URL", "")
