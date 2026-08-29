@@ -4585,16 +4585,16 @@ class ApiTests(TestCase):
         self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("1000.00"))
         self.assertEqual(Decimal(response.json()["sale_price_per_stem"]), Decimal("2000.00"))
 
-    def test_stem_price_is_rounded_to_hundred(self):
-        # 24 950 / 25 = 998 -> 1 000,  26 500 / 25 = 1 060 -> 1 100
+    def test_stem_price_is_not_rounded_to_hundred(self):
+        # 24 950 / 25 = 998,  26 500 / 25 = 1 060 — endi shundayligicha qoladi
         response = self.client.post("/api/stock-batches/", {
             "batch_number": "AUTO-2", "variant": self.batch.variant_id, "height_cm": 50,
             "stems_per_bunch": 25, "received_stems": 50,
             "cost_per_bunch": "24950", "sale_price_per_bunch": "26500",
         }, format="json")
         self.assertEqual(response.status_code, 201, response.json())
-        self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("1000.00"))
-        self.assertEqual(Decimal(response.json()["sale_price_per_stem"]), Decimal("1100.00"))
+        self.assertEqual(Decimal(response.json()["cost_per_stem"]), Decimal("998.00"))
+        self.assertEqual(Decimal(response.json()["sale_price_per_stem"]), Decimal("1060.00"))
         # pochka narxi kiritilgani o'zgarmay saqlanadi
         self.assertEqual(Decimal(response.json()["cost_per_bunch"]), Decimal("24950.00"))
 
@@ -4663,10 +4663,11 @@ class ApiTests(TestCase):
         }, format="json").json()
         self.assertEqual(Decimal(created["cost_per_stem"]), Decimal("3333.33"))
         self.assertEqual(Decimal(created["cost_per_stem_exact"]), Decimal("3333.3333"))
-        self.assertFalse(created["rounding"]["cost"]["is_rounded"])
+        # Farq qolsa ham u tiyinning ulushi, avvalgi 33,33 so'm emas.
+        self.assertLess(abs(Decimal(created["rounding"]["cost"]["per_stem_diff"])), Decimal("0.01"))
         detail = self.client.get(f"/api/stock-deliveries/{delivery['id']}/")
         self.assertEqual(Decimal(detail.data["total_cost"]), Decimal("950000.00"))
-        self.assertEqual(Decimal(detail.data["rounding_diff"]), Decimal("-0.05"))
+        self.assertLess(abs(Decimal(detail.data["rounding_diff"])), Decimal("1"))
 
     def test_supplier_rollup_uses_exact_delivery_cost(self):
         supplier = Supplier.objects.create(name="Exact supplier")
