@@ -10965,6 +10965,11 @@ class MixedPaymentWithTerminalTests(TestCase):
     """Aralash to'lov: naqd, karta va terminal."""
 
     def setUp(self):
+        from unittest.mock import patch
+        # Sotuv xabari haqiqiy Telegram guruhiga ketmasin.
+        group = patch("core.views.notify_sale_to_group", return_value=None)
+        group.start()
+        self.addCleanup(group.stop)
         self.user = User.objects.create_user("mixed-admin", password="password", is_superuser=True, is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(self.user)
