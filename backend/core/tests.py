@@ -11772,7 +11772,7 @@ class FloristStockIsNotDeductedTwiceTests(TestCase):
         serializer = CatalogItemSerializer(data={
             "name_uz": "Custom buket", "arrangement_type": "bouquet", "catalog_kind": "custom",
             "volume": "small", "florist": self.florist.id, "price": "250000.00",
-            "quantity_total": 1,
+            "quantity_total": 1, "discount_reason": "Doimiy mijozga chegirma",
             "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
         }, context={"request": SimpleNamespace(user=self.user)})
         self.assertTrue(serializer.is_valid(), serializer.errors)
@@ -11784,7 +11784,7 @@ class FloristStockIsNotDeductedTwiceTests(TestCase):
         self.assertEqual(self.batch.remaining_stems, 90)
 
     def test_the_florist_balance_goes_down_instead(self):
-        balance = FloristStockBalance.objects.get(florist=self.florist, stock_batch=self.batch)
+        balance = FloristStockBalance.objects.get(florist=self.florist, batch=self.batch)
         self.assertEqual(balance.remaining_stems, 10)
         self._make_custom()
         balance.refresh_from_db()
