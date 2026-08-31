@@ -694,6 +694,26 @@ def delete_florist_stock_issue(issue, user=None):
         issue.delete()
 
 
+def florist_holds_all_rows(florist, rows, quantity):
+    """Florist qo'lida shu tarkibning hammasi yetarli miqdorda turibdimi."""
+    for row in rows:
+        balance = FloristStockBalance.objects.filter(florist=florist, batch=row.stock_batch).first()
+        if not balance or balance.remaining_stems < row.quantity_stems * quantity:
+            return False
+    return True
+
+
+def catalog_stock_came_from_the_warehouse(item):
+    """Katalog guli skladdan olinganmi — florist qo'lidan emas.
+
+    Qaytarish kamaytirish bilan bir xil yo'ldan borishi kerak, aks holda gul
+    boshqa joyga qaytib qolardi. Sklad harakati bazada qolgani uchun u eng
+    ishonchli belgi.
+    """
+    return StockMovement.objects.filter(
+        reference_type="catalog_item", reference_id=item.id, movement_type="out").exists()
+
+
 def consume_florist_stock(florist, rows, quantity, reason="", user=None):
     """Katalog yasalganda floristning qo'lidagi guldan minus qiladi."""
     shortages = []
@@ -1454,10 +1474,14 @@ def deduct_catalog_inventory(item, user, quantity=None):
         material_shortages = [row for row in material_rows if row.packaging.quantity < row.quantity * quantity]
         if material_shortages:
             raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + ", ".join(row.packaging.name_uz for row in material_shortages))
-        # Gul floristga berilganda skladdan allaqachon chiqqan. Custom katalog
-        # ham floristning qo'lidagi qoldiqdan olinadi — aks holda o'sha gul
-        # skladdan ikkinchi marta ayiriladi va florist qoldig'i kamaymaydi.
-        if item.florist_id and rows:
+        # Gul floristga berilgan bo'lsa skladdan allaqachon chiqqan — custom
+        # katalog ham o'sha qo'ldagi qoldiqdan olinadi, aks holda bir gul
+        # skladdan ikkinchi marta ayirilardi. Florist tanlangan, lekin unga gul
+        # berilmagan bo'lsa gul to'g'ridan-to'g'ri skladdan ketadi: operator
+        # buketni chiqim yozmasdan ham yasashi mumkin.
+        use_florist_stock = bool(item.florist_id and rows) and (
+            item.catalog_kind != "custom" or florist_holds_all_rows(item.florist, rows, quantity))
+        if use_florist_stock:
             consume_florist_stock(item.florist, rows, quantity, user=user)
             item.quantity_stock_deducted += quantity
             item.stock_deducted_at = timezone.now()
@@ -1526,9 +1550,9 @@ def restore_catalog_inventory(item, user, quantity=None, restore_flowers=True):
         material_rows = list(item.materials.select_related("packaging").select_for_update())
         if not restore_flowers:
             rows = []
-        # Qaytarish kamaytirish bilan bir xil yo'ldan borishi shart, aks holda
-        # gul boshqa joyga qaytib qolardi.
-        if item.florist_id and rows:
+        # Qaytarish kamaytirish bilan bir xil yo'ldan boradi: gul skladdan
+        # olingan bo'lsa skladga, florist qo'lidan olingan bo'lsa uning qo'liga.
+        if item.florist_id and rows and not catalog_stock_came_from_the_warehouse(item):
             restore_florist_stock(item.florist, rows, quantity)
             rows = []
         for row in rows:

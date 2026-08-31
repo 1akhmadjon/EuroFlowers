@@ -11783,6 +11783,23 @@ class FloristStockIsNotDeductedTwiceTests(TestCase):
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.remaining_stems, 90)
 
+    def test_a_florist_without_issued_stock_still_uses_the_warehouse(self):
+        """Operator chiqim yozmasdan ham buket yasashi mumkin."""
+        other = FloristProfile.objects.create(
+            user=User.objects.create_user("florist-empty", password="p"), staff_type="florist")
+        FloristVolumeRate.objects.create(florist=other, arrangement_type="bouquet",
+                                         volume="small", default_stems=10, florist_fee=70000)
+        serializer = CatalogItemSerializer(data={
+            "name_uz": "Custom buket 2", "arrangement_type": "bouquet", "catalog_kind": "custom",
+            "volume": "small", "florist": other.id, "price": "250000.00",
+            "quantity_total": 1, "discount_reason": "Doimiy mijozga chegirma",
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
+        }, context={"request": SimpleNamespace(user=self.user)})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 80)
+
     def test_the_florist_balance_goes_down_instead(self):
         balance = FloristStockBalance.objects.get(florist=self.florist, batch=self.batch)
         self.assertEqual(balance.remaining_stems, 10)
