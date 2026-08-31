@@ -1185,6 +1185,20 @@ def conversation_album_items(conversation):
     return rows
 
 
+def album_catalog_item(catalog_id):
+    """Albomdagi qatorning mahsuloti.
+
+    is_active talab qilinmaydi: albom mijozga NIMA taklif qilinganining yozuvi.
+    Mijoz tanlagan gul o'shandan keyin sotilib ketgan bo'lishi mumkin, lekin
+    operatorga aynan o'sha gulning nomi va rasmi kerak. Real suhbat 1976 da
+    mahsulot sotilgani uchun albomdan topilmadi va nom bo'yicha butunlay
+    boshqa gul yozilib qoldi.
+    """
+    if not catalog_id:
+        return None
+    return AICatalogItem.objects.filter(id=catalog_id).first()
+
+
 def album_item_by_name(conversation, name):
     """Albomdagi mahsulotni nomi bo'yicha topadi — faqat aynan mos kelsa."""
     key = compact_match_text(name)
@@ -1192,19 +1206,32 @@ def album_item_by_name(conversation, name):
         return None
     for row in conversation_album_items(conversation):
         if compact_match_text(row.get("name")) == key:
-            return AICatalogItem.objects.filter(id=row.get("catalog_id"), is_active=True).first()
+            return album_catalog_item(row.get("catalog_id"))
     return None
 
 
-def album_item_by_price(conversation, price):
-    """Albomdan aynan shu narxdagi mahsulot. Bittadan ko'p bo'lsa tanlanmaydi."""
+def album_item_by_price(conversation, price, name=""):
+    """Albomdan aynan shu narxdagi mahsulot.
+
+    Shu narxda bir nechta mahsulot bo'lsa nomi bo'yicha ajratiladi; u ham
+    ajratmasa hech narsa tanlanmaydi — taxmin qilishdan yozmaslik yaxshi.
+    """
     if price is None:
         return None
-    matched = [row for row in conversation_album_items(conversation)
-               if row.get("price") and Decimal(str(row["price"])) == Decimal(str(price))]
-    if len(matched) != 1:
+    try:
+        asked = Decimal(str(price))
+    except (TypeError, ValueError, ArithmeticError):
         return None
-    return AICatalogItem.objects.filter(id=matched[0].get("catalog_id"), is_active=True).first()
+    matched = [row for row in conversation_album_items(conversation)
+               if row.get("price") and Decimal(str(row["price"])) == asked]
+    if len(matched) == 1:
+        return album_catalog_item(matched[0].get("catalog_id"))
+    key = compact_match_text(name)
+    if key:
+        named = [row for row in matched if compact_match_text(row.get("name")) == key]
+        if len(named) == 1:
+            return album_catalog_item(named[0].get("catalog_id"))
+    return None
 
 
 def ai_catalog_lead_rows(arguments, conversation=None, estimated_price=None):
@@ -1225,6 +1252,8 @@ def ai_catalog_lead_rows(arguments, conversation=None, estimated_price=None):
         item = AICatalogItem.objects.filter(id=row.get("catalog_id"), is_active=True).first() if row.get("catalog_id") else None
         if not item:
             item = album_item_by_name(conversation, row.get("catalog_name"))
+        if not item and estimated_price not in (None, ""):
+            item = album_item_by_price(conversation, estimated_price, row.get("catalog_name") or "")
         if not item:
             item = _catalog_item_for_ai(row.get("catalog_name"))
         rows.append({
@@ -1255,7 +1284,7 @@ def correct_lead_row_by_price(rows, conversation, estimated_price):
         return rows
     if row.get("price") and Decimal(row["price"]) == asked:
         return rows
-    item = album_item_by_price(conversation, asked)
+    item = album_item_by_price(conversation, asked, row.get("catalog_name") or "")
     if not item or item.id == row.get("ai_catalog_item"):
         return rows
     print("LEAD_CATALOG_CORRECTED_BY_PRICE from=%s to=%s price=%s" % (row.get("ai_catalog_item"), item.id, asked), flush=True)
@@ -1630,23 +1659,7 @@ def remember_shared_post_permalink(attachment):
     url = (attachment or {}).get("url") or ""
     if "instagram.com/" not in url:
         return
-    keys = shared_post_memory_keys(attachment)
-    if not keys:
-        return
-    integration, extra = integration_extra()
-    table = dict(extra.get(SHARED_POST_MEMORY_KEY) or {})
-    changed = False
-    for key in keys:
-        if table.get(key) != url:
-            table[key] = url
-            changed = True
-    if not changed:
-        return
-    if len(table) > SHARED_POST_MEMORY_LIMIT:
-        table = dict(list(table.items())[-SHARED_POST_MEMORY_LIMIT:])
-    extra[SHARED_POST_MEMORY_KEY] = table
-    integration.extra = extra
-    integration.save(update_fields=["extra", "updated_at"])
+    remember_shared_post_keys(attachment, url)
 
 
 def shared_post_memory_keys(attachment):
@@ -1745,7 +1758,30 @@ def own_post_permalink_for_shared_media(attachment):
         permalink = (index.get("by_caption") or {}).get(caption_key) or ""
     if permalink:
         print(f"SHARED_POST_RESOLVED media={media_id or '-'} permalink={permalink}", flush=True)
+        # CDN ulashuvining media raqami ham eslab qolinadi: shu postning
+        # izohsiz kelgan ko'rinishi keyin faqat shu raqam bilan topiladi.
+        remember_shared_post_keys(attachment, permalink)
     return permalink or ""
+
+
+def remember_shared_post_keys(attachment, permalink):
+    keys = shared_post_memory_keys(attachment)
+    if not keys or not permalink:
+        return
+    integration, extra = integration_extra()
+    table = dict(extra.get(SHARED_POST_MEMORY_KEY) or {})
+    changed = False
+    for key in keys:
+        if table.get(key) != permalink:
+            table[key] = permalink
+            changed = True
+    if not changed:
+        return
+    if len(table) > SHARED_POST_MEMORY_LIMIT:
+        table = dict(list(table.items())[-SHARED_POST_MEMORY_LIMIT:])
+    extra[SHARED_POST_MEMORY_KEY] = table
+    integration.extra = extra
+    integration.save(update_fields=["extra", "updated_at"])
 
 
 def resolved_shared_media_attachment(attachment):

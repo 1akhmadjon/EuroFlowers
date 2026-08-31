@@ -11684,3 +11684,57 @@ class SharedCaptionIsKeptFromTheWebhookTests(TestCase):
         rows = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
         self.assertEqual(rows[0]["caption"], "199.000 so'mga")
         self.assertEqual(rows[0]["media_id"], "17889927054234439")
+
+
+class ASoldAlbumItemStillNamesTheRightFlowerTests(TestCase):
+    """Mijoz tanlagan gul sotilib ketgan bo'lsa ham lead unga yoziladi.
+
+    Real suhbat 1976 da aynan shu bo'ldi: mijoz tanlagan 199 000 lik buket
+    keyin sotildi, albomdan topilmadi va nom qidiruvi 1 000 000 lik savatni
+    yozib qo'ydi. Albom — mijozga NIMA taklif qilinganining yozuvi, shuning
+    uchun undan qidirganda faollik talab qilinmaydi.
+    """
+
+    def setUp(self):
+        self.sold = AICatalogItem.objects.create(
+            name="Buket Jumila Va Oq Atir Guldan Yasalgan Kompazitsia", arrangement_type="bouquet",
+            price=199000, quantity=1, image_url="https://cdn.example.com/sold.jpg", is_active=False)
+        self.other = AICatalogItem.objects.create(
+            name="Savat Jumila Oq Atir Guldan Yasalgan Kompazitsia", arrangement_type="basket",
+            price=1000000, quantity=1, image_url="https://cdn.example.com/other.jpg")
+        customer = Customer.objects.create(instagram_user_id="ig-sold", name="Behruz", phone="+998938386608")
+        self.conversation = Conversation.objects.create(customer=customer)
+        self.conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {
+            "ok": True, "whole_catalog": True, "items": [
+                {"position": 16, "catalog_id": self.other.id, "name": self.other.name, "price": "1000000.00", "delivered": True},
+                {"position": 26, "catalog_id": self.sold.id, "name": self.sold.name, "price": "199000.00", "delivered": True},
+            ]}})
+
+    def test_the_sold_item_is_still_resolved_from_the_album(self):
+        rows = services.ai_catalog_lead_rows(
+            {"catalog_items": [{"catalog_name": self.sold.name, "quantity": 1}]},
+            self.conversation, estimated_price=199000)
+        self.assertEqual(rows[0]["ai_catalog_item"], self.sold.id)
+        self.assertEqual(rows[0]["price"], "199000.00")
+
+    def test_the_price_picks_the_right_one_among_several_at_that_price(self):
+        twin = AICatalogItem.objects.create(
+            name="Qizil Atir Guldan Kompazitsia", arrangement_type="basket", price=199000,
+            quantity=1, image_url="https://cdn.example.com/twin.jpg")
+        self.conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {
+            "ok": True, "items": [{"position": 12, "catalog_id": twin.id, "name": twin.name,
+                                   "price": "199000.00", "delivered": True}]}})
+        rows = services.ai_catalog_lead_rows(
+            {"catalog_id": None, "catalog_items": [{"catalog_id": self.other.id, "catalog_name": self.sold.name, "quantity": 1}]},
+            self.conversation, estimated_price=199000)
+        self.assertEqual(rows[0]["ai_catalog_item"], self.sold.id)
+
+    def test_a_cdn_share_media_id_is_remembered_after_it_resolves(self):
+        from unittest.mock import patch
+        permalink = "https://www.instagram.com/reel/DIjgRABNbSf/"
+        attachment = {"kind": "post", "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=555",
+                      "caption": "Aksiya 199.000", "media_id": "555"}
+        with patch("core.services.own_media_index", return_value={"by_media": {}, "by_caption": {"aksiya 199.000": permalink}}):
+            self.assertEqual(services.own_post_permalink_for_shared_media(attachment), permalink)
+        # Izohsiz kelgan ko'rinishi endi faqat media raqami bilan topiladi.
+        self.assertEqual(services.remembered_shared_post_permalink({"media_id": "555"}), permalink)
