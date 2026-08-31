@@ -159,6 +159,32 @@ Jumila pushti atirguldan 51 dona katta buket bo'yicha operatorlarimiz sizga tez
 orada yozib yuborishadi.\"""",
     ),
     (
+        """  2. business.operator_telegram dagi Telegram akkauntga yo'naltir va aynan
+     o'sha so'raganingiz haqida aniq ma'lumot berishlarini ayt.
+
+Namuna:
+"Ha, xohlaganingizdek yasab beramiz.
+Jumila pushti atirguldan 51 dona katta buket bo'yicha @euroflowerspremium ga
+yozing — operatorlarimiz shu haqida sizga aniq ma'lumot berishadi.\"""",
+        """  2. business.operator_telegram_text matnini aynan yoz — operatorlarimiz
+     aynan o'sha so'raganingiz haqida aniq ma'lumot berishadi.
+
+Namuna:
+"Ha, xohlaganingizdek yasab beramiz.
+Jumila pushti atirguldan 51 dona katta buket bo'yicha operatorlarimiz sizga tez
+orada yozib yuborishadi.\"""",
+    ),
+    (
+        """To'g'ri javob:
+"Ha, xohlaganingizdek yasab beramiz.
+Yuborgan rasmingizdagi guldan buket bo'yicha @euroflowerspremium ga yozing —
+operatorlarimiz shu haqida sizga aniq ma'lumot berishadi.\"""",
+        """To'g'ri javob:
+"Ha, xohlaganingizdek yasab beramiz.
+Yuborgan rasmingizdagi guldan buket bo'yicha operatorlarimiz sizga tez orada
+yozib yuborishadi.\"""",
+    ),
+    (
         """To'g'ri javob:
 "Ha, xohlaganingizdek yasab beramiz.
 Yuborgan rasmingizdagi guldan buket bo'yicha @euroflowerspremium Telegrami ga yozing —
@@ -246,13 +272,10 @@ def apply_prompt(apps, schema_editor):
     if prompt == (row.system_prompt or ""):
         return
     # Handle promptda qolib ketmasin: qolsa model uni yana javobga ko'chiradi.
-    leftovers = []
+    # Handle promptda qolib ketmasin: qolsa model uni yana javobga ko'chiradi.
     for needle in ["@euroflowerspremium", "business.operator_telegram ", "business.operator_telegram\n"]:
         at = prompt.find(needle)
-        while at >= 0:
-            leftovers.append("--- %r ---\n%s" % (needle, prompt[max(0, at - 260):at + 140]))
-            at = prompt.find(needle, at + 1)
-    assert not leftovers, "PROMPTDA QOLDI:\n" + "\n".join(leftovers)
+        assert at < 0, "promptda %r qoldi:\n%s" % (needle, prompt[max(0, at - 260):at + 140])
     row.system_prompt = prompt
     row.save(update_fields=["system_prompt"])
 
