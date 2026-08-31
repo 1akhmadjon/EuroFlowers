@@ -375,7 +375,11 @@ UZ_CYRIL_LETTERS = re.compile(r"[ўқғҳЎҚҒҲ]")
 # uchun bitta so'zdan iborat xabarda ham tilni aniqlashga yetadi: "бермокчиман",
 # "келади", "яхшимисиз", "билмайман".
 UZ_CYRIL_SUFFIXES = re.compile(r"мокчи|моқчи|япти|вотти|вотки|моқда|мисиз|сизми|сангиз|ганман|гандим|[а-я]йман\b|[а-я]аман\b|лади\b|майди\b", re.IGNORECASE)
-UZ_CYRIL_MARKERS = re.compile(r"\b(гул|гулла|гуллар|бор|борми|бормиди|булади|бўлади|керак|кере|канака|қанақа|нечпул|неч|манзил|каерда|қаерда|ассалом|ассалому|алекум|алайкум|раҳмат|рахмат|сават|яса|ясаймиз|ясанг|ясаб|олиб|беринг|берин|бервор|сизда|бизда|сиз|биз|ишлайсизми|нархи|дона|сўм|сум|киммат|қиммат|арзон|яхши|ҳам|хам|учун|билан|мумкинми|деган|қилиб|килиб|хохлайман|хохласангиз|менга|сизга|уйга|эди|экан|бўлса|булса|нима|нечта|качон|қачон|канча|қанча|кани|қани|нечада|таер|тайёр|обкетаман|олсам|бўлса|бўлсин|булсин)\b", re.IGNORECASE)
+# "сум" va "сўм" ataylab bu ro'yxatda YO'Q: valyuta nomi ikki tilda ham bir xil
+# yoziladi. Real suhbat 2243 da "мне нужен букет ... за 199.000 сум" degan sof
+# ruscha jumla shu so'z sabab o'zbekcha deb hisoblandi va javob o'zbek kirilida
+# ketdi. Shu sababdan "дона" ham olib tashlandi.
+UZ_CYRIL_MARKERS = re.compile(r"\b(гул|гулла|гуллар|бор|борми|бормиди|булади|бўлади|керак|кере|канака|қанақа|нечпул|неч|манзил|каерда|қаерда|ассалом|ассалому|алекум|алайкум|раҳмат|рахмат|сават|яса|ясаймиз|ясанг|ясаб|олиб|беринг|берин|бервор|сизда|бизда|сиз|биз|ишлайсизми|нархи|киммат|қиммат|арзон|яхши|ҳам|хам|учун|билан|мумкинми|деган|қилиб|килиб|хохлайман|хохласангиз|менга|сизга|уйга|эди|экан|бўлса|булса|нима|нечта|качон|қачон|канча|қанча|кани|қани|нечада|таер|тайёр|обкетаман|олсам|бўлса|бўлсин|булсин)\b", re.IGNORECASE)
 
 
 def conversation_script(texts):
@@ -2357,6 +2361,53 @@ def operator_already_told_about_this_batch(conversation):
     return False
 
 
+def conversation_started_from_an_ad(conversation):
+    """Suhbat Instagram reklamasidan boshlanganmi."""
+    ads = ads_context_from_conversation(conversation)
+    return bool(ads.get("ad_id") or ads.get("post_id"))
+
+
+def catalog_ever_sent(conversation):
+    """Bu suhbatda katalog albomi biror marta yuborilganmi."""
+    return conversation.messages.filter(sender="system", metadata__has_key="catalog_album_result").exists()
+
+
+AD_OPENING_INSTRUCTION = (
+    "Mijoz reklama orqali yozdi va bu birinchi javob. Butun katalog albom qilib "
+    "ALLAQACHON yuborildi — sen faqat yozasan, boshqa albom yuborma. "
+    "Reklamadagi gulning nomini ham, narxini ham AYTMA: qaysi biri ekanini "
+    "bilmaysan. Qisqa ayt: hozirda bizda borlari shular, qaysi biri kerakligini "
+    "raqami bilan yozsin."
+)
+
+
+def apply_ad_opening_safeguard(conversation, result, tool_results):
+    """Reklamadan kelgan mijoz birinchi javobda katalogni ko'radi.
+
+    Real suhbat 2243: mijoz reklamadagi tugmani bosdi, Instagram "Можно
+    заказать?" degan auto-matnni yubordi va suhbatga reklama banneri qo'shildi.
+    Prompt modelga kind="ad" uchun rasm moslashtiruvchisini chaqirishni
+    taqiqlaydi, shuning uchun katalog yo'li umuman ishga tushmadi va mijozga
+    faqat "operatorlarimiz bog'lanadi" degan javob bordi.
+
+    Bannerdan gul nomini taxmin qilmaymiz — mijoz o'zi tanlaydi.
+    """
+    if conversation.messages.filter(sender="ai").exists():
+        return result
+    if not conversation_started_from_an_ad(conversation):
+        return result
+    if tool_results_sent_any_photo(tool_results) or catalog_ever_sent(conversation):
+        return result
+    album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
+    if not album.get("ok"):
+        return result
+    tool_results.append({"name": "send_catalog_album",
+                         "arguments": {"catalog_ids": [], "ad_opening": True},
+                         "output": dict(album, instruction_uz=AD_OPENING_INSTRUCTION)})
+    result["tool_results"] = tool_results
+    return result
+
+
 def apply_operator_promise_safeguard(conversation, result, tool_results):
     """"Operatorlarimiz yozib yuborishadi" deb yozib, guruhga xabar bermaslikni to'xtatadi.
 
@@ -3435,13 +3486,36 @@ def catalog_album_row(row, delivered, detail):
     }
 
 
+ALBUM_WHOLE_CATALOG_INSTRUCTION = (
+    "Butun katalog yuborildi — ichida har xil narxdagi mahsulotlar bor. "
+    "\"Shu summaga shular bor\" deb YOZMA: albomdagilarning narxi bir xil emas. "
+    "Shu mazmunda yoz: hozirda bizda borlari shular, hammasi shu. Mijoz "
+    "\"faqat shularmi\", \"yana bormi\", \"Только эти варианты?\" deb so'ragan "
+    "bo'lsa rostini ayt — bu bizdagi butun ro'yxat. Keyin qaysi biri "
+    "kerakligini raqami bilan so'ra."
+)
+
+ALBUM_PRICE_GROUP_INSTRUCTION = (
+    "Faqat tanlangan mahsulotlar yuborildi. Ularning narxi mijoz so'ragan "
+    "summaga mos, shuning uchun \"shu summaga shular bor\" deb yozish to'g'ri."
+)
+
+
 def ai_catalog_album_result(result):
     """AI ga rasm havolasi berilmaydi, u URL ni matn qilib yuborib qo'ymasligi uchun.
 
     Havolalar suhbat xabarining metadata sida qoladi va API orqali CRM chatiga chiqadi.
+
+    Javob matnining mazmuni ham shu yerda aytiladi. Real suhbat 2243: mijoz
+    "Только эти варианты?" deb so'radi, AI butun katalogni yubordi — harakat
+    to'g'ri edi — lekin matnda "Shu summaga shular bor" deb yozdi. Albomda esa
+    199 000 dan 1 000 000 gacha mahsulot bor edi.
     """
     trimmed = dict(result)
     trimmed["items"] = [{key: value for key, value in row.items() if key != "image_url"} for row in result.get("items", [])]
+    if result.get("ok"):
+        trimmed["instruction_uz"] = (ALBUM_WHOLE_CATALOG_INSTRUCTION if result.get("whole_catalog")
+                                     else ALBUM_PRICE_GROUP_INSTRUCTION)
     return trimmed
 
 
@@ -3646,6 +3720,15 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                                   "manzilini belgilab tanlash tugmasini bosishini so'ra. "
                                   "Bitta qator yetarli, boshqa savol qo'shma."}
     if name == "call_operator":
+        if (not conversation.messages.filter(sender="ai").exists()
+                and conversation_started_from_an_ad(conversation)
+                and not conversation.leads.exists()):
+            # Reklamadagi tugma bosilganda Instagram auto-matn yuboradi
+            # ("Можно заказать?", "Buyurtma bermoqchi edim"). Bu operator
+            # uchun hech qanday ma'lumot bermaydi — mijoz avval katalogni
+            # ko'rsin. Haqiqiy savol bo'lsa keyingi navbatda chaqiriladi.
+            return {"ok": False, "detail": "ad_opening_message",
+                    "instruction_uz": AD_OPENING_INSTRUCTION}
         if unlinked_shared_media_silence(conversation):
             # Tizimda yo'q reel operatorni chaqirish sababi emas. Operatorlar
             # guruhiga ketgan 77 xabarning ko'pi aynan shundan kelib chiqqan va
@@ -4017,6 +4100,8 @@ def ai_reply(conversation):
         result = apply_media_match_safeguard(conversation, result, tool_results)
     # Bu qorovul tool ishlamagan navbatda ham kerak — aynan o'shanda AI hech
     # narsa yubormay turib "yubordim" deb yozib qo'ygan edi.
+    # Reklamadan kelgan birinchi xabar: katalog har holda ko'rsatiladi.
+    result = apply_ad_opening_safeguard(conversation, result, tool_results)
     result = apply_sent_photo_claim_safeguard(conversation, result, tool_results)
     # Operator va'dasi ham xuddi shunday: tool ishlamagan navbatda ham tekshiriladi.
     result = apply_operator_promise_safeguard(conversation, result, tool_results)
@@ -4310,11 +4395,19 @@ def script_evidence(text):
     dalilsiz xabar ovoz bermaydi, faqat dalillilari sanaladi.
     """
     value = text or ""
-    if UZ_CYRIL_LETTERS.search(value) or UZ_CYRIL_MARKERS.search(value) or UZ_CYRIL_SUFFIXES.search(value):
+    # Bitta so'zga qarab qaror qilinmaydi — ikki tomonning dalillari sanaladi.
+    # Real suhbat 2243: "Здравствуйте, мне нужен букет ... за 199.000 сум" da
+    # to'rtta ruscha belgi va bitta o'zbekcha belgi bor edi, lekin o'zbekchasi
+    # birinchi tekshirilgani uchun darrov g'olib bo'lib qolardi.
+    if UZ_CYRIL_LETTERS.search(value):
         return "uz_cyril"
-    if RU_MARKERS.search(value):
+    uz_score = len(UZ_CYRIL_MARKERS.findall(value)) + len(UZ_CYRIL_SUFFIXES.findall(value))
+    ru_score = len(RU_MARKERS.findall(value))
+    if uz_score > ru_score:
+        return "uz_cyril"
+    if ru_score > 0:
         return "ru"
-    return ""
+    return "uz_cyril" if uz_score else ""
 
 
 def conversation_reply_script(conversation):
@@ -4328,10 +4421,13 @@ def conversation_reply_script(conversation):
     texts = list(conversation.messages.filter(sender="customer")
                  .order_by("-created_at", "-id").values_list("text", flat=True)[:8])
     scripts = [script_evidence(text) for text in texts]
-    if "uz_cyril" in scripts:
-        return "uz_cyril"
-    if "ru" in scripts:
-        return "ru"
+    # Ovozlar sanaladi. Ilgari bitta o'zbekcha dalil butun suhbatni o'zbekcha
+    # qilib qo'yardi va real suhbat 2243 da sof ruscha suhbat o'zbek kirilida
+    # javob oldi. Teng bo'lsa o'zbekcha qoladi — do'konning asosiy tili shu.
+    uz_votes = scripts.count("uz_cyril")
+    ru_votes = scripts.count("ru")
+    if uz_votes or ru_votes:
+        return "uz_cyril" if uz_votes >= ru_votes else "ru"
     return conversation_script(texts[:1])
 
 

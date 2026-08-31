@@ -1454,7 +1454,10 @@ def deduct_catalog_inventory(item, user, quantity=None):
         material_shortages = [row for row in material_rows if row.packaging.quantity < row.quantity * quantity]
         if material_shortages:
             raise ValueError("Katalog uchun yetarli qoldiq yo‘q: " + ", ".join(row.packaging.name_uz for row in material_shortages))
-        if item.florist_id and item.catalog_kind != "custom" and rows:
+        # Gul floristga berilganda skladdan allaqachon chiqqan. Custom katalog
+        # ham floristning qo'lidagi qoldiqdan olinadi — aks holda o'sha gul
+        # skladdan ikkinchi marta ayiriladi va florist qoldig'i kamaymaydi.
+        if item.florist_id and rows:
             consume_florist_stock(item.florist, rows, quantity, user=user)
             item.quantity_stock_deducted += quantity
             item.stock_deducted_at = timezone.now()
@@ -1523,7 +1526,9 @@ def restore_catalog_inventory(item, user, quantity=None, restore_flowers=True):
         material_rows = list(item.materials.select_related("packaging").select_for_update())
         if not restore_flowers:
             rows = []
-        if item.florist_id and item.catalog_kind != "custom" and rows:
+        # Qaytarish kamaytirish bilan bir xil yo'ldan borishi shart, aks holda
+        # gul boshqa joyga qaytib qolardi.
+        if item.florist_id and rows:
             restore_florist_stock(item.florist, rows, quantity)
             rows = []
         for row in rows:

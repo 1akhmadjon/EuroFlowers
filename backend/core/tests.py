@@ -1160,7 +1160,8 @@ class BusinessRulesTests(TestCase):
         with patch("core.services.ai_follow_up_decision", return_value={"send_follow_up": True, "message": "Budjetingiz qancha edi?", "reason": "stalled"}), patch("core.tasks.instagram_send", return_value={"ok": True}) as send_mock:
             result = process_conversation_follow_up(conversation.id, ai_message.id)
         self.assertIsNotNone(result)
-        send_mock.assert_called_once_with("ig-follow-up-send", "Budjetingiz qancha edi?")
+        # Uchinchi parametr — javob qaysi akkauntdan ketishi. Bu suhbatda yo'q.
+        send_mock.assert_called_once_with("ig-follow-up-send", "Budjetingiz qancha edi?", None)
 
     def test_discount_negotiation_prompt_rule_requires_lead_creation(self):
         migration = importlib.import_module("core.migrations.0038_ai_prompt_discount_negotiation")
@@ -4205,7 +4206,8 @@ class ApiTests(TestCase):
             "name_uz": "Custom buket", "arrangement_type": "bouquet", "volume": "M",
             "catalog_kind": "custom", "florist": profile.id, "price": "500000", "quantity_total": 1,
             "florist_salary_amount": "125000",
-            "composition": [{"stock_batch": self.batch.id}],
+            # Gul soni majburiy: operator uni kiritmasa sklad kamaymaydi.
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
         }, format="json")
         self.assertEqual(response.status_code, 201, response.json())
         self.assertEqual(Decimal(response.json()["florist_salary_amount"]), Decimal("125000.00"))
@@ -8228,7 +8230,8 @@ class NaturalSalesFlowTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["allow_group"])
         self.assertEqual(result["detail"], "instagram_ad_group")
-        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [first.id, second.id])
+        # Katalog yangisidan saralanadi, shuning uchun tartib teskari.
+        self.assertEqual([row["catalog_id"] for row in result["group_matches"]], [second.id, first.id])
         openai_class.assert_not_called()
 
     @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
@@ -11738,3 +11741,204 @@ class ASoldAlbumItemStillNamesTheRightFlowerTests(TestCase):
             self.assertEqual(services.own_post_permalink_for_shared_media(attachment), permalink)
         # Izohsiz kelgan ko'rinishi endi faqat media raqami bilan topiladi.
         self.assertEqual(services.remembered_shared_post_permalink({"media_id": "555"}), permalink)
+
+
+class FloristStockIsNotDeductedTwiceTests(TestCase):
+    """Floristga berilgan gul skladdan ikkinchi marta ayirilmaydi.
+
+    Gul floristga berilganda skladdan chiqadi. U shu guldan custom katalog
+    yasaganda ilgari sklad yana kamayardi, floristning qo'lidagi qoldiq esa
+    o'zgarmasdan qolardi.
+    """
+
+    def setUp(self):
+        from .inventory_services import issue_stock_to_florist
+        self.user = User.objects.create_user("stock-twice", password="p")
+        flower = Flower.objects.create(name_uz="Atirgul", slug="atirgul-twice")
+        variant = FlowerVariant.objects.create(flower=flower, name_uz="Qizil", color_uz="qizil")
+        self.batch = StockBatch.objects.create(
+            variant=variant, batch_number="TW-1", height_cm=60, stems_per_bunch=20,
+            received_stems=100, remaining_stems=100, cost_per_stem=20000,
+            sale_price_per_stem=30000, sale_price_per_bunch=580000)
+        self.florist = FloristProfile.objects.create(
+            user=User.objects.create_user("florist-twice", password="p"), staff_type="florist")
+        FloristVolumeRate.objects.create(florist=self.florist, arrangement_type="bouquet",
+                                         volume="small", default_stems=10, florist_fee=70000)
+        issue_stock_to_florist(self.florist, self.batch, 10, "test", self.user)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 90)
+
+    def _make_custom(self):
+        serializer = CatalogItemSerializer(data={
+            "name_uz": "Custom buket", "arrangement_type": "bouquet", "catalog_kind": "custom",
+            "volume": "small", "florist": self.florist.id, "price": "250000.00",
+            "quantity_total": 1,
+            "composition": [{"stock_batch": self.batch.id, "quantity_stems": 10}],
+        }, context={"request": SimpleNamespace(user=self.user)})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        return serializer.save()
+
+    def test_the_warehouse_is_not_touched_a_second_time(self):
+        self._make_custom()
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.remaining_stems, 90)
+
+    def test_the_florist_balance_goes_down_instead(self):
+        balance = FloristStockBalance.objects.get(florist=self.florist, stock_batch=self.batch)
+        self.assertEqual(balance.remaining_stems, 10)
+        self._make_custom()
+        balance.refresh_from_db()
+        self.assertEqual(balance.remaining_stems, 0)
+
+
+class ARussianSentenceIsNeverReadAsUzbekTests(TestCase):
+    """Valyuta nomi ikki tilda bir xil — u o'zbekcha belgi emas.
+
+    Real suhbat 2243: "Здравствуйте, мне нужен букет на 2 сентября в школу,
+    увидела у вас пост букет за 199.000 сум" degan sof ruscha jumla "сум"
+    so'zi sabab o'zbekcha deb hisoblandi va javob o'zbek kirilida ketdi.
+    """
+
+    RU = "Здравствуйте, мне нужен букет на 2 сентября в школу, увидела у вас пост букет за 199.000 сум"
+
+    def test_the_russian_sentence_is_russian(self):
+        self.assertEqual(services.script_evidence(self.RU), "ru")
+
+    def test_the_currency_word_alone_is_not_evidence(self):
+        self.assertEqual(services.script_evidence("199.000 сум"), "")
+
+    def test_a_real_uzbek_sentence_is_still_uzbek(self):
+        for text in ["Гул борми", "Ассалому алайкум, сават керак эди",
+                     "Қанақа гуллар бор", "Буюртма бермоқчиман"]:
+            self.assertEqual(services.script_evidence(text), "uz_cyril", text)
+
+    def test_the_uzbek_letters_win_immediately(self):
+        self.assertEqual(services.script_evidence("Сўм нархи қанча"), "uz_cyril")
+
+    def test_the_conversation_counts_the_votes(self):
+        customer = Customer.objects.create(instagram_user_id="ig-ru-votes")
+        conversation = Conversation.objects.create(customer=customer)
+        for text in ["Можно заказать?", self.RU, "Только эти варианты?"]:
+            conversation.messages.create(sender="customer", text=text)
+        self.assertEqual(services.conversation_reply_script(conversation), "ru")
+
+    def test_an_uzbek_conversation_stays_uzbek(self):
+        customer = Customer.objects.create(instagram_user_id="ig-uz-votes")
+        conversation = Conversation.objects.create(customer=customer)
+        for text in ["Ассалому алайкум", "Гул борми", "доставка"]:
+            conversation.messages.create(sender="customer", text=text)
+        self.assertEqual(services.conversation_reply_script(conversation), "uz_cyril")
+
+
+class TheWholeCatalogIsNotDescribedAsOnePriceTests(TestCase):
+    """Butun katalog yuborilganda "shu summaga shular bor" deb yozilmaydi.
+
+    Real suhbat 2243: mijoz "Только эти варианты?" deb so'radi, AI butun
+    katalogni yubordi — harakat to'g'ri edi — lekin matnda "Shu summaga shular
+    bor" deb yozdi. Albomda 199 000 dan 1 000 000 gacha mahsulot bor edi.
+    """
+
+    def setUp(self):
+        for price in (199000, 400000, 1000000):
+            AICatalogItem.objects.create(name="Buket %s" % price, arrangement_type="bouquet",
+                                         price=price, quantity=1,
+                                         image_url="https://cdn.example.com/%s.jpg" % price)
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-album-text"))
+
+    def _send(self, ids):
+        from unittest.mock import patch
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            return services.send_catalog_album(
+                self.conversation, services.catalog_album_items(ids), whole_catalog=not ids)
+
+    def test_the_whole_catalog_result_forbids_the_one_price_wording(self):
+        result = self._send([])
+        self.assertTrue(result["whole_catalog"])
+        self.assertIn("Shu summaga shular bor\" deb YOZMA", result["instruction_uz"])
+        self.assertIn("hozirda bizda borlari shular", result["instruction_uz"])
+        self.assertIn("faqat shularmi", result["instruction_uz"])
+
+    def test_a_picked_group_may_still_use_it(self):
+        item = AICatalogItem.objects.get(price=199000)
+        result = self._send([item.id])
+        self.assertFalse(result["whole_catalog"])
+        self.assertIn("shu summaga shular bor", result["instruction_uz"])
+
+
+class AnAdOpeningAlwaysShowsTheCatalogTests(TestCase):
+    """Reklamadan kelgan birinchi xabarda katalog ko'rsatiladi.
+
+    Real suhbat 2243: mijoz reklamadagi tugmani bosdi, Instagram "Можно
+    заказать?" auto-matnini yubordi. Prompt kind="ad" uchun rasm
+    moslashtiruvchisini taqiqlaydi, shuning uchun katalog yo'li ishga
+    tushmadi va mijozga faqat "operatorlarimiz bog'lanadi" javobi bordi.
+    """
+
+    def setUp(self):
+        AICatalogItem.objects.create(name="Buket Bir", arrangement_type="bouquet", price=199000,
+                                     quantity=1, image_url="https://cdn.example.com/1.jpg")
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-ad-open"))
+
+    def _ad_message(self):
+        return self.conversation.messages.create(
+            sender="customer", text="Можно заказать?", metadata={
+                "attachments": [{"kind": "photo", "url": "https://www.facebook.com/ads/image/?d=AQK4"}],
+                "instagram_referral": {"type": "OPEN_THREAD", "source": "ADS", "ad_id": "120240146437490452",
+                                       "ads_context_data": {"post_id": "4256654507980562", "ad_title": "199"}},
+                "instagram_ad_id": "120240146437490452",
+                "instagram_ad_post_id": "4256654507980562"})
+
+    def test_the_conversation_is_recognised_as_ad_originated(self):
+        self._ad_message()
+        self.assertTrue(services.conversation_started_from_an_ad(self.conversation))
+
+    def test_the_catalog_is_sent_on_the_first_reply(self):
+        from unittest.mock import patch
+        self._ad_message()
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = services.apply_ad_opening_safeguard(
+                self.conversation, {"reply": "Operatorlarimiz bog'lanadi"}, tool_results)
+        self.assertEqual([row["name"] for row in result["tool_results"]], ["send_catalog_album"])
+        self.assertTrue(result["tool_results"][0]["output"]["whole_catalog"])
+
+    def test_it_does_not_repeat_on_later_replies(self):
+        from unittest.mock import patch
+        self._ad_message()
+        self.conversation.messages.create(sender="ai", text="Assalomu alaykum")
+        self.conversation.messages.create(sender="customer", text="Yana savol")
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as chunk:
+            services.apply_ad_opening_safeguard(self.conversation, {"reply": "ok"}, tool_results)
+        chunk.assert_not_called()
+
+    def test_a_plain_conversation_is_untouched(self):
+        from unittest.mock import patch
+        self.conversation.messages.create(sender="customer", text="Assalomu alaykum")
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as chunk:
+            services.apply_ad_opening_safeguard(self.conversation, {"reply": "ok"}, tool_results)
+        chunk.assert_not_called()
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_the_operator_is_not_called_for_the_ad_auto_message(self):
+        from unittest.mock import patch
+        self._ad_message()
+        with patch("core.services.notify_operator_needed") as notify:
+            result = execute_ai_tool("call_operator", {"reason": "Reklama bo'yicha buyurtma"}, self.conversation)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "ad_opening_message")
+        notify.assert_not_called()
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_the_operator_is_called_on_a_later_real_question(self):
+        from unittest.mock import patch
+        self._ad_message()
+        self.conversation.messages.create(sender="ai", text="Hozirda bizda borlari shular")
+        self.conversation.messages.create(sender="customer", text="Kelin buketi kerak edi")
+        with patch("core.services.notify_operator_needed", return_value={"ok": True, "detail": ""}) as notify:
+            result = execute_ai_tool("call_operator", {"reason": "Kelin buketi"}, self.conversation)
+        self.assertTrue(result["ok"])
+        notify.assert_called_once()
