@@ -11402,8 +11402,8 @@ class CatalogClaimAlwaysSendsTests(TestCase):
 
     def test_nothing_is_sent_twice_in_one_turn(self):
         tool_results = [{"name": "send_catalog_album", "arguments": {}, "output": {"ok": True, "items": []}}]
-        result = self._apply("Hozirda bizda bor gullar shular.", tool_results)
-        self.assertEqual([row["name"] for row in result["tool_results"]], ["send_catalog_album"])
+        self._apply("Hozirda bizda bor gullar shular.", tool_results)
+        self.assertEqual([row["name"] for row in tool_results], ["send_catalog_album"])
 
 
 class OperatorPromiseIsAlwaysDeliveredTests(TestCase):

@@ -386,6 +386,19 @@ def shared_media_id(payload):
     return ""
 
 
+def message_without_shared_captions(message):
+    """Xabarning izohsiz nusxasi — havola qidiruvi uchun."""
+    clean = dict(message or {})
+    attachments = []
+    for attachment in clean.get("attachments") or []:
+        payload = {key: value for key, value in (attachment.get("payload") or {}).items()
+                   if key not in SHARED_CAPTION_KEYS}
+        attachments.append(dict(attachment, payload=payload))
+    if attachments:
+        clean["attachments"] = attachments
+    return clean
+
+
 def instagram_message_metadata(event, webhook_event=None):
     message = event.get("message", {}) or {}
     referral = event.get("referral") or message.get("referral") or {}
@@ -409,7 +422,9 @@ def instagram_message_metadata(event, webhook_event=None):
                 row["media_id"] = media_id
             rows.append(row)
     for source, value in [
-        ("instagram_message", message),
+        # Xabarning o'zidan havola qidirilganda ham ulashilgan post izohi
+        # chetlab o'tiladi: izoh ichidagi havola ulashilgan media emas.
+        ("instagram_message", message_without_shared_captions(message)),
         ("instagram_referral", referral),
         ("instagram_reply_to", message.get("reply_to") or {}),
     ]:
