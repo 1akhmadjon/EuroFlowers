@@ -246,9 +246,13 @@ def apply_prompt(apps, schema_editor):
     if prompt == (row.system_prompt or ""):
         return
     # Handle promptda qolib ketmasin: qolsa model uni yana javobga ko'chiradi.
+    leftovers = []
     for needle in ["@euroflowerspremium", "business.operator_telegram ", "business.operator_telegram\n"]:
         at = prompt.find(needle)
-        assert at < 0, "promptda %r qoldi:\n%s" % (needle, prompt[max(0, at - 300):at + 160])
+        while at >= 0:
+            leftovers.append("--- %r ---\n%s" % (needle, prompt[max(0, at - 260):at + 140]))
+            at = prompt.find(needle, at + 1)
+    assert not leftovers, "PROMPTDA QOLDI:\n" + "\n".join(leftovers)
     row.system_prompt = prompt
     row.save(update_fields=["system_prompt"])
 
