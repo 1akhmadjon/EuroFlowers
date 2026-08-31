@@ -616,6 +616,46 @@ def catalog_price_bounds(min_price, max_price):
 # summa atrofidagini so'ragan. Shu radius ichidagilar ko'rsatiladi.
 BUDGET_RADIUS = Decimal("100000")
 
+# Mijoz bitta summa aytsa qidiruv faqat YUQORIGA ochiladi. "400 000 li gul kere"
+# degan mijozga 199 000 lik gulni ko'rsatish savdoni pastga tortadi — u o'sha
+# summani ayta olishini aytdi. Shuning uchun oyna [summa, summa + 150 000].
+BUDGET_UP_RADIUS = Decimal("150000")
+
+
+def budget_target(low, high):
+    """Mijoz aytgan yakka summa. Oraliq yoki bir tomonlama chegara bo'lsa None."""
+    if low is not None and high is not None and low == high:
+        return low
+    return None
+
+
+def catalog_price_band(low, high):
+    """Qidiruv oynasi. Yakka summa aytilsa pastdagilar umuman chiqmaydi."""
+    target = budget_target(low, high)
+    if target is None:
+        return low, high
+    return target, target + BUDGET_UP_RADIUS
+
+
+def catalog_cheapest_price(queryset=None):
+    prices = sorted((queryset if queryset is not None else available_ai_catalog_queryset()).values_list("price", flat=True))
+    return prices[0] if prices else None
+
+
+def budget_below_cheapest(low, high, queryset=None):
+    """Mijoz aytgan summa butun katalogdan past bo'lsa.
+
+    Bu boshqa javob talab qiladi: eng arzon narxni aytib qo'yish bilan tugatish
+    mijozni quruq qaytarish. O'rniga o'sha summaga yasab berishni taklif qilamiz.
+    """
+    target = budget_target(low, high)
+    if target is None:
+        target = high if low is None else low
+    if target is None:
+        return False
+    cheapest = catalog_cheapest_price(queryset)
+    return cheapest is not None and target < cheapest
+
 
 def budget_focus(low, high):
     """Mijoz nazarda tutgan summa: bitta narx yoki so'ralgan oraliqning o'rtasi."""
@@ -644,7 +684,22 @@ def catalog_near_budget(queryset, low, high):
     return queryset.filter(price__gte=window_low, price__lte=window_high)
 
 
-def catalog_budget_summary(queryset, low, high, exact_match, near_prices=()):
+BUDGET_BELOW_CHEAPEST_INSTRUCTION = (
+    "Mijoz aytgan summa butun katalogimizdan past. Javob ikki qismdan iborat va "
+    "IKKALASI ham bo'lishi SHART:\n"
+    "  1. Rostini ayt: bizda eng arzoni {cheapest} so'mdan boshlanadi.\n"
+    "  2. Darhol qo'sh: lekin siz aytganingizdek {asked} so'mga mos qilib yasab "
+    "beramiz. Ism va telefon raqamini qoldirishini so'ra, operatorlarimiz "
+    "bog'lanadi.\n"
+    "Ism va telefon kelgach client_lead_create ni topic=\"custom_order\" bilan "
+    "chaqir va request_text ga mijoz qancha summaga so'raganini yoz. "
+    "Katalog albomini YUBORMA va {cheapest} so'mlik mahsulotni taklif qilma — "
+    "mijoz o'sha summani ayta olmadi. Faqat eng arzon narxni aytib javobni "
+    "tugatish XATO: mijoz hech narsa olmay ketadi."
+)
+
+
+def catalog_budget_summary(queryset, low, high, exact_match, near_prices=(), below_cheapest=False):
     """Budjet javobi uchun ma'lumot.
 
     Mos mahsulot topilmasa eng arzonini aytish kerak — "250 mingga bormi" savoliga
@@ -664,6 +719,15 @@ def catalog_budget_summary(queryset, low, high, exact_match, near_prices=()):
         return summary
     prices = sorted(queryset.values_list("price", flat=True))
     focus = budget_focus(low, high)
+    if below_cheapest and prices:
+        asked = budget_target(low, high)
+        if asked is None:
+            asked = high if low is None else low
+        summary["below_cheapest"] = True
+        summary["cheapest_price"] = str(prices[0])
+        summary["instruction_uz"] = BUDGET_BELOW_CHEAPEST_INSTRUCTION.format(
+            cheapest=money_uz(prices[0]), asked=money_uz(asked))
+        return summary
     # Mijozning budjeti butun katalogdan past bo'lsa radius emas, rostini aytish
     # kerak: eng arzoni shuncha. Radius esa mijoz katalogdagi narxlar oralig'idagi
     # summani aytganda ishlaydi — 350 ming so'ralsa 400 va 450 minglik chiqadi.
@@ -701,13 +765,17 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
     if made_from_batch_id:
         queryset = queryset.none()
     low, high = catalog_price_bounds(min_price, max_price)
+    band_low, band_high = catalog_price_band(low, high)
     if low is not None or high is not None:
         priced = queryset
-        if low is not None:
-            priced = priced.filter(price__gte=low)
-        if high is not None:
-            priced = priced.filter(price__lte=high)
+        if band_low is not None:
+            priced = priced.filter(price__gte=band_low)
+        if band_high is not None:
+            priced = priced.filter(price__lte=band_high)
         if not priced.exists():
+            # Yuqorida hech narsa yo'q ekan — o'shanda so'ralgan summa atrofidagi
+            # simmetrik oynaga qaytamiz. "200 000 li gul kere" shu yo'l bilan
+            # 199 000 lik gulni topadi.
             priced = catalog_near_budget(queryset, low, high)
         # Budjet aytilgan bo'lsa arzonidan boshlab ko'rsatamiz — mijoz shu tartibda o'ylaydi.
         queryset = (priced if priced.exists() else queryset).order_by("price", "id")
@@ -761,14 +829,21 @@ def ai_catalog_result(query="", limit=24, arrangement_type="", min_price=None, m
         )
     if low is None and high is None:
         return result
-    within = [row for row in rows if (low is None or Decimal(row["price"]) >= low) and (high is None or Decimal(row["price"]) <= high)]
+    band_low, band_high = catalog_price_band(low, high)
+    within = [row for row in rows if (band_low is None or Decimal(row["price"]) >= band_low) and (band_high is None or Decimal(row["price"]) <= band_high)]
+    below_cheapest = budget_below_cheapest(low, high)
+    if below_cheapest:
+        # Oyna yuqoriga ochilgani uchun 150 000 so'ragan mijozga 199 000 lik gul
+        # "so'ralgan narxda bor" bo'lib chiqib qolardi. Budjet katalogdan past
+        # bo'lsa bu holat mos kelish emas.
+        within = []
     window_low, window_high = budget_window(low, high)
     near_prices = [] if within or window_low is None else [
         row["price"] for row in rows
         if window_low <= Decimal(row["price"]) <= window_high
     ]
     result["budget"] = dict(
-        catalog_budget_summary(available_ai_catalog_queryset(), low, high, bool(within), near_prices),
+        catalog_budget_summary(available_ai_catalog_queryset(), low, high, bool(within), near_prices, below_cheapest=below_cheapest),
         matched=len(within),
         # Budjetga tushgani yo'q bo'lsa qatorlar eng yaqinlari — "aynan shu narxda bor" dema.
         exact_match=bool(within),
@@ -1550,6 +1625,83 @@ def direct_ai_catalog_link_matches(items, source_url, attachment=None, conversat
     return []
 
 
+# Mijoz Instagram reel/post havolasini directga tashlaganda kelgan URL shu ko'rinishda
+# bo'ladi. Mijozning o'z rasmi hech qachon bunday emas — u lookaside.fbsbx.com yoki
+# facebook.com/ads/image bo'lib keladi. Shuning uchun bu naqsh faqat havola
+# ulashishni ushlaydi va rasm tahlili yo'liga tegmaydi.
+SHARED_LINK_PATTERN = re.compile(r"instagram\.com/(reel|reels|p|tv)/", re.IGNORECASE)
+
+# Tizimda yo'q reel kelganda javob berilmaydi. Ketma-ket yozilgan xabar ham shu
+# jimlikka kiradi, lekin faqat shu oyna ichida: mijoz bir soatdan keyin "gul kerak"
+# deb yozsa javobsiz qolib ketmasligi kerak.
+UNLINKED_MEDIA_SILENCE_WINDOW = timedelta(minutes=15)
+
+
+def shared_link_attachments(message):
+    """Xabardagi Instagram reel/post havolalari."""
+    rows = []
+    for attachment in (message.metadata or {}).get("attachments", []) or []:
+        url = attachment.get("url") or ""
+        if SHARED_LINK_PATTERN.search(url):
+            rows.append({"kind": attachment.get("kind") or "media", "url": url})
+    return rows
+
+
+def shared_link_is_in_the_system(attachment, items=None):
+    """Ulashilgan havola bazadagi story/post yoki katalog mahsulotiga bog'langanmi.
+
+    Bog'lanmagan bo'lsa bu havola haqida aytadigan hech narsamiz yo'q: rasm tahlil
+    qilinmaydi (video), nomi ham narxi ham noma'lum. Real suhbatlarda AI o'shanda
+    butun katalogni yuborib operatorni chaqirardi — mijozga ham, operatorga ham
+    foydasi yo'q ikkita harakat.
+    """
+    url = (attachment or {}).get("url") or ""
+    if not url:
+        return False
+    if social_post_for_media(attachment):
+        return True
+    catalog_items = ai_catalog_match_items() if items is None else items
+    # conversation berilmaydi: suhbatdagi boshqa havolalar bu reelni tizimda bor
+    # qilib ko'rsatmasligi kerak.
+    return bool(direct_ai_catalog_link_matches(catalog_items, url, attachment=attachment))
+
+
+def unlinked_shared_link_in_message(message, items=None):
+    for attachment in shared_link_attachments(message):
+        if not shared_link_is_in_the_system(attachment, items=items):
+            return attachment
+    return None
+
+
+def unlinked_shared_media_silence(conversation):
+    """Tizimda yo'q reel/post kelgan bo'lsa AI javob bermaydi.
+
+    Oxirgi AI javobidan keyingi mijoz xabarlari qaraladi — reel bilan birga yoki
+    ketma-ket yozilgan matn ham shu jimlikka kiradi. Oyna
+    UNLINKED_MEDIA_SILENCE_WINDOW bilan cheklangan, aks holda javob berilmagan
+    reel suhbatni butunlay yopib qo'yardi.
+    """
+    messages = list(conversation.messages.exclude(sender="system").order_by("-created_at", "-id")[:20])
+    pending = []
+    for message in messages:
+        if message.sender != "customer":
+            break
+        pending.append(message)
+    if not pending:
+        return None
+    newest = pending[0].created_at
+    items = None
+    for message in pending:
+        if newest - message.created_at > UNLINKED_MEDIA_SILENCE_WINDOW:
+            break
+        if items is None:
+            items = ai_catalog_match_items()
+        attachment = unlinked_shared_link_in_message(message, items=items)
+        if attachment:
+            return {"message_id": message.id, "url": attachment["url"], "kind": attachment["kind"]}
+    return None
+
+
 # Aynan mos kelmagan, lekin mijozga ko'rsatishga arziydigan mahsulot uchun eng past
 # ball. Rangi butunlay boshqa bo'lgan mahsulot 45 dan oshmaydi (DIFFERENT_COLOUR_CEILING),
 # lekin gul turi va idishi bir xil bo'lsa u ham ko'rsatishga arziydi: "binafsha savat
@@ -1917,6 +2069,14 @@ MEDIA_MATCH_AD_CATALOG_INSTRUCTION = (
     "qaysi biri kerakligini raqami bilan yozsin. Boshqa albom yuborma."
 )
 
+MEDIA_MATCH_UNLINKED_SHARED_MEDIA_INSTRUCTION = (
+    "Mijoz ulashgan reel/post tizimda YO'Q — u haqida aytadigan hech narsamiz yo'q. "
+    "Reelni umuman tilga OLMA, \"yuborgan reelingiz\" deb yozma, katalog albomini "
+    "YUBORMA, gul nomi va narx AYTMA, call_operator ni CHAQIRMA va operatorga "
+    "yo'naltirma. Mijozning o'zi alohida savol yozgan bo'lsa faqat o'sha savolga "
+    "javob ber. Savoli bo'lmasa hech narsa yozmaslik ham to'g'ri javob."
+)
+
 MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION = (
     "Mijoz yuborgan reel tizimga ulanmagan, lekin izohida narxi yozilgan. group_matches "
     "dagi catalog_id larni send_catalog_album bilan yubor va shu mazmunda yoz: yuborgan "
@@ -1992,6 +2152,24 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "near_matches": [],
             "album": album,
             "instruction_uz": MEDIA_MATCH_AD_CATALOG_INSTRUCTION,
+        })
+
+    if SHARED_LINK_PATTERN.search(media_url) and not shared_link_is_in_the_system(attachment, items=items):
+        # Tizimda yo'q reel. Odatda bu yerga umuman kelinmaydi — javob yo'li
+        # unlinked_shared_media_silence da to'xtaydi. Mijoz keyin alohida savol
+        # yozgan bo'lsa esa shu natija reelni javobdan chetda qoldiradi.
+        return media_match_result(conversation, {
+            "ok": False,
+            "allow_send": False,
+            "allow_group": False,
+            "detail": "unlinked_shared_media",
+            "source": attachment,
+            "source_description": "Mijoz ulashgan reel/post tizimda topilmadi.",
+            "matches": [],
+            "group_matches": [],
+            "near_matches": [],
+            "no_match_reason": "Ulashilgan havola bazadagi story/post yoki katalog mahsulotiga bog'lanmagan.",
+            "instruction_uz": MEDIA_MATCH_UNLINKED_SHARED_MEDIA_INSTRUCTION,
         })
 
     own_post = social_post_for_media(attachment)
@@ -3005,6 +3183,12 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                                   "manzilini belgilab tanlash tugmasini bosishini so'ra. "
                                   "Bitta qator yetarli, boshqa savol qo'shma."}
     if name == "call_operator":
+        if unlinked_shared_media_silence(conversation):
+            # Tizimda yo'q reel operatorni chaqirish sababi emas. Operatorlar
+            # guruhiga ketgan 77 xabarning ko'pi aynan shundan kelib chiqqan va
+            # ularning hech biri bilan operator biror ish qila olmaydi.
+            return {"ok": False, "detail": "unlinked_shared_media",
+                    "instruction_uz": MEDIA_MATCH_UNLINKED_SHARED_MEDIA_INSTRUCTION}
         return dict(notify_operator_needed(conversation, (arguments.get("reason") or "").strip()),
                     instruction_uz=("Mijozga faqat shu mazmunda javob ber: operatorlarimiz sizga tez "
                                     "orada yozib yuborishadi. Telegram username BERMA, telefon "
@@ -3290,7 +3474,10 @@ def ai_reply(conversation):
             "shop_phone": business_settings.shop_phone,
             "operator_phone": business_settings.operator_phone or business_settings.shop_phone,
             # AI javob berolmaydigan savol yoki aniqlanmagan gul shu akkauntga yo'naltiriladi.
-            "operator_telegram": business_settings.operator_telegram,
+            # operator_telegram ataylab berilmaydi: handle'ni ko'rsa model uni
+            # javobga yozib qo'yadi va mijozni hech qayerga yozmasligi kerak
+            # bo'lgan akkauntga yuboradi. Real chatlarda 54 marta shunday bo'ldi.
+            # Ko'rmagan handle'ni yoza olmaydi.
             "operator_telegram_text": operator_telegram_text(business_settings.operator_telegram),
             "operator_hours_uz": business_settings.operator_hours,
             "operator_hours_ru": business_settings.operator_hours_ru,
@@ -3742,6 +3929,12 @@ def should_start_ai_reply(conversation_id, expected_message_id):
         return False
     if conversation.ai_replied_to_message_id == latest.id:
         return False
+    if unlinked_shared_media_silence(conversation):
+        # Tizimda yo'q reel: javob ham, typing indikatori ham, operator xabari
+        # ham chiqmaydi. Butun katalogni yuborib operatorni chaqirish mijozga
+        # ham, operatorga ham foyda bermadi — 119 ta havolada shunday bo'ldi.
+        print(f"UNLINKED_MEDIA_IGNORED conversation={conversation.id} message={latest.id}", flush=True)
+        return False
     return True
 
 
@@ -3755,6 +3948,8 @@ def process_pending_customer_reply(conversation_id, expected_message_id):
         if not latest or latest.id != expected_message_id:
             return None
         if conversation.ai_replied_to_message_id == latest.id:
+            return None
+        if unlinked_shared_media_silence(conversation):
             return None
         if conversation.ai_reply_started_for_message_id == latest.id and conversation.ai_reply_started_at and conversation.ai_reply_started_at > stale_started_at:
             return None

@@ -8639,7 +8639,8 @@ class NoOperatorHandoffToolTests(TestCase):
             self.assertIn("SO'RAMA", text)
             self.assertNotIn("handoff_media_to_operator", text)
 
-    def test_the_telegram_account_reaches_the_model_from_the_database(self):
+    def test_the_ready_phrase_reaches_the_model_without_the_handle(self):
+        """Handle modelga berilmaydi, faqat tayyor jumla beriladi."""
         from unittest.mock import patch
         settings_row = BusinessSettings.objects.get_or_create(pk=1)[0]
         settings_row.operator_telegram = "@euroflowerspremium"
@@ -8651,7 +8652,9 @@ class NoOperatorHandoffToolTests(TestCase):
             openai_class.return_value.responses.create.return_value = SimpleNamespace(id="r", output=[], output_text=json.dumps({"reply": "ok", "detected_language": "uz", "customer_name": None, "phone": None, "handoff": False, "lead_ready": False, "lead_request": "", "estimated_price": None, "arrangement_type": None}))
             ai_reply(conversation)
         context = json.loads(openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
-        self.assertEqual(context["business"]["operator_telegram"], "@euroflowerspremium")
+        self.assertNotIn("operator_telegram", context["business"])
+        self.assertEqual(context["business"]["operator_telegram_text"],
+                         "Operatorlarimiz sizga tez orada yozib yuborishadi")
 
 
 class LeadOnlyForOrdersPromptTests(TestCase):
@@ -11069,3 +11072,261 @@ class BunchToStemRoundingTests(TestCase):
         self.assertEqual(response.status_code, 201, response.json())
         self.assertEqual(StockBatch.objects.get(id=response.json()["id"]).received_stems, 350)
 
+
+
+class UnlinkedReelIsIgnoredTests(TestCase):
+    """Tizimda yo'q reel kelganda AI umuman javob bermaydi.
+
+    Real suhbatlarda (1565, 1680, 1463, 2093, 2129, 2160) har bir bunday reelga
+    butun katalog ketardi va ustiga operatorlar guruhiga "Operator kerak"
+    xabari borardi. Oxirgi 800 mijoz xabarida 124 ta havola ulashilgan, 119 tasi
+    tizimda yo'q edi.
+    """
+
+    REEL = "https://www.instagram.com/reel/DcOxrM-tb-D/"
+
+    def setUp(self):
+        AISettings.objects.get_or_create(pk=1)[0].__class__.objects.filter(pk=1).update(is_active=True)
+        self.item = AICatalogItem.objects.create(
+            name="Qizil Atir Guldan Kompazitsia", arrangement_type="basket", price=199000,
+            quantity=1, image_url="https://cdn.example.com/qizil.jpg")
+        self.customer = Customer.objects.create(instagram_user_id="ig-reel", instagram_username="reel_probe")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+
+    def _reel_message(self, text="", url=None, minutes_ago=0):
+        message = self.conversation.messages.create(
+            sender="customer",
+            text=text or "Mijoz Instagram post/reelni directga yubordi.",
+            metadata={"attachments": [{"kind": "reel", "url": url or self.REEL}]})
+        if minutes_ago:
+            Message.objects.filter(id=message.id).update(created_at=timezone.now() - timedelta(minutes=minutes_ago))
+            message.refresh_from_db()
+        return message
+
+    def test_a_reel_that_is_not_in_the_system_gets_no_reply(self):
+        message = self._reel_message()
+        self.assertFalse(services.should_start_ai_reply(self.conversation.id, message.id))
+        self.assertIsNone(process_pending_customer_reply(self.conversation.id, message.id))
+
+    def test_a_reel_linked_to_a_catalog_item_is_answered(self):
+        self.item.instagram_link = self.REEL
+        self.item.save(update_fields=["instagram_link"])
+        message = self._reel_message()
+        self.assertTrue(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_a_reel_linked_to_our_own_post_is_answered(self):
+        SocialPost.objects.create(post_type="reel", permalink=self.REEL, title_uz="Qizil savat")
+        message = self._reel_message()
+        self.assertTrue(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_a_customer_photo_is_still_answered(self):
+        message = self.conversation.messages.create(sender="customer", text="shu nechpul", metadata={
+            "attachments": [{"kind": "photo", "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=1"}]})
+        self.assertTrue(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_an_ad_banner_is_still_answered(self):
+        message = self.conversation.messages.create(sender="customer", text="Buyurtma bermoqchi edim", metadata={
+            "attachments": [{"kind": "ad", "url": "https://www.facebook.com/ads/image/?d=AQLBZ8Js"}]})
+        self.assertTrue(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_a_message_written_together_with_the_reel_is_ignored_too(self):
+        message = self._reel_message(text="Shu gul nechpul bo'ladi")
+        self.assertFalse(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_a_message_written_right_after_the_reel_is_ignored_too(self):
+        self._reel_message()
+        message = self.conversation.messages.create(sender="customer", text="shu nechpul")
+        self.assertFalse(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_a_question_long_after_the_reel_is_answered(self):
+        self._reel_message(minutes_ago=40)
+        message = self.conversation.messages.create(sender="customer", text="Manga 400 000 li gul kere")
+        self.assertTrue(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    def test_a_question_after_an_ai_reply_is_answered(self):
+        self._reel_message()
+        self.conversation.messages.create(sender="ai", text="Assalomu alaykum")
+        message = self.conversation.messages.create(sender="customer", text="400 000 li gul kere")
+        self.assertTrue(services.should_start_ai_reply(self.conversation.id, message.id))
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_media_matcher_tells_the_model_to_stay_quiet(self):
+        from unittest.mock import patch
+        self._reel_message()
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as album:
+            with patch("core.vision_services.analyze_image") as vision:
+                result = services.match_ai_catalog_by_media(self.conversation)
+        self.assertEqual(result["detail"], "unlinked_shared_media")
+        self.assertFalse(result["allow_send"])
+        self.assertFalse(result["allow_group"])
+        self.assertEqual(result["matches"], [])
+        self.assertIn("call_operator ni CHAQIRMA", result["instruction_uz"])
+        album.assert_not_called()
+        vision.assert_not_called()
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_calling_the_operator_for_an_unlinked_reel_is_refused(self):
+        from unittest.mock import patch
+        self._reel_message()
+        with patch("core.services.notify_operator_needed") as notify:
+            result = execute_ai_tool(self.conversation, "call_operator", {"reason": "Reeldagi gulni topolmadim"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["detail"], "unlinked_shared_media")
+        notify.assert_not_called()
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_calling_the_operator_for_a_real_question_still_works(self):
+        from unittest.mock import patch
+        self.conversation.messages.create(sender="customer", text="Kelin buket kerak edi")
+        with patch("core.services.notify_operator_needed", return_value={"ok": True, "detail": ""}) as notify:
+            result = execute_ai_tool(self.conversation, "call_operator", {"reason": "Kelin buketi"})
+        self.assertTrue(result["ok"])
+        notify.assert_called_once()
+
+
+class BudgetNeverShowsCheaperTests(TestCase):
+    """Mijoz aytgan summadan pastini katalogdan taklif qilmaymiz.
+
+    Real suhbat 2142: mijoz "Manga faqat 200.000 li gul kere" dedi. Prompt
+    modelga faqat max_price yozishni buyurgani uchun filtr price <= 200000
+    bo'lib, arzonidan boshlab ko'rsatardi.
+    """
+
+    def setUp(self):
+        for name, price in [("Qizil Atir Kompazitsia", 199000), ("Pushti Buket", 400000),
+                            ("Oq Savat", 450000), ("London Savat", 1000000)]:
+            AICatalogItem.objects.create(name=name, arrangement_type="basket", price=price,
+                                         quantity=1, image_url="https://cdn.example.com/%s.jpg" % price)
+
+    def test_a_single_amount_opens_the_window_upwards_only(self):
+        result = services.ai_catalog_result(min_price=400000, max_price=400000)
+        prices = sorted(Decimal(row["price"]) for row in result["catalog"])
+        self.assertEqual(prices, [Decimal("400000.00"), Decimal("450000.00")])
+        self.assertTrue(result["budget"]["exact_match"])
+        self.assertNotIn("cheapest_price", result["budget"])
+
+    def test_the_cheapest_item_is_not_offered_to_a_bigger_budget(self):
+        result = services.ai_catalog_result(min_price=900000, max_price=900000)
+        prices = sorted(Decimal(row["price"]) for row in result["catalog"])
+        self.assertEqual(prices, [Decimal("1000000.00")])
+
+    def test_a_nearly_matching_amount_still_falls_back_downwards(self):
+        """200 000 so'ralganda yuqorida hech narsa yo'q — 199 000 ko'rsatiladi."""
+        result = services.ai_catalog_result(min_price=200000, max_price=200000)
+        prices = sorted(Decimal(row["price"]) for row in result["catalog"])
+        self.assertIn(Decimal("199000.00"), prices)
+
+    def test_asking_for_something_cheaper_still_shows_cheaper(self):
+        result = services.ai_catalog_result(max_price=400000)
+        prices = sorted(Decimal(row["price"]) for row in result["catalog"])
+        self.assertEqual(prices, [Decimal("199000.00"), Decimal("400000.00")])
+
+    def test_a_real_range_is_untouched(self):
+        result = services.ai_catalog_result(min_price=190000, max_price=450000)
+        prices = sorted(Decimal(row["price"]) for row in result["catalog"])
+        self.assertEqual(prices, [Decimal("199000.00"), Decimal("400000.00"), Decimal("450000.00")])
+
+    def test_the_price_band_helper_only_widens_a_single_amount(self):
+        self.assertEqual(services.catalog_price_band(Decimal("400000"), Decimal("400000")),
+                         (Decimal("400000"), Decimal("550000")))
+        self.assertEqual(services.catalog_price_band(None, Decimal("400000")),
+                         (None, Decimal("400000")))
+        self.assertEqual(services.catalog_price_band(Decimal("200000"), Decimal("500000")),
+                         (Decimal("200000"), Decimal("500000")))
+
+
+class BelowCheapestOffersCustomOrderTests(TestCase):
+    """Budjet katalogdan past bo'lsa yasab berishni taklif qilamiz.
+
+    Real suhbat 2142: "So'ralgan 150 000 so'mga mahsulot yo'q. Eng arzoni
+    199 000 so'm" javobi mijozni quruq qaytardi va u "150.000 ga
+    yasaberolislami" deb qayta so'rashga majbur bo'ldi.
+    """
+
+    def setUp(self):
+        AICatalogItem.objects.create(name="Qizil Atir Kompazitsia", arrangement_type="basket",
+                                     price=199000, quantity=1, image_url="https://cdn.example.com/a.jpg")
+        AICatalogItem.objects.create(name="London Savat", arrangement_type="basket",
+                                     price=1000000, quantity=1, image_url="https://cdn.example.com/b.jpg")
+
+    def test_a_budget_under_the_whole_catalog_is_flagged(self):
+        budget = services.ai_catalog_result(min_price=150000, max_price=150000)["budget"]
+        self.assertTrue(budget["below_cheapest"])
+        self.assertFalse(budget["exact_match"])
+        self.assertEqual(budget["cheapest_price"], "199000.00")
+
+    def test_the_instruction_names_both_halves_of_the_answer(self):
+        budget = services.ai_catalog_result(min_price=150000, max_price=150000)["budget"]
+        instruction = budget["instruction_uz"]
+        self.assertIn("199 000", instruction)
+        self.assertIn("150 000", instruction)
+        self.assertIn("yasab", instruction)
+        self.assertIn("client_lead_create", instruction)
+        self.assertIn("custom_order", instruction)
+        self.assertIn("Katalog albomini YUBORMA", instruction)
+
+    def test_a_ceiling_under_the_catalog_is_flagged_too(self):
+        budget = services.ai_catalog_result(max_price=100000)["budget"]
+        self.assertTrue(budget["below_cheapest"])
+
+    def test_a_budget_inside_the_catalog_is_not_flagged(self):
+        budget = services.ai_catalog_result(min_price=1000000, max_price=1000000)["budget"]
+        self.assertNotIn("below_cheapest", budget)
+        self.assertTrue(budget["exact_match"])
+
+
+class OperatorTelegramHandleNeverReachesTheModelTests(TestCase):
+    """Handle modelga berilmaydi — ko'rmagan akkauntni javobga yozolmaydi.
+
+    54 ta AI xabarida "@euroflowerspremium ga yozing" chiqqan. Promptda
+    taqiqlash yetarli bo'lmadi: 00C bo'limidagi NAMUNALAR aynan shu handle
+    bilan yozilgan edi.
+    """
+
+    def test_the_handle_is_not_in_the_context(self):
+        from unittest.mock import patch
+        settings_row = BusinessSettings.objects.get_or_create(pk=1)[0]
+        settings_row.operator_telegram = "@euroflowerspremium"
+        settings_row.save()
+        customer = Customer.objects.create(instagram_user_id="ig-ctx-2")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="salom")
+        with patch("core.services.OpenAI") as openai_class, patch("core.services.openai_api_key", return_value="k"):
+            openai_class.return_value.responses.create.return_value = SimpleNamespace(id="r", output=[], output_text=json.dumps({"reply": "ok", "detected_language": "uz", "customer_name": None, "phone": None, "handoff": False, "lead_ready": False, "lead_request": "", "estimated_price": None, "arrangement_type": None}))
+            ai_reply(conversation)
+        payload = openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"]
+        context = json.loads(payload.split("REAL_CONTEXT_JSON:\n", 1)[1])
+        self.assertNotIn("operator_telegram", context["business"])
+        self.assertEqual(context["business"]["operator_telegram_text"],
+                         "Operatorlarimiz sizga tez orada yozib yuborishadi")
+        self.assertNotIn("@euroflowerspremium", payload)
+
+    def test_the_prompt_no_longer_carries_the_handle(self):
+        prompt = AISettings.objects.get_or_create(pk=1)[0].system_prompt or ""
+        self.assertNotIn("@euroflowerspremium", prompt)
+        self.assertNotIn("business.operator_telegram ", prompt)
+        self.assertNotIn("business.operator_telegram\n", prompt)
+
+
+class TestRunNeverReachesTheGroupsTests(TestCase):
+    """Test yugurtirilganda sotuv va operator guruhlariga hech narsa ketmaydi.
+
+    Bir marta shunday bo'lgan: MixedPaymentWithTerminalTests haqiqiy sotuv
+    guruhiga xabar yuborgan. Tokenlar bo'shatilgani shu yo'lni butunlay yopadi,
+    shu test esa uni kelajakda qaytarib qo'yishga yo'l qo'ymaydi.
+    """
+
+    def test_testing_is_on(self):
+        from django.conf import settings as django_settings
+        self.assertTrue(getattr(django_settings, "TESTING", False))
+
+    def test_every_group_setting_is_blank(self):
+        from django.conf import settings as django_settings
+        for name in ["SALE_TELEGRAM_BOT_TOKEN", "SALE_TELEGRAM_GROUP_CHAT_ID", "TELEGRAM_GROUP_CHAT_ID",
+                     "BACKUP_BOT_TOKEN", "BACKUP_TELEGRAM_GROUP_ID", "AI_OPERATOR_HANDOFF_BOT_TOKEN",
+                     "AI_OPERATOR_HANDOFF_GROUP_ID", "AI_RECALL_GROUP_ID", "INSTAGRAM_ACCESS_TOKEN"]:
+            self.assertEqual(getattr(django_settings, name, ""), "", name)
+
+    def test_the_outbound_block_is_armed(self):
+        from .platform_services import outbound_blocked
+        self.assertTrue(outbound_blocked())
