@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 from openai import OpenAI
-from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, Lead, LeadStockUsage, Message, Notification, Packaging, SocialPost, StockBatch
+from .models import AICatalogItem, AISettings, BusinessSettings, CatalogItem, Conversation, FlowerVariant, IntegrationSettings, Lead, LeadStockUsage, Message, Notification, Packaging, SocialPost, StockBatch
 from .platform_services import instagram_send_carousel, instagram_send_image, openai_api_key, telegram_send_image, telegram_send_media_group, telegram_send_rich_message_with, telegram_send_with
 from . import vision_services
 
@@ -90,14 +90,14 @@ MEDIA_MATCH_CUSTOM_ORDER_NOTE = (
     "\"shunaqasini yasang\", \"shu guldan buket qb bering\") — bu yasatma buyurtma, "
     "katalog qidiruvi emas. Unda albom YUBORMA va 00C bo'limidagi javobni ber: "
     "xohlaganingizdek yasab beramiz, yuborgan rasmingizdagi guldan buket bo'yicha "
-    "business.operator_telegram_text matnini ishlat, operatorlarimiz shu haqida aniq ma'lumot berishadi."
+    "mijozga aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir."
 )
 MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "Aynan mos mahsulot topilmadi. Bitta ham katalog rasmini alohida YUBORMA va taxmin "
     "qilib mahsulot nomi yoki narxini aytma. Buning o'rniga send_catalog_album ni "
     "catalog_ids BO'SH massiv bilan chaqirib butun katalogni yubor va shu mazmunda yoz: "
     "hozirda bizda bor gullar shular, shulardan tanlasangiz ham bo'ladi; yoki o'zingiz "
-    "yuborgan gul kerak bo'lsa business.operator_telegram_text matnini aynan ishlat, "
+    "yuborgan gul kerak bo'lsa aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir, "
     "operatorlarimiz siz yuborgan gul haqida aniq javob berishadi. Telefon "
     "raqami SO'RAMA va lead yaratma — mijoz katalogdan gul tanlasagina buyurtma bo'ladi."
 ) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
@@ -118,7 +118,7 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "o'tirma — send_catalog_album ni catalog_ids BO'SH massiv bilan chaqirib butun "
     "katalogni yubor. Keyin shu mazmunda yoz: hozirda bizda bor gullar shular, "
     "shulardan tanlasangiz ham bo'ladi; yoki siz yuborgan gul ko'proq qiziq bo'lsa "
-    "business.operator_telegram_text matnini aynan ishlat, operatorlarimiz "
+    "aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir, operatorlarimiz "
     "aniq narxini aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Telefon raqami "
     "SO'RAMA va lead yaratma."
 ) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
@@ -153,7 +153,7 @@ When the flower under discussion came from one of our own stories, "send me the 
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" (with show_whole_catalog) means the exact flower is NOT in the catalog and nothing on the shelf is close enough to offer as a substitute: call send_catalog_album with an empty catalog_ids to send the whole catalog, say these are the flowers available and they are welcome to pick one, and offer to have an operator price the flower they actually sent if they leave a number; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
-allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent they should follow the exact ready phrase in business.operator_telegram_text, where an operator will answer them precisely. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
+allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent an operator will answer them precisely — write exactly this sentence: "Operatorlarimiz sizga tez orada yozib yuborishadi." and call call_operator. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -981,7 +981,14 @@ def customer_attachment_rows(history_messages):
                 ad_seen = True
                 rows.append({"kind": "ad", "url": url})
                 continue
-            rows.append({"kind": attachment.get("kind") or "media", "url": url})
+            row = {"kind": attachment.get("kind") or "media", "url": url}
+            # Ulashilgan postning izohi va media raqami — bir xil postni ikki
+            # xil ulashuv ko'rinishida bog'laydigan yagona kalitlar.
+            if attachment.get("caption"):
+                row["caption"] = attachment["caption"]
+            if attachment.get("media_id"):
+                row["media_id"] = attachment["media_id"]
+            rows.append(row)
     return rows[-MAX_CONTEXT_ATTACHMENTS:]
 
 
@@ -1154,12 +1161,61 @@ def calculate_custom_arrangement_price(stock_items):
     }
 
 
-def ai_catalog_lead_rows(arguments):
+def conversation_album_items(conversation):
+    """Shu suhbatda yuborilgan albomlardagi mahsulotlar, eng yangisi birinchi.
+
+    Mijoz "26 chi buketdan" deb yozganda raqam aynan shu ro'yxatga tegishli.
+    Nom bo'yicha qidirish esa boshqa mahsulotni topib qo'yishi mumkin: real
+    suhbat 1976 da "Buket Jumila Va Oq Atir Guldan Yasalgan Kompazitsia"
+    (199 000) o'rniga "Savat Jumila Oq Atir Guldan Yasalgan Kompazitsia"
+    (1 000 000) yozilib, operatorlar guruhiga boshqa gulning rasmi ketdi.
+    """
+    if conversation is None:
+        return []
+    rows = []
+    seen = set()
+    for message in conversation.messages.filter(sender="system").order_by("-created_at", "-id")[:40]:
+        album = (message.metadata or {}).get("catalog_album_result") or {}
+        for item in album.get("items") or []:
+            catalog_id = item.get("catalog_id")
+            if not catalog_id or catalog_id in seen:
+                continue
+            seen.add(catalog_id)
+            rows.append(item)
+    return rows
+
+
+def album_item_by_name(conversation, name):
+    """Albomdagi mahsulotni nomi bo'yicha topadi — faqat aynan mos kelsa."""
+    key = compact_match_text(name)
+    if not key:
+        return None
+    for row in conversation_album_items(conversation):
+        if compact_match_text(row.get("name")) == key:
+            return AICatalogItem.objects.filter(id=row.get("catalog_id"), is_active=True).first()
+    return None
+
+
+def album_item_by_price(conversation, price):
+    """Albomdan aynan shu narxdagi mahsulot. Bittadan ko'p bo'lsa tanlanmaydi."""
+    if price is None:
+        return None
+    matched = [row for row in conversation_album_items(conversation)
+               if row.get("price") and Decimal(str(row["price"])) == Decimal(str(price))]
+    if len(matched) != 1:
+        return None
+    return AICatalogItem.objects.filter(id=matched[0].get("catalog_id"), is_active=True).first()
+
+
+def ai_catalog_lead_rows(arguments, conversation=None, estimated_price=None):
     """AI katalogidan tanlangan mahsulotlar leadga izoh sifatida yoziladi.
 
     AI ko'radigan katalog — alohida `AICatalogItem` ro'yxati, sklad katalogi emas.
     Shuning uchun `LeadCatalogUsage` ochilmaydi: u sklad mahsulotiga bog'lanadi va
     haqiqiy mahsulotni operator o'zi tanlaydi.
+
+    Mahsulot uch bosqichda aniqlanadi: aniq catalog_id, shu suhbatda yuborilgan
+    albomdagi aynan shu nom, va oxirgi chora sifatida umumiy nom qidiruvi.
     """
     rows = []
     for row in arguments.get("catalog_items") or []:
@@ -1168,6 +1224,8 @@ def ai_catalog_lead_rows(arguments):
             continue
         item = AICatalogItem.objects.filter(id=row.get("catalog_id"), is_active=True).first() if row.get("catalog_id") else None
         if not item:
+            item = album_item_by_name(conversation, row.get("catalog_name"))
+        if not item:
             item = _catalog_item_for_ai(row.get("catalog_name"))
         rows.append({
             "catalog_name": item.name if item else str(row.get("catalog_name") or "").strip()[:180],
@@ -1175,7 +1233,33 @@ def ai_catalog_lead_rows(arguments):
             "ai_catalog_item": item.id if item else None,
             "price": str(item.price) if item else "",
         })
-    return rows
+    return correct_lead_row_by_price(rows, conversation, estimated_price)
+
+
+def correct_lead_row_by_price(rows, conversation, estimated_price):
+    """AI aytgan narx bilan yozilgan mahsulot narxi ziddiyatda bo'lsa tuzatadi.
+
+    Mijozga 199 000 deb aytib, leadga 1 000 000 lik qatorni yozib qo'yish
+    operatorga boshqa gulning rasmini yuboradi. Narx — eng ishonchli tekshiruv:
+    AI javobida aytgan summa albomdagi bitta mahsulotga to'g'ri kelsa, o'sha
+    mahsulot olinadi.
+    """
+    if len(rows) != 1 or estimated_price in (None, ""):
+        return rows
+    row = rows[0]
+    if int(row.get("quantity") or 1) != 1:
+        return rows
+    try:
+        asked = Decimal(str(estimated_price))
+    except (TypeError, ValueError, ArithmeticError):
+        return rows
+    if row.get("price") and Decimal(row["price"]) == asked:
+        return rows
+    item = album_item_by_price(conversation, asked)
+    if not item or item.id == row.get("ai_catalog_item"):
+        return rows
+    print("LEAD_CATALOG_CORRECTED_BY_PRICE from=%s to=%s price=%s" % (row.get("ai_catalog_item"), item.id, asked), flush=True)
+    return [{"catalog_name": item.name, "quantity": 1, "ai_catalog_item": item.id, "price": str(item.price)}]
 
 
 def lead_request_details(arguments):
@@ -1509,6 +1593,169 @@ def shared_link_is_the_media(attachment, media_url):
     return "instagram.com/" in (media_url or "").lower()
 
 
+# Ulashilgan post uchun eslab qolinadigan jadval. Kalitlar: media raqami va
+# izohning normallashtirilgan ko'rinishi, qiymat — permalink.
+SHARED_POST_MEMORY_KEY = "shared_post_permalinks"
+SHARED_POST_MEMORY_LIMIT = 400
+# O'z postlarimiz ro'yxati shu muddat ichida qayta so'ralmaydi. Har xabarda
+# Graph API ga chiqish javobni sekinlashtiradi va kvotani yeydi.
+OWN_MEDIA_CACHE_SECONDS = 3600
+OWN_MEDIA_CACHE_KEY = "own_media_index"
+
+
+def shared_caption_key(caption):
+    """Izohni solishtirish uchun normallashtirilgan kalit.
+
+    Bir xil post reel va post ko'rinishida kelganda izoh aynan bir xil bo'ladi,
+    faqat bo'shliqlar va registr farq qilishi mumkin.
+    """
+    text = re.sub(r"\s+", " ", (caption or "")).strip().lower()
+    return text[:400]
+
+
+def integration_extra():
+    integration, _ = IntegrationSettings.objects.get_or_create(pk=1)
+    return integration, dict(integration.extra or {})
+
+
+def remember_shared_post_permalink(attachment):
+    """Permalink bilan kelgan ulashuvni media raqami va izohi bo'yicha eslab qoladi.
+
+    Real holat: bir xil post ikki xil kelib turadi. `ig_reel` ulashuvida
+    permalink bor, `ig_post` ulashuvida esa faqat lookaside CDN havolasi —
+    o'shanda katalog mosligi ishlamay butun katalog ketardi. Ikkalasining
+    izohi AYNAN bir xil, shuning uchun bir marta ko'rgan postni keyin
+    tanib olamiz.
+    """
+    url = (attachment or {}).get("url") or ""
+    if "instagram.com/" not in url:
+        return
+    keys = shared_post_memory_keys(attachment)
+    if not keys:
+        return
+    integration, extra = integration_extra()
+    table = dict(extra.get(SHARED_POST_MEMORY_KEY) or {})
+    changed = False
+    for key in keys:
+        if table.get(key) != url:
+            table[key] = url
+            changed = True
+    if not changed:
+        return
+    if len(table) > SHARED_POST_MEMORY_LIMIT:
+        table = dict(list(table.items())[-SHARED_POST_MEMORY_LIMIT:])
+    extra[SHARED_POST_MEMORY_KEY] = table
+    integration.extra = extra
+    integration.save(update_fields=["extra", "updated_at"])
+
+
+def shared_post_memory_keys(attachment):
+    keys = []
+    media_id = (attachment or {}).get("media_id") or ""
+    if media_id:
+        keys.append("media:%s" % media_id)
+    caption_key = shared_caption_key((attachment or {}).get("caption"))
+    if caption_key:
+        keys.append("caption:%s" % caption_key)
+    return keys
+
+
+def remembered_shared_post_permalink(attachment):
+    keys = shared_post_memory_keys(attachment)
+    if not keys:
+        return ""
+    _, extra = integration_extra()
+    table = extra.get(SHARED_POST_MEMORY_KEY) or {}
+    for key in keys:
+        url = table.get(key)
+        if url:
+            return url
+    return ""
+
+
+def own_media_index(force=False):
+    """O'z postlarimizning media raqami va izohi -> permalink jadvali.
+
+    Graph API faqat o'z akkauntlarimizning postlarini beradi, shuning uchun bu
+    jadvalda topilgan post aniq bizning profilimizdan. Jadval bir soat keshda
+    turadi.
+    """
+    integration, extra = integration_extra()
+    cache = extra.get(OWN_MEDIA_CACHE_KEY) or {}
+    fetched_at = cache.get("fetched_at") or 0
+    now = int(timezone.now().timestamp())
+    if not force and cache.get("by_media") and now - int(fetched_at) < OWN_MEDIA_CACHE_SECONDS:
+        return cache
+    from .platform_services import instagram_recent_media
+
+    try:
+        rows = instagram_recent_media()
+    except Exception as error:
+        print(f"OWN_MEDIA_INDEX_FAILED error={error}", flush=True)
+        return cache
+    if not rows:
+        return cache
+    by_media = {}
+    by_caption = {}
+    for row in rows:
+        permalink = (row.get("permalink") or "").strip()
+        if not permalink:
+            continue
+        media_id = str(row.get("id") or "").strip()
+        if media_id:
+            by_media[media_id] = permalink
+        caption_key = shared_caption_key(row.get("caption"))
+        # Bir xil izohli ikki post bo'lishi mumkin. Katalogga bog'langani
+        # afzal — mijoz aynan o'shani so'rayapti.
+        if caption_key and (caption_key not in by_caption or ai_catalog_link_count(permalink) > ai_catalog_link_count(by_caption[caption_key])):
+            by_caption[caption_key] = permalink
+    cache = {"fetched_at": now, "by_media": by_media, "by_caption": by_caption}
+    extra[OWN_MEDIA_CACHE_KEY] = cache
+    integration.extra = extra
+    integration.save(update_fields=["extra", "updated_at"])
+    return cache
+
+
+def ai_catalog_link_count(permalink):
+    if not permalink:
+        return 0
+    return len(items_matching_link(list(available_ai_catalog_queryset()), permalink))
+
+
+def own_post_permalink_for_shared_media(attachment):
+    """Ulashilgan post/reel bizning profilimizdanmi va permalinki nima.
+
+    Tartib qat'iy: permalink -> media raqami -> izoh. Permalink kelgan bo'lsa
+    havolaning o'zi bilan solishtiriladi, izoh faqat permalink umuman
+    kelmaganda ishlatiladi.
+    """
+    url = (attachment or {}).get("url") or ""
+    if "instagram.com/" in url:
+        return url
+    remembered = remembered_shared_post_permalink(attachment)
+    if remembered:
+        return remembered
+    media_id = (attachment or {}).get("media_id") or ""
+    caption_key = shared_caption_key((attachment or {}).get("caption"))
+    if not media_id and not caption_key:
+        return ""
+    index = own_media_index()
+    permalink = (index.get("by_media") or {}).get(media_id) if media_id else ""
+    if not permalink and caption_key:
+        permalink = (index.get("by_caption") or {}).get(caption_key) or ""
+    if permalink:
+        print(f"SHARED_POST_RESOLVED media={media_id or '-'} permalink={permalink}", flush=True)
+    return permalink or ""
+
+
+def resolved_shared_media_attachment(attachment):
+    """Ulashuvni permalink bilan boyitilgan ko'rinishda qaytaradi."""
+    permalink = own_post_permalink_for_shared_media(attachment)
+    if not permalink or permalink == (attachment or {}).get("url"):
+        return attachment, ""
+    return dict(attachment or {}, resolved_permalink=permalink), permalink
+
+
 def social_post_for_media(attachment):
     """Mijoz yuborgan story/reel qaysi bizning postimiz ekanini bazadan topadi.
 
@@ -1634,37 +1881,75 @@ SHARED_LINK_PATTERN = re.compile(r"instagram\.com/(reel|reels|p|tv)/", re.IGNORE
 UNLINKED_MEDIA_SILENCE_WINDOW = timedelta(minutes=15)
 
 
-def shared_link_attachments(message):
-    """Xabardagi Instagram reel/post havolalari."""
+def shared_media_attachments(message):
+    """Xabardagi ulashilgan Instagram post/reel qatorlari."""
     rows = []
     for attachment in (message.metadata or {}).get("attachments", []) or []:
-        url = attachment.get("url") or ""
-        if SHARED_LINK_PATTERN.search(url):
-            rows.append({"kind": attachment.get("kind") or "media", "url": url})
+        if not shared_post_attachment(attachment):
+            continue
+        row = {"kind": attachment.get("kind") or "media", "url": attachment.get("url") or ""}
+        for key in ("caption", "media_id"):
+            if attachment.get(key):
+                row[key] = attachment[key]
+        rows.append(row)
     return rows
 
 
-def shared_link_is_in_the_system(attachment, items=None):
-    """Ulashilgan havola bazadagi story/post yoki katalog mahsulotiga bog'langanmi.
+def shared_post_attachment(attachment):
+    """Bu mijozning o'z rasmi emas, ulashilgan post/reel.
 
-    Bog'lanmagan bo'lsa bu havola haqida aytadigan hech narsamiz yo'q: rasm tahlil
-    qilinmaydi (video), nomi ham narxi ham noma'lum. Real suhbatlarda AI o'shanda
-    butun katalogni yuborib operatorni chaqirardi — mijozga ham, operatorga ham
-    foydasi yo'q ikkita harakat.
+    Ikki dalil: havolaning o'zi instagram.com posti, yoki webhook payloadida
+    ulashuvga xos media raqami kelgan (mijozning o'z rasmida u bo'lmaydi).
     """
     url = (attachment or {}).get("url") or ""
-    if not url:
-        return False
-    if social_post_for_media(attachment):
+    if SHARED_LINK_PATTERN.search(url):
         return True
+    return bool((attachment or {}).get("media_id"))
+
+
+def shared_media_verdict(attachment, items=None):
+    """Ulashilgan post/reel haqida yakuniy qaror.
+
+    permalink — havolaning o'zi yoki eslab qolingan/Graph API dan topilgan
+    permalink. ours — post bizning profilimizdan. catalog — o'sha postga
+    bog'langan katalog mahsulotlari.
+
+    Tartib qat'iy: permalink birinchi, keyin media raqami, oxirida izoh.
+    """
+    url = (attachment or {}).get("url") or ""
+    if not url or not shared_post_attachment(attachment):
+        return {"shared": False, "permalink": "", "ours": False, "catalog": []}
     catalog_items = ai_catalog_match_items() if items is None else items
-    # conversation berilmaydi: suhbatdagi boshqa havolalar bu reelni tizimda bor
+    permalink = url if "instagram.com/" in url else own_post_permalink_for_shared_media(attachment)
+    ours = bool(social_post_for_media(attachment))
+    if permalink and not ours:
+        key = media_url_match_key(permalink)
+        index = own_media_index()
+        ours = any(media_url_match_key(value) == key for value in (index.get("by_media") or {}).values())
+    link_attachment = dict(attachment, url=permalink) if permalink and permalink != url else attachment
+    # conversation berilmaydi: suhbatdagi boshqa havolalar bu postni tizimda bor
     # qilib ko'rsatmasligi kerak.
-    return bool(direct_ai_catalog_link_matches(catalog_items, url, attachment=attachment))
+    matched = direct_ai_catalog_link_matches(catalog_items, permalink or url, attachment=link_attachment)
+    if matched:
+        ours = True
+    return {"shared": True, "permalink": permalink, "ours": ours, "catalog": matched}
+
+
+def shared_link_is_in_the_system(attachment, items=None):
+    """Ulashilgan post haqida aytadigan gapimiz bormi.
+
+    Bo'lmasa bu havola haqida hech narsa bilmaymiz: video tahlil qilinmaydi,
+    nomi ham narxi ham noma'lum. Real suhbatlarda AI o'shanda butun katalogni
+    yuborib operatorni chaqirardi — mijozga ham, operatorga ham foydasi yo'q.
+    """
+    verdict = shared_media_verdict(attachment, items=items)
+    if not verdict["shared"]:
+        return False
+    return bool(verdict["ours"] or verdict["catalog"])
 
 
 def unlinked_shared_link_in_message(message, items=None):
-    for attachment in shared_link_attachments(message):
+    for attachment in shared_media_attachments(message):
         if not shared_link_is_in_the_system(attachment, items=items):
             return attachment
     return None
@@ -1918,17 +2203,47 @@ def tool_results_sent_catalog(tool_results, catalog_id):
 
 # "Albomni yubordim", "rasmini yubordim" — javob rasm yuborilgan deb turgan
 # so'zlar. Mijozdan yuborishni SO'RAGAN gaplar ("yuborsangiz", "yuboring") bu
-# yerga tushmaydi: fe'l o'tgan zamon va birinchi shaxsda bo'lishi shart.
-PHOTO_CLAIM_WORDS = re.compile(r"albom|альбом|rasm|surat|фото", re.IGNORECASE)
+# yerga tushmaydi: fe'l birinchi shaxsda bo'lishi shart.
+PHOTO_CLAIM_WORDS = re.compile(
+    r"albom|альбом|rasm|расм|surat|сурат|фото|katalog|каталог", re.IGNORECASE)
+# Kelasi zamon ham hisobga olinadi. Real suhbat 2141: "Hozir katalogni qayta
+# yuboraman" deb yozdi va hech narsa yubormadi — o'sha va'da ham da'vo.
 PHOTO_CLAIM_VERBS = re.compile(
-    r"yubord(im|ik)|jo['‘’ʻ]?natd(im|ik)|otpravil|отправил|отправила|скинул|прислал",
+    r"yubord(im|ik)|yubor(aman|amiz)|jo['‘’ʻ]?natd(im|ik)|jo['‘’ʻ]?nat(aman|amiz)"
+    r"|юбордим|юбордик|юбораман|юборамиз|ташаб"
+    r"|otpravil|отправил|отправила|отправлю|отправим|скинул|скину|прислал|пришлю",
+    re.IGNORECASE)
+# "Shular bor", "shulardan tanlang", "hozir bizda borlari shular" — javob
+# rasmlarga barmoq bilan ko'rsatib turadi. Rasm yuborilmasa bu gap yolg'on.
+# Real suhbat 2141: model uch marta "400 mingga shular bor" deb yozdi, hech
+# qanday tool chaqirmadi — o'zining kechagi javobini tarixdan ko'chirib oldi.
+PHOTO_POINTER_WORDS = re.compile(
+    r"\bshular|\bшулар|\bborlari\b|\bборлари\b|\bquyidagilar|\bвот эти\b|\bэти вариант",
     re.IGNORECASE)
 PHOTO_SENDING_TOOLS = {"send_catalog_album", "send_catalog_image", "send_post_image"}
 
 
 def reply_claims_a_photo_was_sent(text):
     value = text or ""
+    if PHOTO_POINTER_WORDS.search(value):
+        return True
     return bool(PHOTO_CLAIM_WORDS.search(value) and PHOTO_CLAIM_VERBS.search(value))
+
+
+def catalog_ids_from_tool_results(tool_results):
+    """Shu navbatda get_catalog qaytargan mahsulot raqamlari.
+
+    Mijoz "400 mingga qanaqa gullar bor" deb so'ragan bo'lsa butun katalogni
+    yuborish javob emas — o'sha budjetga chiqqan qatorlar yuboriladi.
+    """
+    for row in reversed(tool_results or []):
+        if row.get("name") != "get_catalog":
+            continue
+        rows = (row.get("output") or {}).get("catalog") or []
+        ids = [item.get("catalog_id") for item in rows if item.get("catalog_id")]
+        if ids:
+            return ids
+    return []
 
 
 def tool_results_sent_any_photo(tool_results):
@@ -1952,13 +2267,80 @@ def apply_sent_photo_claim_safeguard(conversation, result, tool_results):
         return result
     if tool_results_sent_any_photo(tool_results):
         return result
-    if whole_catalog_already_sent(conversation):
-        # Butun katalog bu suhbatda ko'rilgan. Uchinchi marta yuborish spam.
-        return result
-    album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
+    # Bu yerda "allaqachon yuborilgan" to'sig'i qo'yilmaydi: javob rasm
+    # yuborilgan deb turibdi, demak rasm ketishi SHART. Aks holda mijoz
+    # bo'sh gapni oladi — real suhbat 2141 da xuddi shunday bo'ldi.
+    ids = catalog_ids_from_tool_results(tool_results)
+    items = catalog_album_items(ids) if ids else catalog_album_items([])
+    if not items:
+        items = catalog_album_items([])
+        ids = []
+    album = send_catalog_album(conversation, items, whole_catalog=not ids)
     tool_results.append({"name": "send_catalog_album",
-                         "arguments": {"catalog_ids": [], "safeguard": True},
+                         "arguments": {"catalog_ids": ids, "safeguard": True},
                          "output": album})
+    result["tool_results"] = tool_results
+    return result
+
+
+# "Operatorlarimiz sizga tez orada yozib yuborishadi" — bu va'da. Operatorlar
+# guruhiga xabar ketmasa mijoz javob kutib qoladi va hech kim bilmaydi.
+# Ish vaqti haqidagi gap ("operatorlarimiz 08:00 dan 00:00 gacha aloqada")
+# va'da emas, shuning uchun fe'l ham talab qilinadi.
+OPERATOR_PROMISE_WORDS = re.compile(r"operator|оператор", re.IGNORECASE)
+OPERATOR_PROMISE_VERBS = re.compile(
+    r"yozib\s*yubor|yozishadi|bog['‘’ʻ]?lan|javob\s*ber|ma['‘’ʻ]?lumot\s*ber|aniqlash|aniq\s*ayt"
+    r"|ёзиб\s*юбор|ёзишади|боғлан|жавоб\s*бер|маълумот\s*бер"
+    r"|напиш|свяж|уточн|ответ|сообщ",
+    re.IGNORECASE)
+
+
+def reply_promises_an_operator(text):
+    value = text or ""
+    return bool(OPERATOR_PROMISE_WORDS.search(value) and OPERATOR_PROMISE_VERBS.search(value))
+
+
+def operator_already_told_about_this_batch(conversation):
+    """Oxirgi AI javobidan keyin operatorlar guruhiga xabar ketganmi.
+
+    Bir suhbat bo'yicha emas, aynan shu xabar to'plami bo'yicha qaraladi: mijoz
+    yangi savol bilan qaytsa operator yana xabardor bo'lishi kerak, lekin bitta
+    javobga ikkita chaqiruv ketmasligi ham kerak.
+    """
+    for message in conversation.messages.order_by("-created_at", "-id")[:40]:
+        if message.sender == "ai":
+            return False
+        metadata = message.metadata or {}
+        if "operator_needed" in metadata or "operator_lead_notified" in metadata:
+            return True
+    return False
+
+
+def apply_operator_promise_safeguard(conversation, result, tool_results):
+    """"Operatorlarimiz yozib yuborishadi" deb yozib, guruhga xabar bermaslikni to'xtatadi.
+
+    Real suhbatlar 2182, 2218, 2230: uchalasida ham shu jumla yozilgan, lekin
+    call_operator chaqirilmagan. Operatorlar mijozning kutib turganini bilmadi
+    va yetti soatdan keyin qo'lda yozishdi.
+
+    Javob matniga tegilmaydi — gap yolg'on bo'lib qolmasligi uchun chaqiruv shu
+    yerda yuboriladi.
+    """
+    if not reply_promises_an_operator(result.get("reply")):
+        return result
+    for row in tool_results or []:
+        if row.get("name") in {"call_operator", "client_lead_create"} and (row.get("output") or {}).get("ok"):
+            return result
+    if unlinked_shared_media_silence(conversation):
+        # Tizimda yo'q reel operatorni chaqirish sababi emas.
+        return result
+    if operator_already_told_about_this_batch(conversation):
+        return result
+    reason = (result.get("reply") or "")[:200]
+    output = notify_operator_needed(conversation, reason)
+    tool_results.append({"name": "call_operator",
+                         "arguments": {"reason": reason, "safeguard": True},
+                         "output": output})
     result["tool_results"] = tool_results
     return result
 
@@ -2023,6 +2405,12 @@ def media_caption_for_attachment(attachment):
     """
     from .platform_services import find_media_by_permalink
 
+    # Instagram ulashilgan postning izohini webhook payloadida o'zi beradi.
+    # Bu Graph API so'rovidan ham aniqroq: CDN havolasi bilan kelgan ulashuvda
+    # permalink umuman yo'q va API dan qidirib bo'lmaydi.
+    own_caption = (attachment or {}).get("caption") or ""
+    if own_caption.strip():
+        return own_caption
     url = (attachment or {}).get("url") or ""
     if "instagram.com/" not in url:
         return ""
@@ -2072,6 +2460,14 @@ MEDIA_MATCH_UNLINKED_SHARED_MEDIA_INSTRUCTION = (
     "YUBORMA, gul nomi va narx AYTMA, call_operator ni CHAQIRMA va operatorga "
     "yo'naltirma. Mijozning o'zi alohida savol yozgan bo'lsa faqat o'sha savolga "
     "javob ber. Savoli bo'lmasa hech narsa yozmaslik ham to'g'ri javob."
+)
+
+MEDIA_MATCH_OWN_POST_NO_CATALOG_INSTRUCTION = (
+    "Mijoz ulashgan post bizning profilimizdan, lekin unga bitta ham katalog "
+    "mahsuloti bog'lanmagan — qaysi gul ekanini bilmaymiz. Gul nomini va narxni "
+    "AYTMA, taxmin qilma, katalog albomini YUBORMA. Mijozga qisqa ayt: o'sha "
+    "post bo'yicha operatorlarimiz aniq javob berishadi. VA call_operator ni "
+    "CHAQIR — operatorlar mijoz kutib turganini bilishi kerak."
 )
 
 MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION = (
@@ -2151,7 +2547,11 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "instruction_uz": MEDIA_MATCH_AD_CATALOG_INSTRUCTION,
         })
 
-    if SHARED_LINK_PATTERN.search(media_url) and not shared_link_is_in_the_system(attachment, items=items):
+    # Permalink bilan kelgan ulashuv eslab qolinadi: bir xil post keyin CDN
+    # havolasi bilan kelganda faqat shu jadval uni tanib oladi.
+    remember_shared_post_permalink(attachment)
+    shared = shared_media_verdict(attachment, items=items)
+    if shared["shared"] and not shared["ours"] and not shared["catalog"]:
         # Tizimda yo'q reel. Odatda bu yerga umuman kelinmaydi — javob yo'li
         # unlinked_shared_media_silence da to'xtaydi. Mijoz keyin alohida savol
         # yozgan bo'lsa esa shu natija reelni javobdan chetda qoldiradi.
@@ -2169,12 +2569,18 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
             "instruction_uz": MEDIA_MATCH_UNLINKED_SHARED_MEDIA_INSTRUCTION,
         })
 
-    own_post = social_post_for_media(attachment)
-    linked = direct_ai_catalog_link_matches(items, media_url, attachment=attachment, conversation=conversation)
+    # Ulashuv CDN havolasi bo'lib kelgan bo'lsa, endi uning permalinki ma'lum —
+    # katalog mosligi aynan shu havola bo'yicha qidiriladi. Rasm tahlili uchun
+    # esa asl media_url qoladi: permalinkni ko'rish so'rovi o'qiy olmaydi.
+    link_url = shared["permalink"] or media_url
+    link_attachment = dict(attachment, url=link_url) if link_url != media_url else attachment
+
+    own_post = social_post_for_media(link_attachment)
+    linked = shared["catalog"] or direct_ai_catalog_link_matches(items, link_url, attachment=link_attachment, conversation=conversation)
 
     # Reel tizimga ulanmagan, lekin izohida narxi yozilgan bo'lsa — o'sha narxdagi
     # gullarimizni ko'rsatish rasm tahlilidan ham aniqroq javob beradi.
-    if not linked and not own_post and attachment.get("kind") in {"reel", "post", "story"}:
+    if not linked and not own_post and (shared["shared"] or attachment.get("kind") in {"reel", "post", "story"}):
         priced, caption_price = caption_price_matches(items, attachment)
         if priced:
             return media_match_result(conversation, {
@@ -2189,6 +2595,25 @@ def match_ai_catalog_by_media(conversation, source_url="", user_text="", limit=M
                 "near_matches": [],
                 "instruction_uz": MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION,
             })
+
+    # Post bizning profilimizdan, lekin unga bitta ham katalog mahsuloti
+    # bog'lanmagan. Taxmin qilib gul nomi aytish yolg'on bo'ladi, jim qolish
+    # esa mijozni javobsiz qoldiradi — bu operatorning ishi.
+    if shared["shared"] and shared["ours"] and not linked and not own_post:
+        return media_match_result(conversation, {
+            "ok": True,
+            "allow_send": False,
+            "allow_group": False,
+            "detail": "own_post_without_catalog",
+            "source": attachment,
+            "source_description": "Ulashilgan post bizning profilimizdan, lekin katalogga bog'lanmagan.",
+            "own_post": True,
+            "permalink": shared["permalink"],
+            "matches": [],
+            "group_matches": [],
+            "near_matches": [],
+            "instruction_uz": MEDIA_MATCH_OWN_POST_NO_CATALOG_INSTRUCTION,
+        })
 
     story = social_post_answer(own_post) if not linked else None
     if story:
@@ -2617,7 +3042,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va mijozga business.operator_telegram_text matnini aynan yoz. Telefon so'ralmaydi.",
+            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va mijozga aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" hamda call_operator ni chaqir. Telefon so'ralmaydi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3108,8 +3533,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                 "detail": "catalog_already_sent",
                 "instruction_uz": (
                     "Butun katalog bu suhbatda allaqachon yuborilgan, qayta yuborma. "
-                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa business.operator_telegram_text "
-                    "matnini aynan ishlat, operatorlar u yerda aniq javob berishadi. "
+                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa aynan shu jumlani yoz: "
+                    "\"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir. "
                     "Telefon raqami so'rama."
                 ),
             }
@@ -3138,8 +3563,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                     "catalog_id": item.id,
                     "instruction_uz": (
                         f"{item.name} rasmi ham, butun katalog ham bu suhbatda allaqachon "
-                        "yuborilgan. Hech narsa yuborma. Mijozga business.operator_telegram_text "
-                        "matnini aynan yoz."
+                        "yuborilgan. Hech narsa yuborma. Mijozga aynan shu jumlani yoz: "
+                        "\"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir."
                     ),
                 }
             album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
@@ -3226,7 +3651,7 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
     desired_date = parse_lead_date(arguments.get("desired_date"))
     desired_time = (arguments.get("desired_time") or "").strip()
     details = {
-        "catalog_items": ai_catalog_lead_rows(arguments),
+        "catalog_items": ai_catalog_lead_rows(arguments, conversation, estimated_price),
         "stock_items": arguments.get("stock_items") or [],
         "note": arguments.get("note") or "",
         "created_by": "ai_tool",
@@ -3552,6 +3977,8 @@ def ai_reply(conversation):
     # Bu qorovul tool ishlamagan navbatda ham kerak — aynan o'shanda AI hech
     # narsa yubormay turib "yubordim" deb yozib qo'ygan edi.
     result = apply_sent_photo_claim_safeguard(conversation, result, tool_results)
+    # Operator va'dasi ham xuddi shunday: tool ishlamagan navbatda ham tekshiriladi.
+    result = apply_operator_promise_safeguard(conversation, result, tool_results)
     if cyrillic_mode and result.get("reply"):
         result["reply_latin"] = result["reply"]
         result["reply"] = latin_to_cyrillic(result["reply"])

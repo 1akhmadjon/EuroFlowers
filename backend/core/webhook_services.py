@@ -361,6 +361,31 @@ def first_media_attachment(message):
     return {}
 
 
+# Ulashilgan post izohi shu kalitlarda keladi. Havola qidiruvi bu kalitlarga
+# tegmaydi — aks holda izoh ichidagi havola ulashilgan media bo'lib qolardi.
+SHARED_CAPTION_KEYS = ("title", "caption")
+# Ulashuv turiga qarab media raqami boshqa kalitda keladi. ig_reel da
+# reel_video_id bizning Graph media id mizga aynan mos keladi, ig_post dagi
+# ig_post_media_id esa boshqa namespace — u faqat postni ajratish uchun.
+SHARED_MEDIA_ID_KEYS = ("ig_reel_media_id", "reel_video_id", "ig_post_media_id", "reel_media_id", "media_share_id")
+
+
+def shared_media_caption(payload):
+    for key in SHARED_CAPTION_KEYS:
+        value = (payload or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def shared_media_id(payload):
+    for key in SHARED_MEDIA_ID_KEYS:
+        value = (payload or {}).get(key)
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 def instagram_message_metadata(event, webhook_event=None):
     message = event.get("message", {}) or {}
     referral = event.get("referral") or message.get("referral") or {}
@@ -369,8 +394,20 @@ def instagram_message_metadata(event, webhook_event=None):
     for attachment in message.get("attachments", []) or []:
         attachment_type = attachment.get("type", "")
         payload = attachment.get("payload", {}) or {}
-        for url in urls_from_value(payload):
-            rows.append({"kind": attachment_kind("instagram_attachment", attachment_type, url), "type": attachment_type, "url": url, "source": "instagram_attachment"})
+        # Instagram ulashilgan post izohini payload.title da beradi. Uni
+        # havola qidiruvidan chiqarib tashlaymiz: izoh ichidagi havola
+        # ulashilgan media emas. Izohning o'zi esa alohida saqlanadi — bir xil
+        # post reel va post ko'rinishida kelganda AYNAN bir xil izoh bilan
+        # keladi va faqat shu izoh ikkalasini bog'laydi.
+        caption = shared_media_caption(payload)
+        media_id = shared_media_id(payload)
+        for url in urls_from_value({key: value for key, value in payload.items() if key not in SHARED_CAPTION_KEYS}):
+            row = {"kind": attachment_kind("instagram_attachment", attachment_type, url), "type": attachment_type, "url": url, "source": "instagram_attachment"}
+            if caption:
+                row["caption"] = caption[:2000]
+            if media_id:
+                row["media_id"] = media_id
+            rows.append(row)
     for source, value in [
         ("instagram_message", message),
         ("instagram_referral", referral),

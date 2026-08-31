@@ -8634,10 +8634,13 @@ class NoOperatorHandoffToolTests(TestCase):
         result = execute_ai_tool("handoff_media_to_operator", {"summary": "x", "phone": None, "customer_refused_phone": True}, conversation)
         self.assertEqual(result, {"ok": False, "detail": "unknown_tool"})
 
-    def test_the_unmatched_photo_instruction_points_at_telegram(self):
+    def test_the_unmatched_photo_instruction_carries_the_ready_phrase(self):
+        """Maydonga murojaat emas, jumlaning o'zi — ko'rsatma mijozga chiqib ketmasin."""
         from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION
         for text in [MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION]:
-            self.assertIn("operator_telegram", text)
+            self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", text)
+            self.assertIn("call_operator", text)
+            self.assertNotIn("operator_telegram_text", text)
             self.assertIn("SO'RAMA", text)
             self.assertNotIn("handoff_media_to_operator", text)
 
@@ -11332,3 +11335,352 @@ class TestRunNeverReachesTheGroupsTests(TestCase):
     def test_the_outbound_block_is_armed(self):
         from .platform_services import outbound_blocked
         self.assertTrue(outbound_blocked())
+
+
+class CatalogClaimAlwaysSendsTests(TestCase):
+    """"Shular bor" yoki "yuboraman" deb yozilsa albom har doim ketadi.
+
+    Real suhbat 2141: mijoz "400 minga qanaqa gullar bor" deb so'radi, javob
+    "400 mingga shular bor" bo'ldi, bitta ham tool chaqirilmadi. Mijoz
+    "tashabermadizku" dedi, javob "Hozir katalogni qayta yuboraman" bo'ldi —
+    va yana yubormadi.
+    """
+
+    def setUp(self):
+        for name, price in [("Qizil Atir Kompazitsia", 199000), ("Pushti Buket", 400000),
+                            ("Oq Savat", 450000)]:
+            AICatalogItem.objects.create(name=name, arrangement_type="basket", price=price,
+                                         quantity=1, image_url="https://cdn.example.com/%s.jpg" % price)
+        self.customer = Customer.objects.create(instagram_user_id="ig-claim")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.conversation.messages.create(sender="customer", text="400 minga qanaqa gullar bor")
+
+    def _apply(self, reply, tool_results=None):
+        from unittest.mock import patch
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            return services.apply_sent_photo_claim_safeguard(
+                self.conversation, {"reply": reply}, tool_results if tool_results is not None else [])
+
+    def test_the_pointer_alone_is_a_claim(self):
+        for reply in ["400 mingga shular bor. Qaysi biri yoqdi, raqamini yozing.",
+                      "Hozirda bizda bor gullar shular, shulardan tanlang.",
+                      "Siz yuborgan reeldan hozir bizda borlari shular."]:
+            self.assertTrue(services.reply_claims_a_photo_was_sent(reply), reply)
+
+    def test_a_future_promise_is_a_claim(self):
+        self.assertTrue(services.reply_claims_a_photo_was_sent(
+            "Uzr, yubormagan ekanmiz. Hozir katalogni qayta yuboraman."))
+
+    def test_asking_the_customer_to_send_is_not_a_claim(self):
+        for reply in ["Manzilingizni xaritada belgilab yuborsangiz.",
+                      "To'lov chekining rasmini yuboring.",
+                      "Ism va telefon raqamingizni qoldiring.",
+                      "Operatorlarimiz 08:00 dan 00:00 gacha aloqada."]:
+            self.assertFalse(services.reply_claims_a_photo_was_sent(reply), reply)
+
+    def test_the_album_is_sent_even_when_no_tool_ran(self):
+        tool_results = []
+        result = self._apply("400 mingga shular bor. Qaysi biri yoqdi, raqamini yozing.", tool_results)
+        names = [row["name"] for row in result["tool_results"]]
+        self.assertEqual(names, ["send_catalog_album"])
+        self.assertTrue(result["tool_results"][0]["output"]["ok"])
+
+    def test_the_album_is_sent_a_second_time_when_the_claim_repeats(self):
+        """Bir marta yuborilgani ikkinchi marta yubormaslikka asos emas."""
+        self._apply("Hozirda bizda bor gullar shular.", [])
+        tool_results = []
+        result = self._apply("Uzr, yubormagan ekanmiz. Hozir katalogni qayta yuboraman.", tool_results)
+        self.assertEqual([row["name"] for row in result["tool_results"]], ["send_catalog_album"])
+
+    def test_the_budget_rows_are_sent_when_get_catalog_ran(self):
+        tool_results = [{"name": "get_catalog", "arguments": {}, "output": services.ai_catalog_result(min_price=400000, max_price=400000)}]
+        result = self._apply("400 mingga shular bor.", tool_results)
+        album = result["tool_results"][-1]
+        self.assertEqual(album["name"], "send_catalog_album")
+        prices = {row["price"] for row in album["output"]["items"]}
+        self.assertEqual(prices, {"400000.00", "450000.00"})
+
+    def test_nothing_is_sent_twice_in_one_turn(self):
+        tool_results = [{"name": "send_catalog_album", "arguments": {}, "output": {"ok": True, "items": []}}]
+        result = self._apply("Hozirda bizda bor gullar shular.", tool_results)
+        self.assertEqual([row["name"] for row in result["tool_results"]], ["send_catalog_album"])
+
+
+class OperatorPromiseIsAlwaysDeliveredTests(TestCase):
+    """"Operatorlarimiz yozib yuborishadi" deyilsa guruhga xabar ketadi.
+
+    Real suhbatlar 2182, 2218, 2230: uchalasida ham shu jumla yozilgan,
+    call_operator chaqirilmagan, operatorlar yetti soatdan keyin qo'lda yozgan.
+    """
+
+    def setUp(self):
+        self.customer = Customer.objects.create(instagram_user_id="ig-promise", name="Iroda")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.conversation.messages.create(sender="customer", text="Shulani narxi qancha")
+
+    def _apply(self, reply, tool_results=None):
+        from unittest.mock import patch
+        with patch("core.services.notify_operator_needed", return_value={"ok": True, "detail": ""}) as notify:
+            result = services.apply_operator_promise_safeguard(
+                self.conversation, {"reply": reply}, tool_results if tool_results is not None else [])
+        return result, notify
+
+    def test_the_promise_is_recognised(self):
+        for reply in ["Operatorlarimiz sizga tez orada yozib yuborishadi",
+                      "Bu bo'yicha operatorlarimiz aniq javob berishadi.",
+                      "Operatorlarimiz siz bilan bog'lanadi.",
+                      "Наши операторы вам напишут."]:
+            self.assertTrue(services.reply_promises_an_operator(reply), reply)
+
+    def test_working_hours_are_not_a_promise(self):
+        for reply in ["Operatorlarimiz 08:00 dan 00:00 gacha aloqada.",
+                      "Do'kon 24/7 ochiq.",
+                      "Qizil Atir Guldan Kompazitsia — 199 000 so'm."]:
+            self.assertFalse(services.reply_promises_an_operator(reply), reply)
+
+    def test_the_group_is_told_when_the_tool_was_not_called(self):
+        result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi")
+        notify.assert_called_once()
+        self.assertEqual([row["name"] for row in result["tool_results"]], ["call_operator"])
+        self.assertTrue(result["tool_results"][0]["arguments"]["safeguard"])
+
+    def test_it_stays_quiet_when_the_tool_already_ran(self):
+        tool_results = [{"name": "call_operator", "arguments": {}, "output": {"ok": True}}]
+        result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi", tool_results)
+        notify.assert_not_called()
+
+    def test_a_fresh_lead_counts_as_telling_the_operator(self):
+        tool_results = [{"name": "client_lead_create", "arguments": {}, "output": {"ok": True, "lead_id": 1}}]
+        result, notify = self._apply("Rahmat. Operatorlarimiz siz bilan bog'lanadi.", tool_results)
+        notify.assert_not_called()
+
+    def test_it_does_not_repeat_inside_one_batch(self):
+        self.conversation.messages.create(sender="system", text="", metadata={"operator_needed": {"reason": "x"}})
+        result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi")
+        notify.assert_not_called()
+
+    def test_it_fires_again_after_an_ai_reply(self):
+        self.conversation.messages.create(sender="system", text="", metadata={"operator_needed": {"reason": "x"}})
+        self.conversation.messages.create(sender="ai", text="Operatorlarimiz sizga yozib yuborishadi")
+        self.conversation.messages.create(sender="customer", text="Yana bir savol bor edi")
+        result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi")
+        notify.assert_called_once()
+
+    def test_an_unlinked_reel_never_calls_the_operator(self):
+        AICatalogItem.objects.create(name="Qizil", arrangement_type="basket", price=199000,
+                                     quantity=1, image_url="https://cdn.example.com/q.jpg")
+        self.conversation.messages.create(sender="customer", text="", metadata={
+            "attachments": [{"kind": "reel", "url": "https://www.instagram.com/reel/UNKNOWN9/"}]})
+        result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi")
+        notify.assert_not_called()
+
+
+class LeadCatalogComesFromTheAlbumTests(TestCase):
+    """Mijoz raqam bilan tanlaganda leadga aynan o'sha mahsulot yoziladi.
+
+    Real suhbat 1976: mijoz "26 chi buketdan" dedi, javob to'g'ri edi
+    (Buket Jumila... 199 000), lekin leadga nom bo'yicha "Savat Jumila Oq Atir
+    Guldan Yasalgan Kompazitsia" (1 000 000) yozildi va operatorlar guruhiga
+    boshqa gulning rasmi ketdi.
+    """
+
+    def setUp(self):
+        self.buket = AICatalogItem.objects.create(
+            name="Buket Jumila Va Oq Atir Guldan Yasalgan Kompazitsia", arrangement_type="bouquet",
+            price=199000, quantity=1, image_url="https://cdn.example.com/buket.jpg")
+        self.savat = AICatalogItem.objects.create(
+            name="Savat Jumila Oq Atir Guldan Yasalgan Kompazitsia", arrangement_type="basket",
+            price=1000000, quantity=1, image_url="https://cdn.example.com/savat.jpg")
+        self.customer = Customer.objects.create(instagram_user_id="ig-album-lead", name="Behruz", phone="+998938386608")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+        self.conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {
+            "ok": True, "whole_catalog": True, "items": [
+                {"position": 16, "catalog_id": self.savat.id, "name": self.savat.name, "price": "1000000.00", "delivered": True},
+                {"position": 26, "catalog_id": self.buket.id, "name": self.buket.name, "price": "199000.00", "delivered": True},
+            ]}})
+        self.conversation.messages.create(sender="customer", text="26 chi buketdan ertaga qberolislami")
+
+    def test_the_album_name_wins_over_the_fuzzy_matcher(self):
+        rows = services.ai_catalog_lead_rows(
+            {"catalog_items": [{"catalog_name": self.buket.name, "quantity": 1}]}, self.conversation)
+        self.assertEqual(rows[0]["ai_catalog_item"], self.buket.id)
+        self.assertEqual(rows[0]["price"], "199000.00")
+
+    def test_a_wrong_item_is_corrected_by_the_quoted_price(self):
+        """AI 199 000 deb aytgan bo'lsa 1 000 000 lik qator yozilib qolmaydi."""
+        rows = services.ai_catalog_lead_rows(
+            {"catalog_items": [{"catalog_id": self.savat.id, "quantity": 1}]},
+            self.conversation, estimated_price=199000)
+        self.assertEqual(rows[0]["ai_catalog_item"], self.buket.id)
+        self.assertEqual(rows[0]["price"], "199000.00")
+
+    def test_a_matching_price_is_left_alone(self):
+        rows = services.ai_catalog_lead_rows(
+            {"catalog_items": [{"catalog_id": self.savat.id, "quantity": 1}]},
+            self.conversation, estimated_price=1000000)
+        self.assertEqual(rows[0]["ai_catalog_item"], self.savat.id)
+
+    def test_an_explicit_catalog_id_without_a_price_is_kept(self):
+        rows = services.ai_catalog_lead_rows(
+            {"catalog_items": [{"catalog_id": self.savat.id, "quantity": 1}]}, self.conversation)
+        self.assertEqual(rows[0]["ai_catalog_item"], self.savat.id)
+
+    def test_the_operator_photo_follows_the_corrected_item(self):
+        from unittest.mock import patch
+        with patch("core.services.notify_operators_about_lead", return_value={"ok": True}):
+            result = execute_ai_tool("client_lead_create", {
+                "customer_name": "Behruz", "phone": "938386608",
+                "request_text": "26-positiondagi buket", "estimated_price": 199000,
+                "arrangement_type": "bouquet",
+                "catalog_items": [{"catalog_id": self.savat.id, "quantity": 1}],
+            }, self.conversation)
+        self.assertTrue(result["ok"])
+        lead = Lead.objects.get(id=result["lead_id"])
+        rows = services.lead_operator_media(lead, self.conversation)
+        self.assertEqual([row["url"] for row in rows], [self.buket.image_url])
+
+
+class SharedPostIsFoundInEitherShapeTests(TestCase):
+    """Bir xil post reel va post ko'rinishida kelganda ham topiladi.
+
+    Ahmad chatida (2236) reel permalinki keldi va katalog to'g'ri topildi.
+    denou_o7o_ (2225), Behruz (1976) va dilrabo (2218) da esa xuddi shu post
+    lookaside CDN havolasi bilan keldi — permalink yo'q, katalog topilmadi va
+    butun katalog ketdi. Izoh ikkalasida ham aynan bir xil.
+    """
+
+    PERMALINK = "https://www.instagram.com/reel/DIjgRABNbSf/"
+    CDN = "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18130428799414577&signature=Ab1t"
+    CAPTION = "Euroflowers Premiumdan 199.000 soʻmga shunaqa yaxshiliklarimizdan buyurtma berishga ulgurib qoling!"
+
+    def setUp(self):
+        self.item = AICatalogItem.objects.create(
+            name="London Va Oq Atirguldan Kompazitsia", arrangement_type="bouquet", price=199000,
+            quantity=1, image_url="https://cdn.example.com/london.jpg",
+            instagram_link=self.PERMALINK)
+        self.other = AICatalogItem.objects.create(
+            name="Kosmos Guli Bilan Alfalob Gulidan Buket", arrangement_type="bouquet", price=200000,
+            quantity=1, image_url="https://cdn.example.com/kosmos.jpg",
+            instagram_link=self.PERMALINK)
+        self.customer = Customer.objects.create(instagram_user_id="ig-shared")
+        self.conversation = Conversation.objects.create(customer=self.customer)
+
+    def _reel_message(self):
+        return self.conversation.messages.create(sender="customer", text="Shundan bormi", metadata={
+            "attachments": [{"kind": "reel", "url": self.PERMALINK, "caption": self.CAPTION,
+                             "media_id": "17889927054234439"}]})
+
+    def _cdn_message(self):
+        return self.conversation.messages.create(sender="customer", text="Buyurtma bermoqchi edim", metadata={
+            "attachments": [{"kind": "post", "url": self.CDN, "caption": self.CAPTION,
+                             "media_id": "18130428799414577"}]})
+
+    def test_a_permalink_share_matches_by_the_link_itself(self):
+        verdict = services.shared_media_verdict({"kind": "reel", "url": self.PERMALINK})
+        self.assertTrue(verdict["shared"])
+        self.assertEqual(sorted(item.id for item in verdict["catalog"]), sorted([self.item.id, self.other.id]))
+
+    def test_a_cdn_share_is_unknown_before_anything_is_learned(self):
+        verdict = services.shared_media_verdict({"kind": "post", "url": self.CDN, "media_id": "18130428799414577"})
+        self.assertTrue(verdict["shared"])
+        self.assertEqual(verdict["catalog"], [])
+        self.assertFalse(verdict["ours"])
+
+    def test_the_caption_learned_from_a_permalink_resolves_the_cdn_share(self):
+        services.remember_shared_post_permalink(
+            {"kind": "reel", "url": self.PERMALINK, "caption": self.CAPTION, "media_id": "17889927054234439"})
+        verdict = services.shared_media_verdict(
+            {"kind": "post", "url": self.CDN, "caption": self.CAPTION, "media_id": "18130428799414577"})
+        self.assertEqual(verdict["permalink"], self.PERMALINK)
+        self.assertTrue(verdict["ours"])
+        self.assertEqual(sorted(item.id for item in verdict["catalog"]), sorted([self.item.id, self.other.id]))
+
+    def test_a_customer_photo_is_never_treated_as_a_share(self):
+        row = {"kind": "photo", "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=999"}
+        self.assertFalse(services.shared_post_attachment(row))
+        self.assertFalse(services.shared_media_verdict(row)["shared"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_the_cdn_share_gets_the_right_group_after_learning(self):
+        from unittest.mock import patch
+        self._reel_message()
+        services.remember_shared_post_permalink(
+            {"kind": "reel", "url": self.PERMALINK, "caption": self.CAPTION, "media_id": "17889927054234439"})
+        self._cdn_message()
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            with patch("core.vision_services.analyze_image") as vision:
+                result = services.match_ai_catalog_by_media(self.conversation)
+        self.assertIn(result["detail"], {"instagram_link_group", "instagram_link_matched"})
+        vision.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_our_own_post_without_a_catalog_item_goes_to_the_operator(self):
+        from unittest.mock import patch
+        AICatalogItem.objects.all().update(instagram_link="")
+        self.conversation.messages.create(sender="customer", text="Bu gul nechpul", metadata={
+            "attachments": [{"kind": "post", "url": self.CDN, "media_id": "18130428799414577"}]})
+        with patch("core.services.own_media_index", return_value={"by_media": {"18130428799414577": self.PERMALINK}, "by_caption": {}}):
+            with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as album:
+                with patch("core.vision_services.analyze_image") as vision:
+                    result = services.match_ai_catalog_by_media(self.conversation)
+        self.assertEqual(result["detail"], "own_post_without_catalog")
+        self.assertTrue(result["own_post"])
+        self.assertIn("call_operator", result["instruction_uz"])
+        album.assert_not_called()
+        vision.assert_not_called()
+
+    def test_the_caption_price_answers_when_nothing_is_linked(self):
+        AICatalogItem.objects.all().update(instagram_link="")
+        rows = services.caption_price_matches(
+            services.ai_catalog_match_items(),
+            {"kind": "post", "url": self.CDN, "caption": self.CAPTION, "media_id": "18130428799414577"})
+        self.assertEqual(str(rows[1]), "199000")
+        self.assertEqual(sorted(item.id for item in rows[0]), sorted([self.item.id, self.other.id]))
+
+
+class SharedCaptionIsKeptFromTheWebhookTests(TestCase):
+    """Instagram ulashilgan post izohini payload.title da beradi — u saqlanadi."""
+
+    def test_the_post_caption_and_media_id_land_in_the_metadata(self):
+        from .webhook_services import instagram_message_metadata
+        event = {"message": {"mid": "m1", "attachments": [{"type": "ig_post", "payload": {
+            "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18130428799414577&signature=Ab",
+            "title": "Euroflowers Premiumdan 199.000 so'mga",
+            "ig_post_media_id": "18130428799414577",
+        }}]}}
+        rows = instagram_message_metadata(event)["attachments"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["caption"], "Euroflowers Premiumdan 199.000 so'mga")
+        self.assertEqual(rows[0]["media_id"], "18130428799414577")
+
+    def test_a_reel_share_keeps_its_video_id(self):
+        from .webhook_services import instagram_message_metadata
+        event = {"message": {"mid": "m2", "attachments": [{"type": "ig_reel", "payload": {
+            "url": "https://www.instagram.com/reel/DIjgRABNbSf/",
+            "title": "Aksiya muddati chegaralangan",
+            "reel_video_id": "17889927054234439",
+        }}]}}
+        rows = instagram_message_metadata(event)["attachments"]
+        self.assertEqual(rows[0]["url"], "https://www.instagram.com/reel/DIjgRABNbSf/")
+        self.assertEqual(rows[0]["media_id"], "17889927054234439")
+
+    def test_a_link_inside_the_caption_is_not_taken_as_the_media(self):
+        """Izoh ichidagi havola ulashilgan media emas."""
+        from .webhook_services import instagram_message_metadata
+        event = {"message": {"mid": "m3", "attachments": [{"type": "ig_post", "payload": {
+            "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=1",
+            "title": "Buyurtma uchun https://example.com/zakaz saytiga kiring",
+            "ig_post_media_id": "1",
+        }}]}}
+        urls = [row["url"] for row in instagram_message_metadata(event)["attachments"]]
+        self.assertEqual(urls, ["https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=1"])
+
+    def test_the_caption_reaches_the_ai_attachment_rows(self):
+        customer = Customer.objects.create(instagram_user_id="ig-caption")
+        conversation = Conversation.objects.create(customer=customer)
+        conversation.messages.create(sender="customer", text="Shundan bormi", metadata={"attachments": [
+            {"kind": "reel", "url": "https://www.instagram.com/reel/AAA111/", "caption": "199.000 so'mga",
+             "media_id": "17889927054234439"}]})
+        rows = customer_attachment_rows(conversation.messages.order_by("created_at", "id"))
+        self.assertEqual(rows[0]["caption"], "199.000 so'mga")
+        self.assertEqual(rows[0]["media_id"], "17889927054234439")
