@@ -1245,27 +1245,30 @@ def ai_catalog_lead_rows(arguments, conversation=None, estimated_price=None):
     albomdagi aynan shu nom, va oxirgi chora sifatida umumiy nom qidiruvi.
     """
     rows = []
+    asked_names = []
     for row in arguments.get("catalog_items") or []:
         quantity = int(row.get("quantity") or 1)
         if quantity <= 0:
             continue
+        asked_name = str(row.get("catalog_name") or "").strip()
         item = AICatalogItem.objects.filter(id=row.get("catalog_id"), is_active=True).first() if row.get("catalog_id") else None
         if not item:
-            item = album_item_by_name(conversation, row.get("catalog_name"))
+            item = album_item_by_name(conversation, asked_name)
         if not item and estimated_price not in (None, ""):
-            item = album_item_by_price(conversation, estimated_price, row.get("catalog_name") or "")
+            item = album_item_by_price(conversation, estimated_price, asked_name)
         if not item:
-            item = _catalog_item_for_ai(row.get("catalog_name"))
+            item = _catalog_item_for_ai(asked_name)
         rows.append({
-            "catalog_name": item.name if item else str(row.get("catalog_name") or "").strip()[:180],
+            "catalog_name": item.name if item else asked_name[:180],
             "quantity": quantity,
             "ai_catalog_item": item.id if item else None,
             "price": str(item.price) if item else "",
         })
-    return correct_lead_row_by_price(rows, conversation, estimated_price)
+        asked_names.append(asked_name)
+    return correct_lead_row_by_price(rows, conversation, estimated_price, asked_names)
 
 
-def correct_lead_row_by_price(rows, conversation, estimated_price):
+def correct_lead_row_by_price(rows, conversation, estimated_price, asked_names=()):
     """AI aytgan narx bilan yozilgan mahsulot narxi ziddiyatda bo'lsa tuzatadi.
 
     Mijozga 199 000 deb aytib, leadga 1 000 000 lik qatorni yozib qo'yish
@@ -1284,7 +1287,9 @@ def correct_lead_row_by_price(rows, conversation, estimated_price):
         return rows
     if row.get("price") and Decimal(row["price"]) == asked:
         return rows
-    item = album_item_by_price(conversation, asked, row.get("catalog_name") or "")
+    # AI aytgan nom eng ishonchli dalil — hal qilingan qatorning nomi emas.
+    asked_name = (list(asked_names) or [""])[0] or row.get("catalog_name") or ""
+    item = album_item_by_price(conversation, asked, asked_name)
     if not item or item.id == row.get("ai_catalog_item"):
         return rows
     print("LEAD_CATALOG_CORRECTED_BY_PRICE from=%s to=%s price=%s" % (row.get("ai_catalog_item"), item.id, asked), flush=True)
