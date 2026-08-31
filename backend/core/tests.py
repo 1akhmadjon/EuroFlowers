@@ -11169,7 +11169,7 @@ class UnlinkedReelIsIgnoredTests(TestCase):
         from unittest.mock import patch
         self._reel_message()
         with patch("core.services.notify_operator_needed") as notify:
-            result = execute_ai_tool(self.conversation, "call_operator", {"reason": "Reeldagi gulni topolmadim"})
+            result = execute_ai_tool("call_operator", {"reason": "Reeldagi gulni topolmadim"}, self.conversation)
         self.assertFalse(result["ok"])
         self.assertEqual(result["detail"], "unlinked_shared_media")
         notify.assert_not_called()
@@ -11179,7 +11179,7 @@ class UnlinkedReelIsIgnoredTests(TestCase):
         from unittest.mock import patch
         self.conversation.messages.create(sender="customer", text="Kelin buket kerak edi")
         with patch("core.services.notify_operator_needed", return_value={"ok": True, "detail": ""}) as notify:
-            result = execute_ai_tool(self.conversation, "call_operator", {"reason": "Kelin buketi"})
+            result = execute_ai_tool("call_operator", {"reason": "Kelin buketi"}, self.conversation)
         self.assertTrue(result["ok"])
         notify.assert_called_once()
 
