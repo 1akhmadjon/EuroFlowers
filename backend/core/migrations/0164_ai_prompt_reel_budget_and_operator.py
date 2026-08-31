@@ -246,9 +246,9 @@ def apply_prompt(apps, schema_editor):
     if prompt == (row.system_prompt or ""):
         return
     # Handle promptda qolib ketmasin: qolsa model uni yana javobga ko'chiradi.
-    assert "@euroflowerspremium" not in prompt, "promptda @euroflowerspremium qoldi"
-    assert "business.operator_telegram " not in prompt, "promptda business.operator_telegram qoldi"
-    assert "business.operator_telegram\n" not in prompt, "promptda business.operator_telegram qoldi"
+    for needle in ["@euroflowerspremium", "business.operator_telegram ", "business.operator_telegram\n"]:
+        at = prompt.find(needle)
+        assert at < 0, "promptda %r qoldi:\n%s" % (needle, prompt[max(0, at - 300):at + 160])
     row.system_prompt = prompt
     row.save(update_fields=["system_prompt"])
 
