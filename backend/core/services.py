@@ -829,14 +829,11 @@ def ai_catalog_result(query="", limit=24, arrangement_type="", min_price=None, m
         )
     if low is None and high is None:
         return result
-    band_low, band_high = catalog_price_band(low, high)
-    within = [row for row in rows if (band_low is None or Decimal(row["price"]) >= band_low) and (band_high is None or Decimal(row["price"]) <= band_high)]
+    # exact_match SO'RALGAN narxga qaraydi, kengaytirilgan oynaga emas. 350 000
+    # so'ragan mijozga 400 000 lik gulni "shu summaga bor" deb berish yolg'on
+    # bo'lardi — qatorlar o'sha oynadan olinadi, lekin rostini aytamiz.
+    within = [row for row in rows if (low is None or Decimal(row["price"]) >= low) and (high is None or Decimal(row["price"]) <= high)]
     below_cheapest = budget_below_cheapest(low, high)
-    if below_cheapest:
-        # Oyna yuqoriga ochilgani uchun 150 000 so'ragan mijozga 199 000 lik gul
-        # "so'ralgan narxda bor" bo'lib chiqib qolardi. Budjet katalogdan past
-        # bo'lsa bu holat mos kelish emas.
-        within = []
     window_low, window_high = budget_window(low, high)
     near_prices = [] if within or window_low is None else [
         row["price"] for row in rows

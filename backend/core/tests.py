@@ -7074,7 +7074,9 @@ class OperatorHandoffTests(TestCase):
             result = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "shu nechpul"}, conversation)
         self.assertFalse(result["ok"])
         self.assertFalse(result["allow_send"])
-        self.assertEqual(result["detail"], "media_url_not_image")
+        # Reel havolasi tizimda yo'q ekan — javob yo'li bundan ham oldin,
+        # unlinked_shared_media da to'xtaydi. Ko'rish so'rovi baribir ketmaydi.
+        self.assertEqual(result["detail"], "unlinked_shared_media")
         openai_class.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key", OPENAI_VISION_MODEL="vision-test")
