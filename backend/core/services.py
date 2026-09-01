@@ -3682,7 +3682,10 @@ ALBUM_WHOLE_CATALOG_INSTRUCTION = (
 
 ALBUM_PRICE_GROUP_INSTRUCTION = (
     "Faqat tanlangan mahsulotlar yuborildi. Ularning narxi mijoz so'ragan "
-    "summaga mos, shuning uchun \"shu summaga shular bor\" deb yozish to'g'ri."
+    "summaga mos, shuning uchun \"shu summaga shular bor\" deb yozish to'g'ri. "
+    "Albomda {count} ta mahsulot bor{prices} — javobingda shu sonni nazarda tut. "
+    "Bittasini tanlab \"bitta variantimiz bor\" deb yozish XATO: mijoz "
+    "{count} ta rasmni ko'rib turibdi."
 )
 
 
@@ -3699,8 +3702,16 @@ def ai_catalog_album_result(result):
     trimmed = dict(result)
     trimmed["items"] = [{key: value for key, value in row.items() if key != "image_url"} for row in result.get("items", [])]
     if result.get("ok"):
-        trimmed["instruction_uz"] = (ALBUM_WHOLE_CATALOG_INSTRUCTION if result.get("whole_catalog")
-                                     else ALBUM_PRICE_GROUP_INSTRUCTION)
+        rows = trimmed["items"]
+        if result.get("whole_catalog"):
+            trimmed["instruction_uz"] = ALBUM_WHOLE_CATALOG_INSTRUCTION
+        else:
+            prices = sorted({row.get("price") for row in rows if row.get("price")})
+            span = ""
+            if len(prices) > 1:
+                span = ", narxlari %s dan %s gacha" % (money_uz(prices[0]), money_uz(prices[-1]))
+            trimmed["instruction_uz"] = ALBUM_PRICE_GROUP_INSTRUCTION.format(
+                count=len(rows), prices=span)
     return trimmed
 
 

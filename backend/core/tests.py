@@ -11907,6 +11907,7 @@ class TheWholeCatalogIsNotDescribedAsOnePriceTests(TestCase):
         result = self._send([item.id])
         self.assertFalse(result["whole_catalog"])
         self.assertIn("shu summaga shular bor", result["instruction_uz"])
+        self.assertIn("Albomda 1 ta mahsulot bor", result["instruction_uz"])
 
 
 class AnAdOpeningAlwaysShowsTheCatalogTests(TestCase):
