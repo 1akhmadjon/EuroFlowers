@@ -1172,6 +1172,33 @@ def parse_report_date(value, field):
         raise DRFValidationError({field: "Sana YYYY-MM-DD ko‘rinishida bo‘lishi kerak"})
 
 
+def current_month_range():
+    """Joriy oyning birinchi va oxirgi kuni.
+
+    Hisobotlar shu oy bo'yicha ochiladi. Oyning birinchi kunida ham "jami"
+    o'sha kundan emas, oy boshidan hisoblanadi.
+    """
+    today = timezone.localdate()
+    first = today.replace(day=1)
+    next_month = (first + timedelta(days=32)).replace(day=1)
+    return first, next_month - timedelta(days=1)
+
+
+def report_period_from_request(request):
+    """So'rovdagi sana oralig'i. Berilmasa joriy oy olinadi.
+
+    Bittasi berilsa ikkinchisi ochiq qoladi — mijoz "shu sanadan boshlab" deb
+    so'rasa oyning oxiri bilan cheklab qo'ymaymiz.
+    """
+    date_from = parse_report_date(request.query_params.get("date_from"), "date_from")
+    date_to = parse_report_date(request.query_params.get("date_to"), "date_to")
+    if date_from and date_to and date_from > date_to:
+        raise DRFValidationError({"date_from": "date_from date_to dan katta bo‘lmasligi kerak"})
+    if not date_from and not date_to:
+        return current_month_range()
+    return date_from, date_to
+
+
 def supplier_rollup_queryset(date_from=None, date_to=None):
     money = DecimalField(max_digits=16, decimal_places=2)
     batch_range = Q()
@@ -1259,8 +1286,9 @@ def supplier_rollup_queryset(date_from=None, date_to=None):
 class SupplierViewSet(ScopedViewSet):
     """Postavshiklar.
 
-    ?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD berilsa, sotib olingan summa,
-    partiya soni, dona soni va to'langan summa faqat shu oraliq bo'yicha keladi.
+    Sana berilmasa JORIY OY bo'yicha keladi: sotib olingan summa, partiya soni,
+    dona soni, to'langan summa va qarz — hammasi oy boshidan hisoblanadi.
+    ?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD berilsa o'sha oraliq ishlaydi.
     """
 
     permission_page = "suppliers"
@@ -1279,10 +1307,7 @@ class SupplierViewSet(ScopedViewSet):
         return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
-        date_from = parse_report_date(self.request.query_params.get("date_from"), "date_from")
-        date_to = parse_report_date(self.request.query_params.get("date_to"), "date_to")
-        if date_from and date_to and date_from > date_to:
-            raise DRFValidationError({"date_from": "date_from date_to dan katta bo‘lmasligi kerak"})
+        date_from, date_to = report_period_from_request(self.request)
         queryset = supplier_rollup_queryset(date_from, date_to)
         if not queryset.query.order_by:
             # annotate GROUP BY dan keyin tartib yo'qoladi, sahifalash barqaror bo'lishi uchun qaytaramiz
@@ -1569,6 +1594,14 @@ def florist_stats_data(profile, request, include_sales=True):
 
 
 class FloristProfileViewSet(TotalsListMixin, ScopedViewSet):
+    """Floristlar.
+
+    Sana berilmasa JORIY OY bo'yicha keladi: jami ish haqi ham, yasagan
+    katalogi soni ham oy boshidan hisoblanadi. Qo'lidagi gul qoldig'i esa
+    joriy holat, u davrga bog'liq emas.
+    ?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD berilsa o'sha oraliq ishlaydi.
+    """
+
     permission_page = "florists"
     write_roles = ["admin", "supervisor"]
     queryset = FloristProfile.objects.select_related("user").all()
@@ -1579,10 +1612,30 @@ class FloristProfileViewSet(TotalsListMixin, ScopedViewSet):
     # annotatsiya modeldagi tartibni yo'qotadi, shuning uchun bu yerda aniq yoziladi
     ordering = ["user__first_name", "user__username", "id"]
 
+    @extend_schema(parameters=[
+        OpenApiParameter("date_from", OpenApiTypes.DATE, description="Shu sanadan boshlab hisoblanadi. Berilmasa oy boshi"),
+        OpenApiParameter("date_to", OpenApiTypes.DATE, description="Shu sanagacha hisoblanadi. Berilmasa oy oxiri"),
+    ])
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def report_period(self):
+        return report_period_from_request(self.request)
+
     def get_queryset(self):
-        catalog_quantity = CatalogItem.objects.filter(florist=OuterRef("pk")).values("florist").annotate(total=Coalesce(Sum("quantity_total"), 0)).values("total")[:1]
+        date_from, date_to = self.report_period()
+        salary_filter = Q()
+        catalog_range = Q()
+        if date_from:
+            salary_filter &= Q(salary_entries__work_date__gte=date_from)
+            catalog_range &= Q(created_at__date__gte=date_from)
+        if date_to:
+            salary_filter &= Q(salary_entries__work_date__lte=date_to)
+            catalog_range &= Q(created_at__date__lte=date_to)
+        catalog_quantity = (CatalogItem.objects.filter(catalog_range, florist=OuterRef("pk"))
+                            .values("florist").annotate(total=Coalesce(Sum("quantity_total"), 0)).values("total")[:1])
         queryset = super().get_queryset().annotate(
-            salary_total=Coalesce(Sum("salary_entries__amount"), Decimal("0")),
+            salary_total=Coalesce(Sum("salary_entries__amount", filter=salary_filter or None), Decimal("0")),
             catalog_count=Coalesce(Subquery(catalog_quantity, output_field=IntegerField()), 0),
         )
         role = getattr(getattr(self.request.user, "profile", None), "role", None)
@@ -1597,12 +1650,19 @@ class FloristProfileViewSet(TotalsListMixin, ScopedViewSet):
         ustidan emas, filtrga tushgan floristlarning id'si bo'yicha alohida
         hisoblanadi — shunda SQL sodda va natija aniq bo'ladi.
         """
+        date_from, date_to = self.report_period()
         ids = list(queryset.order_by().values_list("pk", flat=True))
         profiles = FloristProfile.objects.filter(pk__in=ids)
-        salary = FloristSalaryEntry.objects.filter(florist_id__in=ids).aggregate(
-            t_amount=money_sum(F("amount")),
-        )
-        catalog = CatalogItem.objects.filter(florist_id__in=ids).aggregate(
+        salary_rows = FloristSalaryEntry.objects.filter(florist_id__in=ids)
+        catalog_rows = CatalogItem.objects.filter(florist_id__in=ids)
+        if date_from:
+            salary_rows = salary_rows.filter(work_date__gte=date_from)
+            catalog_rows = catalog_rows.filter(created_at__date__gte=date_from)
+        if date_to:
+            salary_rows = salary_rows.filter(work_date__lte=date_to)
+            catalog_rows = catalog_rows.filter(created_at__date__lte=date_to)
+        salary = salary_rows.aggregate(t_amount=money_sum(F("amount")))
+        catalog = catalog_rows.aggregate(
             t_quantity=int_sum("quantity_total"),
             t_remaining=int_sum(CATALOG_REMAINING_EXPR),
         )
@@ -1617,8 +1677,12 @@ class FloristProfileViewSet(TotalsListMixin, ScopedViewSet):
             "salary_total": money(salary["t_amount"]),
             "catalog_quantity": catalog["t_quantity"],
             "catalog_remaining": catalog["t_remaining"],
-            # floristlarning qo'lida yopilmagan gul
+            # floristlarning qo'lida yopilmagan gul — bu joriy qoldiq,
+            # shuning uchun davr bilan cheklanmaydi
             "stock_stems": stock["t_stems"],
+            # Qaysi davr hisoblangani. Sana berilmasa joriy oy.
+            "period": {"date_from": date_from.isoformat() if date_from else "",
+                       "date_to": date_to.isoformat() if date_to else ""},
         }
 
     @action(detail=False, methods=["get"], url_path="me")

@@ -12261,3 +12261,108 @@ class AnAmountInTheReplyPicksThePriceGroupTests(TestCase):
             result = services.apply_sent_photo_claim_safeguard(
                 self.conversation, {"reply": "Hozirda bizda bor gullar shular."}, tool_results)
         self.assertTrue(result["tool_results"][-1]["output"]["whole_catalog"])
+
+
+class TheFloristListShowsThisMonthTests(TestCase):
+    """Floristlar ro'yxati sana berilmasa joriy oy bo'yicha keladi.
+
+    Oyning birinchi kunida ham "jami oylik" o'sha kundan emas, oy boshidan
+    hisoblanadi. Sana berilsa o'sha oraliq ishlaydi.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("florist-month", "a@b.uz", "p")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.florist = FloristProfile.objects.create(
+            user=User.objects.create_user("fl-month", password="p"), staff_type="florist")
+        today = timezone.localdate()
+        self.month_start = today.replace(day=1)
+        self.last_month = self.month_start - timedelta(days=1)
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("70000"),
+                                          source="manual", work_date=self.month_start)
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("50000"),
+                                          source="manual", work_date=today)
+        FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("900000"),
+                                          source="manual", work_date=self.last_month)
+
+    def _row(self, **params):
+        response = self.client.get("/api/florists/", params)
+        self.assertEqual(response.status_code, 200, response.json())
+        body = response.json()
+        rows = body["results"] if isinstance(body, dict) and "results" in body else body
+        row = next(item for item in rows if item["id"] == self.florist.id)
+        return row, body
+
+    def test_the_default_is_this_month_only(self):
+        row, _ = self._row()
+        self.assertEqual(Decimal(row["salary_total"]), Decimal("120000.00"))
+
+    def test_last_month_is_left_out(self):
+        row, _ = self._row()
+        self.assertNotEqual(Decimal(row["salary_total"]), Decimal("1020000.00"))
+
+    def test_an_explicit_range_is_honoured(self):
+        row, _ = self._row(date_from=self.last_month.isoformat(), date_to=self.last_month.isoformat())
+        self.assertEqual(Decimal(row["salary_total"]), Decimal("900000.00"))
+
+    def test_only_a_start_date_leaves_the_end_open(self):
+        row, _ = self._row(date_from=self.last_month.isoformat())
+        self.assertEqual(Decimal(row["salary_total"]), Decimal("1020000.00"))
+
+    def test_the_totals_follow_the_same_period(self):
+        _, body = self._row()
+        totals = body.get("totals") or {}
+        self.assertEqual(Decimal(str(totals["salary_total"])), Decimal("120000.00"))
+        self.assertEqual(totals["period"]["date_from"], self.month_start.isoformat())
+
+    def test_a_bad_date_is_refused(self):
+        response = self.client.get("/api/florists/", {"date_from": "01.09.2026"})
+        self.assertEqual(response.status_code, 400)
+
+
+class TheSupplierListShowsThisMonthTests(TestCase):
+    """Postavshiklar ro'yxati ham sana berilmasa joriy oy bo'yicha keladi."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("supplier-month", "s@b.uz", "p")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.supplier = Supplier.objects.create(name="Gulbozor")
+        today = timezone.localdate()
+        self.month_start = today.replace(day=1)
+        self.last_month = self.month_start - timedelta(days=1)
+        SupplierPayment.objects.create(supplier=self.supplier, amount=Decimal("300000"),
+                                       method="cash", paid_at=today)
+        SupplierPayment.objects.create(supplier=self.supplier, amount=Decimal("800000"),
+                                       method="cash", paid_at=self.last_month)
+
+    def _row(self, **params):
+        response = self.client.get("/api/suppliers/", params)
+        self.assertEqual(response.status_code, 200, response.json())
+        body = response.json()
+        rows = body["results"] if isinstance(body, dict) and "results" in body else body
+        return next(item for item in rows if item["id"] == self.supplier.id)
+
+    def test_the_default_is_this_month_only(self):
+        self.assertEqual(Decimal(self._row()["paid_total"]), Decimal("300000.00"))
+
+    def test_an_explicit_range_is_honoured(self):
+        row = self._row(date_from=self.last_month.isoformat(), date_to=self.last_month.isoformat())
+        self.assertEqual(Decimal(row["paid_total"]), Decimal("800000.00"))
+
+    def test_only_a_start_date_leaves_the_end_open(self):
+        row = self._row(date_from=self.last_month.isoformat())
+        self.assertEqual(Decimal(row["paid_total"]), Decimal("1100000.00"))
+
+
+class TheMonthRangeHelperTests(TestCase):
+    def test_it_covers_the_whole_month(self):
+        from .views import current_month_range
+        first, last = current_month_range()
+        today = timezone.localdate()
+        self.assertEqual(first, today.replace(day=1))
+        self.assertEqual(first.month, last.month)
+        self.assertEqual((last + timedelta(days=1)).day, 1)
+        self.assertLessEqual(first, today)
+        self.assertGreaterEqual(last, today)
