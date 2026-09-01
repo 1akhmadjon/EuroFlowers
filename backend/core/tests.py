@@ -12084,6 +12084,12 @@ class TheModelSeesWhatWasAlreadyDoneTests(TestCase):
         self.assertTrue(state["already_answered"]["delivery_price"])
         self.assertTrue(state["already_answered"]["payment_types"])
 
+    def test_a_cyrillic_answer_counts_too(self):
+        """Real suhbat 2276: manzil kirillda aytilgan edi va tanilmasdi."""
+        self.conversation.messages.create(
+            sender="ai", text="Тошкент шаҳар, Яккасарой тумани, Бобур кўчаси 10")
+        self.assertTrue(self._state()["already_answered"]["shop_address"])
+
     def test_the_last_reply_is_given_back(self):
         self.conversation.messages.create(sender="ai", text="Qaysi biri kerak: 1 yoki 2?")
         self.assertEqual(self._state()["last_ai_reply"], "Qaysi biri kerak: 1 yoki 2?")

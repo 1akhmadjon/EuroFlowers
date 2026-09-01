@@ -1217,13 +1217,28 @@ def conversation_state_for_ai(conversation, business_settings, history_messages)
             image_ids.extend(row.get("catalog_id") for row in rows)
     ai_texts = [message.text or "" for message in history_messages if message.sender == "ai"]
     joined = " ".join(ai_texts)
+    lowered = joined.lower()
+
+    def said(*values):
+        """Shu matnlardan biri javoblarda uchraganmi. Javob kirillda ham bo'lishi
+        mumkin, shuning uchun har bir qiymatning kirill ko'rinishi ham qaraladi."""
+        for value in values:
+            text = (value or "").strip()
+            if not text:
+                continue
+            for variant in {text, uz_latin_to_cyril(text)}:
+                if variant and variant[:18].lower() in lowered:
+                    return True
+        return False
+
     delivery_fee = money_uz(business_settings.delivery_fee) if business_settings.delivery_fee else ""
-    address = (business_settings.shop_address_uz or "").strip()
+    hours = (business_settings.working_hours or {}).get("uz", "")
     answered = {
-        "shop_address": bool(address and address[:18].lower() in joined.lower()),
+        "shop_address": said(business_settings.shop_address_uz,
+                             business_settings.shop_address_uz_cyril,
+                             business_settings.shop_address_ru),
         "delivery_price": bool(delivery_fee and delivery_fee in joined),
-        "working_hours": bool((business_settings.working_hours or {}).get("uz", "")[:10] in joined
-                              if (business_settings.working_hours or {}).get("uz") else False),
+        "working_hours": said(hours),
         "payment_types": bool(re.search(r"naqd|нақд|наличн|karta|карта", joined, re.IGNORECASE)),
     }
     offered = bool(re.search(OPERATOR_OFFER_PATTERN, joined))
