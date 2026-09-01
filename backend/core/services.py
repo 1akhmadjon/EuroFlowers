@@ -2345,16 +2345,26 @@ def reply_promises_an_operator(text):
     return bool(OPERATOR_PROMISE_WORDS.search(value) and OPERATOR_PROMISE_VERBS.search(value))
 
 
-def operator_already_told_about_this_batch(conversation):
-    """Oxirgi AI javobidan keyin operatorlar guruhiga xabar ketganmi.
+# Operatorlar guruhiga shu muddat ichida ikkinchi chaqiruv ketmaydi. Operator
+# birinchi xabarni ko'rib chatga kiradi — orada har javob uchun yangi karta
+# yuborish uni chalg'itadi.
+OPERATOR_CALL_QUIET_MINUTES = 30
 
-    Bir suhbat bo'yicha emas, aynan shu xabar to'plami bo'yicha qaraladi: mijoz
-    yangi savol bilan qaytsa operator yana xabardor bo'lishi kerak, lekin bitta
-    javobga ikkita chaqiruv ketmasligi ham kerak.
+
+def operator_already_told_recently(conversation):
+    """Yaqinda operatorlar guruhiga shu suhbat haqida xabar ketganmi.
+
+    Lead kartasi ham hisobga olinadi: buyurtma ochilgan bo'lsa operatorlar
+    mijozni allaqachon ko'rgan.
+
+    Ilgari bu tekshiruv faqat oxirgi AI javobidan keyingi xabarlarni qarardi.
+    Real suhbat 2251: buyurtma yopilib bo'lgan, lead kartasi guruhga ketgan,
+    lekin AI keyingi har javobini "Operatorlarimiz tez orada bog'lanishadi"
+    bilan yakunladi — bu shunchaki xushmuomalalik edi, qorovul esa uni har
+    safar bajarilmagan va'da deb hisoblab, guruhga to'rtta chaqiruv yubordi.
     """
-    for message in conversation.messages.order_by("-created_at", "-id")[:40]:
-        if message.sender == "ai":
-            return False
+    since = timezone.now() - timedelta(minutes=OPERATOR_CALL_QUIET_MINUTES)
+    for message in conversation.messages.filter(sender="system", created_at__gte=since):
         metadata = message.metadata or {}
         if "operator_needed" in metadata or "operator_lead_notified" in metadata:
             return True
@@ -2426,9 +2436,9 @@ def apply_operator_promise_safeguard(conversation, result, tool_results):
     if unlinked_shared_media_silence(conversation):
         # Tizimda yo'q reel operatorni chaqirish sababi emas.
         return result
-    if operator_already_told_about_this_batch(conversation):
+    if operator_already_told_recently(conversation):
         return result
-    reason = (result.get("reply") or "")[:200]
+    reason = "AI javobida operator va'da qilindi: " + (result.get("reply") or "")[:160]
     output = notify_operator_needed(conversation, reason)
     tool_results.append({"name": "call_operator",
                          "arguments": {"reason": reason, "safeguard": True},
@@ -3735,6 +3745,13 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
             # ularning hech biri bilan operator biror ish qila olmaydi.
             return {"ok": False, "detail": "unlinked_shared_media",
                     "instruction_uz": MEDIA_MATCH_UNLINKED_SHARED_MEDIA_INSTRUCTION}
+        if operator_already_told_recently(conversation):
+            # Operatorlar bu suhbat haqida yaqinda xabar olgan. Ikkinchi karta
+            # yangi ma'lumot bermaydi — real suhbat 2221 da model o'zi bir
+            # daqiqa ichida ikki marta chaqirgan edi.
+            return {"ok": True, "detail": "operator_already_notified",
+                    "instruction_uz": ("Operatorlar bu suhbatdan allaqachon xabardor. "
+                                       "Mijozga odatdagidek javob ber, qayta chaqirma.")}
         return dict(notify_operator_needed(conversation, (arguments.get("reason") or "").strip()),
                     instruction_uz=("Mijozga faqat shu mazmunda javob ber: operatorlarimiz sizga tez "
                                     "orada yozib yuborishadi. Telegram username BERMA, telefon "

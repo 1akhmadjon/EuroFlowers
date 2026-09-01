@@ -11457,17 +11457,42 @@ class OperatorPromiseIsAlwaysDeliveredTests(TestCase):
         result, notify = self._apply("Rahmat. Operatorlarimiz siz bilan bog'lanadi.", tool_results)
         notify.assert_not_called()
 
-    def test_it_does_not_repeat_inside_one_batch(self):
+    def test_it_does_not_repeat_within_the_quiet_window(self):
         self.conversation.messages.create(sender="system", text="", metadata={"operator_needed": {"reason": "x"}})
         result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi")
         notify.assert_not_called()
 
-    def test_it_fires_again_after_an_ai_reply(self):
-        self.conversation.messages.create(sender="system", text="", metadata={"operator_needed": {"reason": "x"}})
+    def test_an_open_order_does_not_call_the_operator_again(self):
+        """Real suhbat 2251: lead kartasi ketgan, keyin har javob oxiridagi
+        xushmuomalalik jumlasi guruhga to'rtta chaqiruv yubordi."""
+        self.conversation.messages.create(sender="system", text="", metadata={
+            "operator_lead_notified": {"lead_id": 190}})
+        for reply in ["Naqd to'lovni qabul qilamiz. Operatorlarimiz tez orada bog'lanishadi.",
+                      "Manzilingizni oldik. Operatorlarimiz tez orada bog'lanishadi.",
+                      "Rahmat, kutamiz. Operatorlarimiz tez orada bog'lanishadi."]:
+            self.conversation.messages.create(sender="ai", text=reply)
+            self.conversation.messages.create(sender="customer", text="Xop")
+            result, notify = self._apply(reply)
+            notify.assert_not_called()
+
+    def test_it_fires_again_after_the_quiet_window(self):
+        old = self.conversation.messages.create(sender="system", text="", metadata={"operator_needed": {"reason": "x"}})
+        Message.objects.filter(id=old.id).update(created_at=timezone.now() - timedelta(minutes=45))
         self.conversation.messages.create(sender="ai", text="Operatorlarimiz sizga yozib yuborishadi")
         self.conversation.messages.create(sender="customer", text="Yana bir savol bor edi")
         result, notify = self._apply("Operatorlarimiz sizga tez orada yozib yuborishadi")
         notify.assert_called_once()
+
+    @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
+    def test_the_tool_itself_is_quiet_too(self):
+        """Real suhbat 2221: model bir daqiqa ichida ikki marta chaqirgan."""
+        from unittest.mock import patch
+        self.conversation.messages.create(sender="system", text="", metadata={"operator_needed": {"reason": "x"}})
+        with patch("core.services.notify_operator_needed") as notify:
+            result = execute_ai_tool("call_operator", {"reason": "Pion so'rovi"}, self.conversation)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["detail"], "operator_already_notified")
+        notify.assert_not_called()
 
     def test_an_unlinked_reel_never_calls_the_operator(self):
         AICatalogItem.objects.create(name="Qizil", arrangement_type="basket", price=199000,
