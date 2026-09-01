@@ -12137,10 +12137,11 @@ class TheBudgetFallsBackDownwardsTests(TestCase):
         self.assertEqual(self._prices(400000), ["400000", "450000"])
 
     def test_the_band_is_thirty_percent(self):
+        # Pastga faqat 5 000 tolerantlik, yuqoriga 30 foiz.
         self.assertEqual(services.catalog_price_band(Decimal("250000"), Decimal("250000")),
-                         (Decimal("250000"), Decimal("325000")))
+                         (Decimal("245000"), Decimal("325000")))
         self.assertEqual(services.catalog_price_band(Decimal("900000"), Decimal("900000")),
-                         (Decimal("900000"), Decimal("1170000")))
+                         (Decimal("895000"), Decimal("1170000")))
 
     def test_a_big_budget_still_reaches_the_top(self):
         self.assertEqual(self._prices(900000), ["1000000"])
