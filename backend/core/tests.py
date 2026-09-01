@@ -11235,9 +11235,9 @@ class BudgetNeverShowsCheaperTests(TestCase):
         self.assertEqual(prices, [Decimal("199000.00"), Decimal("400000.00"), Decimal("450000.00")])
 
     def test_the_price_band_helper_only_widens_a_single_amount(self):
-        # Chegara foizda: 400 000 + 30% = 520 000
+        # Yuqoriga 30 foiz, pastga 5 000 tolerantlik.
         self.assertEqual(services.catalog_price_band(Decimal("400000"), Decimal("400000")),
-                         (Decimal("400000"), Decimal("520000")))
+                         (Decimal("395000"), Decimal("520000")))
         self.assertEqual(services.catalog_price_band(None, Decimal("400000")),
                          (None, Decimal("400000")))
         self.assertEqual(services.catalog_price_band(Decimal("200000"), Decimal("500000")),
