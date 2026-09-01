@@ -636,6 +636,11 @@ BUDGET_RADIUS = Decimal("100000")
 # turgan edi. Real suhbat 2272 da aynan shunday bo'ldi.
 BUDGET_UP_RATIO = Decimal("0.30")
 
+# "200 000 li gul kere" degan mijoz uchun 199 000 ham o'sha narx. Mijoz summani
+# yaxlitlab aytadi, katalogda esa 199 000 turadi — bu bittagina ming so'mlik
+# farq sabab mahsulot ko'rinmay qolardi.
+BUDGET_EXACT_TOLERANCE = Decimal("5000")
+
 
 def budget_target(low, high):
     """Mijoz aytgan yakka summa. Oraliq yoki bir tomonlama chegara bo'lsa None."""
@@ -645,11 +650,16 @@ def budget_target(low, high):
 
 
 def catalog_price_band(low, high):
-    """Qidiruv oynasi. Yakka summa aytilsa avval faqat yuqoriga qaraladi."""
+    """Qidiruv oynasi.
+
+    Pastga faqat BUDGET_EXACT_TOLERANCE qadar — "200 000" deganda 199 000 ham
+    o'sha narx. Yuqoriga esa BUDGET_UP_RATIO qadar ochiladi.
+    """
     target = budget_target(low, high)
     if target is None:
         return low, high
-    return target, (target * (Decimal("1") + BUDGET_UP_RATIO)).quantize(Decimal("1"))
+    lower = max(Decimal("0"), target - BUDGET_EXACT_TOLERANCE)
+    return lower, (target * (Decimal("1") + BUDGET_UP_RATIO)).quantize(Decimal("1"))
 
 
 def catalog_cheapest_price(queryset=None):
@@ -2369,6 +2379,37 @@ def reply_claims_a_photo_was_sent(text):
     return bool(PHOTO_CLAIM_WORDS.search(value) and PHOTO_CLAIM_VERBS.search(value))
 
 
+def complete_budget_album_ids(catalog_ids, tool_results):
+    """Budjet qidiruvi qaytargan qatorlarning hammasini albomga qo'shadi.
+
+    Faqat shu navbatda get_catalog budjet bilan chaqirilgan va model uning
+    qatorlaridan tanlab olgan bo'lsa ishlaydi. Boshqa holatlarda ro'yxat
+    o'zgarmaydi — masalan rasmga mos kelgan ikkita mahsulot yuborilayotganda.
+    """
+    if not catalog_ids:
+        return catalog_ids
+    budget_ids = budget_catalog_ids_from_tool_results(tool_results)
+    if not budget_ids:
+        return catalog_ids
+    chosen = [value for value in catalog_ids if value in budget_ids]
+    if not chosen or len(chosen) != len(catalog_ids):
+        return catalog_ids
+    if set(chosen) == set(budget_ids):
+        return catalog_ids
+    return budget_ids
+
+
+def budget_catalog_ids_from_tool_results(tool_results):
+    for row in reversed(tool_results or []):
+        if row.get("name") != "get_catalog":
+            continue
+        output = row.get("output") or {}
+        if not output.get("budget"):
+            continue
+        return [item.get("catalog_id") for item in output.get("catalog") or [] if item.get("catalog_id")]
+    return []
+
+
 def catalog_ids_from_tool_results(tool_results):
     """Shu navbatda get_catalog qaytargan mahsulot raqamlari.
 
@@ -2380,6 +2421,16 @@ def catalog_ids_from_tool_results(tool_results):
             continue
         rows = (row.get("output") or {}).get("catalog") or []
         ids = [item.get("catalog_id") for item in rows if item.get("catalog_id")]
+        if ids:
+            return ids
+    return []
+
+
+def budget_ids_from_reply(text):
+    """Javobda aytilgan summaga mos katalog mahsulotlari."""
+    for price in prices_from_caption(text or ""):
+        rows = ai_catalog_rows(min_price=price, max_price=price)
+        ids = [row["catalog_id"] for row in rows]
         if ids:
             return ids
     return []
@@ -2410,6 +2461,12 @@ def apply_sent_photo_claim_safeguard(conversation, result, tool_results):
     # yuborilgan deb turibdi, demak rasm ketishi SHART. Aks holda mijoz
     # bo'sh gapni oladi — real suhbat 2141 da xuddi shunday bo'ldi.
     ids = catalog_ids_from_tool_results(tool_results)
+    if not ids:
+        # Model qidiruvni umuman chaqirmagan bo'lsa ham javobda summa turgan
+        # bo'ladi ("Aksiyadagi 199 000 so'mlik variantlarimiz shular"). Butun
+        # katalogni yuborish o'sha gapni yolg'on qiladi — summani o'zimiz
+        # o'qib, aynan o'sha narxdagilarni yuboramiz.
+        ids = budget_ids_from_reply(result.get("reply"))
     items = catalog_album_items(ids) if ids else catalog_album_items([])
     if not items:
         items = catalog_album_items([])
@@ -3765,6 +3822,10 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
         blocked = media_match_send_block(tool_results, name, catalog_ids)
         if blocked:
             return blocked
+        # Mijoz summa aytgan bo'lsa o'sha summaga chiqqan mahsulotlarning
+        # HAMMASI ko'rsatiladi. Model ba'zan to'rttadan uchtasini tanlab
+        # qolganini tashlab ketardi va mijoz mavjud gulni ko'rmasdi.
+        catalog_ids = complete_budget_album_ids(catalog_ids, tool_results)
         items = catalog_album_items(catalog_ids)
         if not items:
             return {"ok": False, "detail": "catalog_empty", "items": [], "not_sent": []}

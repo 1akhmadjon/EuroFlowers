@@ -12144,3 +12144,118 @@ class TheBudgetFallsBackDownwardsTests(TestCase):
 
     def test_a_big_budget_still_reaches_the_top(self):
         self.assertEqual(self._prices(900000), ["1000000"])
+
+
+class ARoundedAmountFindsTheNearbyPriceTests(TestCase):
+    """"200 000 li gul kere" deganda 199 000 ham chiqadi.
+
+    Mijoz summani yaxlitlab aytadi, katalogda esa 199 000 turadi. Bir ming
+    so'mlik farq sabab uchta mahsulot ko'rinmay qolardi.
+    """
+
+    def setUp(self):
+        for price in (199000, 199000, 200000, 400000, 1000000):
+            AICatalogItem.objects.create(name="Buket %s" % price, arrangement_type="bouquet",
+                                         price=price, quantity=1,
+                                         image_url="https://cdn.example.com/%s.jpg" % price)
+
+    def _prices(self, asked):
+        rows = services.ai_catalog_result(min_price=asked, max_price=asked)["catalog"]
+        return sorted(row["price"].split(".")[0] for row in rows)
+
+    def test_a_rounded_amount_includes_the_price_just_below(self):
+        self.assertEqual(self._prices(200000), ["199000", "199000", "200000"])
+
+    def test_the_exact_amount_includes_the_one_just_above(self):
+        self.assertEqual(self._prices(199000), ["199000", "199000", "200000"])
+
+    def test_the_tolerance_is_five_thousand(self):
+        self.assertEqual(services.catalog_price_band(Decimal("200000"), Decimal("200000")),
+                         (Decimal("195000"), Decimal("260000")))
+
+    def test_a_far_amount_is_still_not_dragged_down(self):
+        """250 000 uchun 199 000 tolerantlikka kirmaydi — u pastga qaytish yo'li."""
+        self.assertEqual(services.catalog_price_band(Decimal("250000"), Decimal("250000")),
+                         (Decimal("245000"), Decimal("325000")))
+
+
+class TheWholePriceGroupIsSentTests(TestCase):
+    """Budjet qidiruvi chiqargan mahsulotlarning hammasi albomga kiradi.
+
+    Model to'rttadan uchtasini tanlab, 200 000 lik gulni tashlab ketgan edi —
+    mijoz katalogda turgan mahsulotni ko'rmadi.
+    """
+
+    def setUp(self):
+        self.items = [AICatalogItem.objects.create(
+            name="Buket %s" % index, arrangement_type="bouquet", price=price, quantity=1,
+            image_url="https://cdn.example.com/%s.jpg" % index)
+            for index, price in enumerate((199000, 199000, 200000, 1000000))]
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-group"))
+
+    def _budget_tool(self):
+        return {"name": "get_catalog", "arguments": {},
+                "output": services.ai_catalog_result(min_price=200000, max_price=200000)}
+
+    def test_a_partial_choice_is_completed(self):
+        from unittest.mock import patch
+        budget = self._budget_tool()
+        expected = [row["catalog_id"] for row in budget["output"]["catalog"]]
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": expected[:2]},
+                                     self.conversation, [budget])
+        self.assertEqual(sorted(row["catalog_id"] for row in result["items"]), sorted(expected))
+
+    def test_a_choice_outside_the_budget_rows_is_left_alone(self):
+        from unittest.mock import patch
+        budget = self._budget_tool()
+        other = [self.items[3].id]
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": other},
+                                     self.conversation, [budget])
+        self.assertEqual([row["catalog_id"] for row in result["items"]], other)
+
+    def test_without_a_budget_lookup_nothing_is_added(self):
+        from unittest.mock import patch
+        picked = [self.items[0].id]
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = execute_ai_tool("send_catalog_album", {"catalog_ids": picked}, self.conversation, [])
+        self.assertEqual([row["catalog_id"] for row in result["items"]], picked)
+
+
+class AnAmountInTheReplyPicksThePriceGroupTests(TestCase):
+    """Javobda summa aytilib hech narsa yuborilmagan bo'lsa — o'sha summa qidiriladi.
+
+    Ilgari bunday holatda butun katalog ketardi: "Aksiyadagi 199 000 so'mlik
+    variantlarimiz shular" deb yozib, ichida 1 000 000 lik gul ham bo'lgan
+    26 talik albom yuborilardi.
+    """
+
+    def setUp(self):
+        for price in (199000, 199000, 1000000):
+            AICatalogItem.objects.create(name="Buket %s" % price, arrangement_type="bouquet",
+                                         price=price, quantity=1,
+                                         image_url="https://cdn.example.com/%s.jpg" % price)
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-reply-price"))
+        self.conversation.messages.create(sender="customer", text="Aksiyadagi 199 mingli gullar qaysilari")
+
+    def test_the_album_matches_the_amount_in_the_reply(self):
+        from unittest.mock import patch
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = services.apply_sent_photo_claim_safeguard(
+                self.conversation,
+                {"reply": "Aksiyadagi 199 000 so'mlik variantlarimiz shular."}, tool_results)
+        album = result["tool_results"][-1]["output"]
+        self.assertEqual({row["price"] for row in album["items"]}, {"199000.00"})
+        self.assertFalse(album["whole_catalog"])
+
+    def test_a_reply_without_an_amount_still_sends_everything(self):
+        from unittest.mock import patch
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)):
+            result = services.apply_sent_photo_claim_safeguard(
+                self.conversation, {"reply": "Hozirda bizda bor gullar shular."}, tool_results)
+        self.assertTrue(result["tool_results"][-1]["output"]["whole_catalog"])
