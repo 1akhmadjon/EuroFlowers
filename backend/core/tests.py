@@ -451,7 +451,7 @@ class BusinessRulesTests(TestCase):
         self.assertEqual(context["business"]["operator_hours_ru"], "с 08:00 до 00:00")
         # Mijozga username berilmaydi — javob shunchaki kutishga chorlaydi.
         self.assertEqual(context["business"]["operator_telegram_text"],
-                         "Operatorlarimiz sizga tez orada yozib yuborishadi")
+                         "Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.")
         self.assertNotIn("@", context["business"]["operator_telegram_text"])
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7144,7 +7144,7 @@ class OperatorHandoffTests(TestCase):
         self.assertTrue(result["show_whole_catalog"])
         self.assertEqual(result["group_matches"], [])
         self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [item.id])
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", result["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", result["instruction_uz"])
         self.assertIn("Telefon raqami SO'RAMA", result["instruction_uz"])
         self.assertIn("topdim", result["instruction_uz"])
 
@@ -7342,7 +7342,7 @@ class OperatorHandoffTests(TestCase):
         self.assertEqual(result["group_matches"], [])
         self.assertEqual([row["catalog_id"] for row in result["near_matches"]], [close.id])
         # Rasm bo'yicha so'rov buyurtma emas: raqam so'ralmaydi, lead ochilmaydi.
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", result["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", result["instruction_uz"])
         self.assertIn("lead yaratma", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7476,7 +7476,7 @@ class OperatorHandoffTests(TestCase):
                 third = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
         self.assertFalse(third["ok"])
         self.assertEqual(third["detail"], "catalog_image_already_sent")
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", third["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", third["instruction_uz"])
         album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7506,7 +7506,7 @@ class OperatorHandoffTests(TestCase):
             second = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
         self.assertFalse(second["ok"])
         self.assertEqual(second["detail"], "catalog_already_sent")
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", second["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", second["instruction_uz"])
         album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7531,7 +7531,7 @@ class OperatorHandoffTests(TestCase):
         # Butun katalog ham, bu rasm ham ko'rilgan — endi operatorga uzatiladi.
         self.assertFalse(result["ok"])
         self.assertEqual(result["detail"], "catalog_image_already_sent")
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", result["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", result["instruction_uz"])
         send_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7557,7 +7557,7 @@ class OperatorHandoffTests(TestCase):
         self.assertFalse(result["allow_send"])
         self.assertFalse(result["allow_group"])
         self.assertIn(result["detail"], {"not_confident", "no_similar_catalog_item"})
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", result["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", result["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_a_merely_similar_item_is_not_put_in_the_group(self):
@@ -7654,7 +7654,7 @@ class OperatorHandoffTests(TestCase):
             second = execute_ai_tool("match_ai_catalog_by_media", {"source_url": None, "user_text": "chizganim qancha"}, conversation)
         self.assertEqual(first["detail"], "ask_for_crop")
         self.assertEqual(second["detail"], "not_confident")
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", second["instruction_uz"])
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", second["instruction_uz"])
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_a_single_product_photo_never_gets_a_crop_request(self):
@@ -7948,7 +7948,7 @@ class NoStockPromptTests(TestCase):
         """Javob berolmagan savol lead emas — mijoz Telegram akkauntga yo'naltiriladi."""
         section = self.prompt.split("8B. JAVOB BEROLMAGAN SAVOL", 1)[1].split("9. DO'KON MA'LUMOTLARI", 1)[0]
         self.assertIn("TELEFON RAQAMI SO'RALMAYDI VA LEAD YARATILMAYDI", section)
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", section)
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", section)
         self.assertIn("client_lead_create CHAQIRILMAYDI", section)
         self.assertIn("Lead faqat buyurtma uchun ochiladi", section)
 
@@ -8274,7 +8274,7 @@ class NaturalSalesFlowTests(TestCase):
         from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION
         self.assertIn("send_catalog_album", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
         self.assertIn("BO'SH massiv", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
         # Rasm bo'yicha so'rov buyurtma emas — telefon ham, lead ham yo'q.
         self.assertIn("lead yaratma", MEDIA_MATCH_NOT_FOUND_INSTRUCTION)
 
@@ -8641,7 +8641,7 @@ class NoOperatorHandoffToolTests(TestCase):
         """Maydonga murojaat emas, jumlaning o'zi — ko'rsatma mijozga chiqib ketmasin."""
         from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION
         for text in [MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION]:
-            self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", text)
+            self.assertIn("Sizni operatorlarimizga bog'laymizmi?", text)
             self.assertIn("call_operator", text)
             self.assertNotIn("operator_telegram_text", text)
             self.assertIn("SO'RAMA", text)
@@ -8662,7 +8662,7 @@ class NoOperatorHandoffToolTests(TestCase):
         context = json.loads(openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"].split("REAL_CONTEXT_JSON:\n", 1)[1])
         self.assertNotIn("operator_telegram", context["business"])
         self.assertEqual(context["business"]["operator_telegram_text"],
-                         "Operatorlarimiz sizga tez orada yozib yuborishadi")
+                         "Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.")
 
 
 class LeadOnlyForOrdersPromptTests(TestCase):
@@ -9862,7 +9862,7 @@ class TheMediaInstructionLeavesRoomForACustomOrderTests(TestCase):
         self.assertIn("yasab berolislami", note)
         self.assertIn("albom YUBORMA", note)
         self.assertIn("yuborgan rasmingizdagi guldan", note)
-        self.assertIn("Operatorlarimiz sizga tez orada yozib yuborishadi", note)
+        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", note)
 
     def test_the_original_instructions_still_say_what_they_said(self):
         from .services import MEDIA_MATCH_NOT_FOUND_INSTRUCTION, MEDIA_MATCH_SIMILAR_INSTRUCTION
@@ -10496,7 +10496,7 @@ class TheCustomerNeverGetsATelegramHandleTests(TestCase):
         from .services import operator_telegram_text
         for handle in ["@euroflowerspremium", "", None]:
             text = operator_telegram_text(handle)
-            self.assertEqual(text, "Operatorlarimiz sizga tez orada yozib yuborishadi")
+            self.assertEqual(text, "Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.")
             self.assertNotIn("@", text)
 
     @override_settings(AI_OPERATOR_HANDOFF_BOT_TOKEN="tok", AI_OPERATOR_HANDOFF_GROUP_ID="-100")
@@ -11235,8 +11235,9 @@ class BudgetNeverShowsCheaperTests(TestCase):
         self.assertEqual(prices, [Decimal("199000.00"), Decimal("400000.00"), Decimal("450000.00")])
 
     def test_the_price_band_helper_only_widens_a_single_amount(self):
+        # Chegara foizda: 400 000 + 30% = 520 000
         self.assertEqual(services.catalog_price_band(Decimal("400000"), Decimal("400000")),
-                         (Decimal("400000"), Decimal("550000")))
+                         (Decimal("400000"), Decimal("520000")))
         self.assertEqual(services.catalog_price_band(None, Decimal("400000")),
                          (None, Decimal("400000")))
         self.assertEqual(services.catalog_price_band(Decimal("200000"), Decimal("500000")),
@@ -11306,7 +11307,7 @@ class OperatorTelegramHandleNeverReachesTheModelTests(TestCase):
         context = json.loads(payload.split("REAL_CONTEXT_JSON:\n", 1)[1])
         self.assertNotIn("operator_telegram", context["business"])
         self.assertEqual(context["business"]["operator_telegram_text"],
-                         "Operatorlarimiz sizga tez orada yozib yuborishadi")
+                         "Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.")
         self.assertNotIn("@euroflowerspremium", payload)
 
     def test_the_prompt_no_longer_carries_the_handle(self):
@@ -11984,3 +11985,156 @@ class AnAdOpeningAlwaysShowsTheCatalogTests(TestCase):
             result = execute_ai_tool("call_operator", {"reason": "Kelin buketi"}, self.conversation)
         self.assertTrue(result["ok"])
         notify.assert_called_once()
+
+
+class TheOperatorIsOfferedBeforeBeingCalledTests(TestCase):
+    """Operatorga bog'lash oldidan mijozdan rozilik so'raladi.
+
+    Ilgari AI "Operatorlarimiz sizga tez orada yozib yuborishadi" deb yozib,
+    mijozni suhbatdan uzib qo'yardi. Endi avval taklif qilinadi; mijoz rad
+    javob bersa AI o'zi gaplashishda davom etadi.
+    """
+
+    def setUp(self):
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-offer", name="Dilnoza"))
+        self.conversation.messages.create(sender="customer", text="Aksiya qachongacha")
+
+    def _apply(self, reply):
+        from unittest.mock import patch
+        with patch("core.services.notify_operator_needed", return_value={"ok": True, "detail": ""}) as notify:
+            services.apply_operator_promise_safeguard(self.conversation, {"reply": reply}, [])
+        return notify
+
+    def test_the_offer_question_is_not_a_promise(self):
+        for reply in ["Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.",
+                      "Сизни операторларимизга боғлаймизми?",
+                      "Соединить вас с оператором?"]:
+            self.assertTrue(services.reply_offers_an_operator(reply), reply)
+            self.assertFalse(services.reply_promises_an_operator(reply), reply)
+
+    def test_the_confirmation_is_a_promise(self):
+        for reply in ["Rahmat, operatorlarimiz sizga tez orada yozib yuborishadi.",
+                      "Operatorlarimiz siz bilan bog'lanadi."]:
+            self.assertTrue(services.reply_promises_an_operator(reply), reply)
+
+    def test_the_group_is_not_told_while_only_offering(self):
+        notify = self._apply("Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.")
+        notify.assert_not_called()
+
+    def test_the_group_is_told_on_the_confirmation(self):
+        notify = self._apply("Rahmat, operatorlarimiz sizga tez orada yozib yuborishadi.")
+        notify.assert_called_once()
+
+    def test_the_lead_flow_is_never_a_handoff(self):
+        """Real suhbat 2272: buyurtma yozilyapti, operator chaqirilmasligi kerak."""
+        for reply in ["Bizda eng arzoni 199 000 so'mdan boshlanadi. Ism va telefon raqamingizni "
+                      "qoldirsangiz operatorlarimiz siz bilan bog'lanadi.",
+                      "Buyurtmangizni tasdiqlash uchun ism va telefon raqamingizni qoldiring."]:
+            self.assertFalse(services.reply_promises_an_operator(reply), reply)
+
+
+class TheModelSeesWhatWasAlreadyDoneTests(TestCase):
+    """AI ga suhbatning holati beriladi — nima yuborilgan, nimaga javob berilgan.
+
+    Katalog 2276 da olti marta, 1831 da yetti marta yuborilgan edi; 2273 da
+    "1 yoki 2?" savoli ikki marta berilgan. Model qoidani biladi, lekin "buni
+    allaqachon qildimmi" degan savolga javobni faqat shu maydonlardan oladi.
+    """
+
+    def setUp(self):
+        self.settings_row = BusinessSettings.objects.get_or_create(pk=1)[0]
+        self.settings_row.shop_address_uz = "Toshkent shahar, Yakkasaroy tumani, Bobur ko'chasi 10"
+        self.settings_row.delivery_fee = 50000
+        self.settings_row.save()
+        self.item = AICatalogItem.objects.create(
+            name="Qizil Atir Kompazitsia", arrangement_type="basket", price=199000,
+            quantity=1, image_url="https://cdn.example.com/q.jpg")
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-state"))
+
+    def _state(self):
+        history = list(self.conversation.messages.exclude(sender="system").order_by("created_at", "id"))
+        return services.conversation_state_for_ai(self.conversation, self.settings_row, history)
+
+    def test_a_fresh_conversation_has_nothing_recorded(self):
+        state = self._state()
+        self.assertFalse(state["already_sent"]["whole_catalog"])
+        self.assertEqual(state["already_sent"]["last_album"], [])
+        self.assertFalse(state["already_answered"]["shop_address"])
+        self.assertFalse(state["operator"]["group_notified"])
+
+    def test_the_whole_catalog_is_recorded_with_its_age(self):
+        self.conversation.messages.create(sender="system", text="", metadata={"catalog_album_result": {
+            "ok": True, "whole_catalog": True,
+            "items": [{"position": 1, "catalog_id": self.item.id, "name": self.item.name,
+                       "price": "199000.00", "delivered": True}]}})
+        state = self._state()
+        self.assertTrue(state["already_sent"]["whole_catalog"])
+        self.assertEqual(state["already_sent"]["whole_catalog_minutes_ago"], 0)
+        self.assertEqual(state["already_sent"]["last_album"][0]["position"], 1)
+        self.assertEqual(state["already_sent"]["last_album"][0]["catalog_id"], self.item.id)
+
+    def test_the_answered_questions_are_recorded(self):
+        self.conversation.messages.create(
+            sender="ai", text="Manzilimiz Toshkent shahar, Yakkasaroy tumani, Bobur ko'chasi 10. "
+                              "Yetkazib berish 50 000 so'm. To'lov naqd yoki karta.")
+        state = self._state()
+        self.assertTrue(state["already_answered"]["shop_address"])
+        self.assertTrue(state["already_answered"]["delivery_price"])
+        self.assertTrue(state["already_answered"]["payment_types"])
+
+    def test_the_last_reply_is_given_back(self):
+        self.conversation.messages.create(sender="ai", text="Qaysi biri kerak: 1 yoki 2?")
+        self.assertEqual(self._state()["last_ai_reply"], "Qaysi biri kerak: 1 yoki 2?")
+
+    def test_the_operator_offer_is_recorded(self):
+        self.conversation.messages.create(
+            sender="ai", text="Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.")
+        self.assertTrue(self._state()["operator"]["offer_made"])
+        self.assertFalse(self._state()["operator"]["group_notified"])
+
+    def test_the_state_reaches_the_model(self):
+        from unittest.mock import patch
+        self.conversation.messages.create(sender="customer", text="salom")
+        with patch("core.services.OpenAI") as openai_class, patch("core.services.openai_api_key", return_value="k"):
+            openai_class.return_value.responses.create.return_value = SimpleNamespace(id="r", output=[], output_text=json.dumps({"reply": "ok", "detected_language": "uz", "customer_name": None, "phone": None, "handoff": False, "lead_ready": False, "lead_request": "", "estimated_price": None, "arrangement_type": None}))
+            ai_reply(self.conversation)
+        payload = openai_class.return_value.responses.create.call_args.kwargs["input"][0]["content"]
+        context = json.loads(payload.split("REAL_CONTEXT_JSON:\n", 1)[1])["conversation"]
+        for key in ("already_sent", "already_answered", "last_ai_reply", "operator"):
+            self.assertIn(key, context)
+
+
+class TheBudgetFallsBackDownwardsTests(TestCase):
+    """Yuqorida hech narsa bo'lmasa eng yaqin pastdagisi ko'rsatiladi.
+
+    Real suhbat 2272: mijoz 250 000 so'radi, katalogda 199 000 va 200 000
+    turgan holda 400 000 lik gul chiqdi — qat'iy +150 000 chegara kichik
+    summalarga juda uzoq edi.
+    """
+
+    def setUp(self):
+        for price in (199000, 200000, 400000, 450000, 1000000):
+            AICatalogItem.objects.create(name="Buket %s" % price, arrangement_type="bouquet",
+                                         price=price, quantity=1,
+                                         image_url="https://cdn.example.com/%s.jpg" % price)
+
+    def _prices(self, asked):
+        rows = services.ai_catalog_result(min_price=asked, max_price=asked)["catalog"]
+        return sorted({row["price"].split(".")[0] for row in rows})
+
+    def test_a_quarter_million_shows_the_nearest_below(self):
+        self.assertEqual(self._prices(250000), ["199000", "200000"])
+
+    def test_an_exact_amount_still_opens_upwards(self):
+        self.assertEqual(self._prices(400000), ["400000", "450000"])
+
+    def test_the_band_is_thirty_percent(self):
+        self.assertEqual(services.catalog_price_band(Decimal("250000"), Decimal("250000")),
+                         (Decimal("250000"), Decimal("325000")))
+        self.assertEqual(services.catalog_price_band(Decimal("900000"), Decimal("900000")),
+                         (Decimal("900000"), Decimal("1170000")))
+
+    def test_a_big_budget_still_reaches_the_top(self):
+        self.assertEqual(self._prices(900000), ["1000000"])

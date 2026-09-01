@@ -44,12 +44,17 @@ AI_CATALOG_SHORTLIST_FLOOR = 30
 
 
 # Mijozga Telegram username berilmaydi. U hech qayerga yozmaydi — operatorning
-# o'zi chatga kirib yozadi, shuning uchun javob shunchaki kutishga chorlaydi.
-OPERATOR_PROMISE_UZ = "Operatorlarimiz sizga tez orada yozib yuborishadi"
+# o'zi chatga kirib yozadi.
+#
+# Operatorga o'tkazish ikki qadam: avval TAKLIF qilinadi, mijoz rozilik bergach
+# TASDIQ yoziladi va shundagina guruhga xabar ketadi. Rozilik so'ramasdan
+# o'tkazib yuborish mijozni suhbatdan uzib qo'yardi.
+OPERATOR_OFFER_UZ = "Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi."
+OPERATOR_PROMISE_UZ = "Rahmat, operatorlarimiz sizga tez orada yozib yuborishadi."
 
 
 def operator_telegram_text(handle=""):
-    return OPERATOR_PROMISE_UZ
+    return OPERATOR_OFFER_UZ
 
 
 # Guruhga faqat g'olib bilan shu qadar yaqin ballar tushadi. Undan pastdagisi
@@ -90,14 +95,15 @@ MEDIA_MATCH_CUSTOM_ORDER_NOTE = (
     "\"shunaqasini yasang\", \"shu guldan buket qb bering\") — bu yasatma buyurtma, "
     "katalog qidiruvi emas. Unda albom YUBORMA va 00C bo'limidagi javobni ber: "
     "xohlaganingizdek yasab beramiz, yuborgan rasmingizdagi guldan buket bo'yicha "
-    "mijozga aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir."
+    "00H bo'limidagi tartib bo'yicha operatorga bog'lashni TAKLIF qil: \"Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.\" "
+    "Rozilik kelgunicha call_operator CHAQIRILMAYDI."
 )
 MEDIA_MATCH_NOT_FOUND_INSTRUCTION = (
     "Aynan mos mahsulot topilmadi. Bitta ham katalog rasmini alohida YUBORMA va taxmin "
     "qilib mahsulot nomi yoki narxini aytma. Buning o'rniga send_catalog_album ni "
     "catalog_ids BO'SH massiv bilan chaqirib butun katalogni yubor va shu mazmunda yoz: "
     "hozirda bizda bor gullar shular, shulardan tanlasangiz ham bo'ladi; yoki o'zingiz "
-    "yuborgan gul kerak bo'lsa aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir, "
+    "yuborgan gul kerak bo'lsa 00H bo'limidagi tartib bo'yicha taklif qil: \"Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.\" "
     "operatorlarimiz siz yuborgan gul haqida aniq javob berishadi. Telefon "
     "raqami SO'RAMA va lead yaratma — mijoz katalogdan gul tanlasagina buyurtma bo'ladi."
 ) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
@@ -118,7 +124,7 @@ MEDIA_MATCH_SIMILAR_INSTRUCTION = (
     "o'tirma — send_catalog_album ni catalog_ids BO'SH massiv bilan chaqirib butun "
     "katalogni yubor. Keyin shu mazmunda yoz: hozirda bizda bor gullar shular, "
     "shulardan tanlasangiz ham bo'ladi; yoki siz yuborgan gul ko'proq qiziq bo'lsa "
-    "aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir, operatorlarimiz "
+    "00H bo'limidagi tartib bo'yicha taklif qil: \"Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.\" operatorlarimiz "
     "aniq narxini aytishadi. \"Aynan shu\" yoki \"topdim\" dema. Telefon raqami "
     "SO'RAMA va lead yaratma."
 ) + MEDIA_MATCH_CUSTOM_ORDER_NOTE
@@ -153,7 +159,7 @@ When the flower under discussion came from one of our own stories, "send me the 
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" (with show_whole_catalog) means the exact flower is NOT in the catalog and nothing on the shelf is close enough to offer as a substitute: call send_catalog_album with an empty catalog_ids to send the whole catalog, say these are the flowers available and they are welcome to pick one, and offer to have an operator price the flower they actually sent if they leave a number; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
-allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent an operator will answer them precisely — write exactly this sentence: "Operatorlarimiz sizga tez orada yozib yuborishadi." and call call_operator. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
+allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent an operator will answer them precisely — follow section 00H: first OFFER to connect them ("Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.") and call call_operator only after they agree. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -620,10 +626,15 @@ def catalog_price_bounds(min_price, max_price):
 # summa atrofidagini so'ragan. Shu radius ichidagilar ko'rsatiladi.
 BUDGET_RADIUS = Decimal("100000")
 
-# Mijoz bitta summa aytsa qidiruv faqat YUQORIGA ochiladi. "400 000 li gul kere"
+# Mijoz bitta summa aytsa qidiruv avval YUQORIGA ochiladi. "400 000 li gul kere"
 # degan mijozga 199 000 lik gulni ko'rsatish savdoni pastga tortadi — u o'sha
-# summani ayta olishini aytdi. Shuning uchun oyna [summa, summa + 150 000].
-BUDGET_UP_RADIUS = Decimal("150000")
+# summani ayta olishini aytdi.
+#
+# Chegara foizda o'lchanadi, qat'iy summada emas. Qat'iy +150 000 katta
+# summalarga to'g'ri kelardi, kichiklariga esa yo'q: 250 000 so'ragan mijozga
+# 400 000 lik gul chiqib qolardi (+60%), holbuki katalogda 199 000 va 200 000
+# turgan edi. Real suhbat 2272 da aynan shunday bo'ldi.
+BUDGET_UP_RATIO = Decimal("0.30")
 
 
 def budget_target(low, high):
@@ -634,11 +645,11 @@ def budget_target(low, high):
 
 
 def catalog_price_band(low, high):
-    """Qidiruv oynasi. Yakka summa aytilsa pastdagilar umuman chiqmaydi."""
+    """Qidiruv oynasi. Yakka summa aytilsa avval faqat yuqoriga qaraladi."""
     target = budget_target(low, high)
     if target is None:
         return low, high
-    return target, target + BUDGET_UP_RADIUS
+    return target, (target * (Decimal("1") + BUDGET_UP_RATIO)).quantize(Decimal("1"))
 
 
 def catalog_cheapest_price(queryset=None):
@@ -674,6 +685,21 @@ def budget_window(low, high):
     if focus is None:
         return None, None
     return focus - BUDGET_RADIUS, focus + BUDGET_RADIUS
+
+
+def catalog_below_budget(queryset, target, limit=4):
+    """So'ralgan summadan pastdagi eng yaqin mahsulotlar.
+
+    Yuqorida hech narsa bo'lmagandagina ishlaydi. Mijozga uzoq yuqoridagini
+    ko'rsatishdan ko'ra yaqin pastdagini ko'rsatish yaxshi: 250 000 so'ragan
+    mijoz 400 000 ni emas, 200 000 ni oladi.
+    """
+    if target is None:
+        return queryset.none()
+    prices = sorted({price for price in queryset.filter(price__lte=target).values_list("price", flat=True)}, reverse=True)
+    if not prices:
+        return queryset.none()
+    return queryset.filter(price__in=prices[:limit])
 
 
 def catalog_near_budget(queryset, low, high):
@@ -777,9 +803,10 @@ def ai_catalog_rows(query="", limit=24, arrangement_type="", made_from_batch_id=
         if band_high is not None:
             priced = priced.filter(price__lte=band_high)
         if not priced.exists():
-            # Yuqorida hech narsa yo'q ekan — o'shanda so'ralgan summa atrofidagi
-            # simmetrik oynaga qaytamiz. "200 000 li gul kere" shu yo'l bilan
-            # 199 000 lik gulni topadi.
+            # Yuqorida hech narsa yo'q ekan — eng yaqin pastdagilar ko'rsatiladi.
+            # 250 000 so'ralganda 400 000 emas, 199 000 va 200 000 chiqadi.
+            priced = catalog_below_budget(queryset, budget_target(low, high) or high or low)
+        if not priced.exists():
             priced = catalog_near_budget(queryset, low, high)
         # Budjet aytilgan bo'lsa arzonidan boshlab ko'rsatamiz — mijoz shu tartibda o'ylaydi.
         queryset = (priced if priced.exists() else queryset).order_by("price", "id")
@@ -1162,6 +1189,58 @@ def calculate_custom_arrangement_price(stock_items):
             "florist_fee": f"Florist haqi taxminan {money_uz(florist_fee)} so'm",
             "total": f"Jami taxminan {money_uz(total)} so'm",
         },
+    }
+
+
+def conversation_state_for_ai(conversation, business_settings, history_messages):
+    """AI ga suhbatning haqiqiy holati — nima yuborilgan, nimaga javob berilgan.
+
+    Model qoidani biladi, lekin "buni allaqachon qildimmi" degan savolga
+    javobni faqat shu yerdan oladi. Real suhbatlarda aynan shu bilim yetishmadi:
+    2276 da butun katalog olti marta, 1831 da yetti marta yuborildi; 2273 da
+    "1 yoki 2?" savoli ikki marta berildi.
+    """
+    now = timezone.now()
+    whole_at = None
+    last_album = []
+    image_ids = []
+    for message in conversation.messages.filter(sender="system").order_by("created_at", "id"):
+        album = (message.metadata or {}).get("catalog_album_result") or {}
+        rows = [row for row in album.get("items") or [] if row.get("delivered")]
+        if not rows:
+            continue
+        if album.get("whole_catalog"):
+            whole_at = message.created_at
+        last_album = [{"position": row.get("position"), "catalog_id": row.get("catalog_id"),
+                       "name": row.get("name"), "price": row.get("price")} for row in rows]
+        if not album.get("whole_catalog"):
+            image_ids.extend(row.get("catalog_id") for row in rows)
+    ai_texts = [message.text or "" for message in history_messages if message.sender == "ai"]
+    joined = " ".join(ai_texts)
+    delivery_fee = money_uz(business_settings.delivery_fee) if business_settings.delivery_fee else ""
+    address = (business_settings.shop_address_uz or "").strip()
+    answered = {
+        "shop_address": bool(address and address[:18].lower() in joined.lower()),
+        "delivery_price": bool(delivery_fee and delivery_fee in joined),
+        "working_hours": bool((business_settings.working_hours or {}).get("uz", "")[:10] in joined
+                              if (business_settings.working_hours or {}).get("uz") else False),
+        "payment_types": bool(re.search(r"naqd|нақд|наличн|karta|карта", joined, re.IGNORECASE)),
+    }
+    offered = bool(re.search(OPERATOR_OFFER_PATTERN, joined))
+    notified = conversation.messages.filter(sender="system").filter(
+        Q(metadata__has_key="operator_needed") | Q(metadata__has_key="operator_lead_notified")).exists()
+    return {
+        "already_sent": {
+            "whole_catalog": bool(whole_at),
+            "whole_catalog_minutes_ago": int((now - whole_at).total_seconds() // 60) if whole_at else None,
+            "catalog_image_ids": sorted(set(value for value in image_ids if value)),
+            # Mijoz raqam yozsa u shu ro'yxatdagi position. Nomi bo'yicha
+            # qidirish boshqa mahsulotni topib qo'yishi mumkin.
+            "last_album": last_album[-30:],
+        },
+        "already_answered": answered,
+        "last_ai_reply": ai_texts[-1][:400] if ai_texts else "",
+        "operator": {"offer_made": offered, "group_notified": notified},
     }
 
 
@@ -2332,6 +2411,13 @@ def apply_sent_photo_claim_safeguard(conversation, result, tool_results):
 # guruhiga xabar ketmasa mijoz javob kutib qoladi va hech kim bilmaydi.
 # Ish vaqti haqidagi gap ("operatorlarimiz 08:00 dan 00:00 gacha aloqada")
 # va'da emas, shuning uchun fe'l ham talab qilinadi.
+# "Operatorlarimizga bog'laymizmi?" — bu taklif, va'da emas. Mijoz rozilik
+# bermaguncha operatorlar guruhiga hech narsa ketmaydi.
+OPERATOR_OFFER_PATTERN = (r"operator\w*[^.?!]*bog['‘’ʻ]?la[^.?!]*\?"
+                          r"|оператор\w*[^.?!]*боғла[^.?!]*\?"
+                          r"|оператор\w*[^.?!]*(соедин|связа|переда|подключ)[^.?!]*\?"
+                          r"|(соедин|связа|переда|подключ)\w*[^.?!]*оператор[^.?!]*\?")
+
 OPERATOR_PROMISE_WORDS = re.compile(r"operator|оператор", re.IGNORECASE)
 OPERATOR_PROMISE_VERBS = re.compile(
     r"yozib\s*yubor|yozishadi|bog['‘’ʻ]?lan|javob\s*ber|ma['‘’ʻ]?lumot\s*ber|aniqlash|aniq\s*ayt"
@@ -2340,8 +2426,24 @@ OPERATOR_PROMISE_VERBS = re.compile(
     re.IGNORECASE)
 
 
+def reply_offers_an_operator(text):
+    """Javob operatorga bog'lashni TAKLIF qilyaptimi (hali va'da emas)."""
+    return bool(re.search(OPERATOR_OFFER_PATTERN, text or "", re.IGNORECASE))
+
+
 def reply_promises_an_operator(text):
+    """Javob operator yozishini VA'DA qilyaptimi.
+
+    Taklif savoli va'da emas: mijoz hali rozilik bermagan, operatorlar guruhiga
+    hech narsa ketmasligi kerak. Ism va telefon so'ralayotgan bo'lsa ham bu
+    handoff emas — buyurtma yozilyapti va operatorlar lead kartasini oladi.
+    """
     value = text or ""
+    if reply_offers_an_operator(value):
+        return False
+    if re.search(r"telefon\s*raqam|телефон\s*рақам|номер телефона|ism va telefon|исм ва телефон",
+                 value, re.IGNORECASE):
+        return False
     return bool(OPERATOR_PROMISE_WORDS.search(value) and OPERATOR_PROMISE_VERBS.search(value))
 
 
@@ -2568,8 +2670,9 @@ MEDIA_MATCH_OWN_POST_NO_CATALOG_INSTRUCTION = (
     "Mijoz ulashgan post bizning profilimizdan, lekin unga bitta ham katalog "
     "mahsuloti bog'lanmagan — qaysi gul ekanini bilmaymiz. Gul nomini va narxni "
     "AYTMA, taxmin qilma, katalog albomini YUBORMA. Mijozga qisqa ayt: o'sha "
-    "post bo'yicha operatorlarimiz aniq javob berishadi. VA call_operator ni "
-    "CHAQIR — operatorlar mijoz kutib turganini bilishi kerak."
+    "post bo'yicha aniq javobni operatorlarimiz beradi, keyin 00H bo'limi "
+    "bo'yicha bog'lashni TAKLIF qil. call_operator faqat mijoz rozilik "
+    "bergach chaqiriladi."
 )
 
 MEDIA_MATCH_CAPTION_PRICE_INSTRUCTION = (
@@ -3144,7 +3247,7 @@ def ai_tool_definitions():
         {
             "type": "function",
             "name": "match_ai_catalog_by_media",
-            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va mijozga aynan shu jumlani yoz: \"Operatorlarimiz sizga tez orada yozib yuborishadi.\" hamda call_operator ni chaqir. Telefon so'ralmaydi.",
+            "description": "MAJBURIY. Conversation.customer_attachments ichida kind ad BO'LMAGAN media bo'lsa va mijozning oxirgi xabari o'sha media haqida bo'lsa, javob yozishdan OLDIN shu toolni chaqirishing SHART. Chaqirmasdan gul nomi yoki narx yozish eng og'ir xato — katalogda yo'q gulni o'ylab topib yuborasan. Shubhalansang chaqir: bekorga chaqirish zarar qilmaydi, chaqirmaslik esa yolg'on javob beradi. Mijozni Telegram akkauntga yo'naltirishdan oldin ham doim shu tool. Mijoz 'shu nechpul', 'shundan bormi', 'tepadan 2chisi', 'qizili', 'chizilgan joydagi' kabi yozsa shu tool shart. source_url bo'sh bo'lsa oxirgi customer media olinadi. Natijadagi allow_send=true bo'lsagina matches ichidagi mahsulot mijozniki: send_catalog_image chaqir. allow_group=true bo'lsa bir nechta mahsulot rasmda bir xil ko'rinadi: group_matches dagi catalog_id larni send_catalog_album bilan yubor va qaysi biri kerakligini so'ra. allow_group=true bo'lgan holatlar detail bilan farqlanadi: several_look_the_same — bir xil ko'rinadigan mahsulotlar; instagram_link_group va instagram_link_fallback — mijoz yuborgan reel/storyga qo'yilgan mahsulotlar, siz yuborgan reeldan hozir borlari shular deb ayt; similar_only — aynan o'sha gul katalogda yo'q, bular faqat o'xshaydiganlari, shuni rostini ayt. ask_for_crop=true bo'lsa rasmda bir nechta gul bor va mijoz bittasini ko'rsatgan, lekin qaysi biri ekanini ajratib bo'lmadi: rasm yuborma, narx aytma, handoff ham qilma — mijozdan o'sha gulni rasmdan kesib qayta yuborishini iltimos qil. Uchalasi ham false bo'lsa gul aniqlanmagan — katalogdan alohida rasm yuborilmaydi, nom va narx aytilmaydi, near_matches mijozga ko'rsatilmaydi (u faqat operator uchun). Butun katalog albom qilib yuboriladi va 00H bo'limi bo'yicha operatorga bog'lash TAKLIF qilinadi, rozilik kelgach call_operator chaqiriladi. Telefon so'ralmaydi.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3658,8 +3761,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                 "detail": "catalog_already_sent",
                 "instruction_uz": (
                     "Butun katalog bu suhbatda allaqachon yuborilgan, qayta yuborma. "
-                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa aynan shu jumlani yoz: "
-                    "\"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir. "
+                    "Mijoz katalogdan hech narsa tanlamayotgan bo'lsa 00H bo'limi bo'yicha "
+                    "operatorga bog'lashni taklif qil. "
                     "Telefon raqami so'rama."
                 ),
             }
@@ -3688,8 +3791,8 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                     "catalog_id": item.id,
                     "instruction_uz": (
                         f"{item.name} rasmi ham, butun katalog ham bu suhbatda allaqachon "
-                        "yuborilgan. Hech narsa yuborma. Mijozga aynan shu jumlani yoz: "
-                        "\"Operatorlarimiz sizga tez orada yozib yuborishadi.\" va call_operator ni chaqir."
+                        "yuborilgan. Hech narsa yuborma. 00H bo'limi bo'yicha operatorga "
+                        "bog'lashni taklif qil."
                     ),
                 }
             album = send_catalog_album(conversation, catalog_album_items([]), whole_catalog=True)
@@ -3753,9 +3856,9 @@ def execute_ai_tool(name, arguments, conversation, tool_results=None):
                     "instruction_uz": ("Operatorlar bu suhbatdan allaqachon xabardor. "
                                        "Mijozga odatdagidek javob ber, qayta chaqirma.")}
         return dict(notify_operator_needed(conversation, (arguments.get("reason") or "").strip()),
-                    instruction_uz=("Mijozga faqat shu mazmunda javob ber: operatorlarimiz sizga tez "
-                                    "orada yozib yuborishadi. Telegram username BERMA, telefon "
-                                    "so'rama, lead yaratma."))
+                    instruction_uz=("Mijoz rozilik berdi — javobda shu mazmunni yoz: rahmat, operatorlarimiz "
+                                    "sizga tez orada yozib yuborishadi. Telegram username BERMA, "
+                                    "telefon so'rama, lead yaratma."))
     if name == "client_payment_update":
         from . import payment_services
 
@@ -4017,6 +4120,9 @@ def ai_reply(conversation):
                 "desired_date": bool(open_lead.desired_date) if open_lead else False,
                 "desired_time": bool(open_lead.desired_time) if open_lead else False,
             },
+            # Bu suhbatda nima allaqachon yuborilgan va nimaga javob berilgan.
+            # Model shu maydonlarga qarab qaysi funksiyani chaqirishni hal qiladi.
+            **conversation_state_for_ai(conversation, business_settings, history_messages),
         },
         "business": {
             # florist_fee ataylab berilmaydi: raqamni ko'rsa AI uni katalog narxiga
