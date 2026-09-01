@@ -7476,7 +7476,7 @@ class OperatorHandoffTests(TestCase):
                 third = execute_ai_tool("send_catalog_image", {"query": "", "catalog_id": item.id}, conversation)
         self.assertFalse(third["ok"])
         self.assertEqual(third["detail"], "catalog_image_already_sent")
-        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", third["instruction_uz"])
+        self.assertIn("operatorga bog'lashni taklif qil", third["instruction_uz"])
         album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7506,7 +7506,7 @@ class OperatorHandoffTests(TestCase):
             second = execute_ai_tool("send_catalog_album", {"catalog_ids": []}, conversation)
         self.assertFalse(second["ok"])
         self.assertEqual(second["detail"], "catalog_already_sent")
-        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", second["instruction_uz"])
+        self.assertIn("operatorga bog'lashni taklif qil", second["instruction_uz"])
         album_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
@@ -7531,7 +7531,7 @@ class OperatorHandoffTests(TestCase):
         # Butun katalog ham, bu rasm ham ko'rilgan — endi operatorga uzatiladi.
         self.assertFalse(result["ok"])
         self.assertEqual(result["detail"], "catalog_image_already_sent")
-        self.assertIn("Sizni operatorlarimizga bog'laymizmi?", result["instruction_uz"])
+        self.assertIn("operatorga bog'lashni taklif qil", result["instruction_uz"])
         send_mock.assert_not_called()
 
     @override_settings(OPENAI_API_KEY="test-key")
