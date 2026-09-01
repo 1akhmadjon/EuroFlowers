@@ -1816,8 +1816,15 @@ class SupplierDateFilterTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         return next(r for r in response.data["results"] if r["id"] == self.supplier.id)
 
-    def test_without_filter_counts_everything(self):
+    def test_without_filter_only_this_month_counts(self):
+        """Sana berilmasa joriy oy. Bu yerdagi qatorlar avgustdan."""
         row = self.row()
+        self.assertEqual(Decimal(row["purchase_total"]), Decimal("0.00"))
+        self.assertEqual(row["batches_count"], 0)
+        self.assertEqual(Decimal(row["paid_total"]), Decimal("0.00"))
+
+    def test_the_whole_month_range_counts_everything(self):
+        row = self.row("?date_from=2026-08-01&date_to=2026-08-31")
         self.assertEqual(Decimal(row["purchase_total"]), Decimal("200000.00"))
         self.assertEqual(row["batches_count"], 2)
         self.assertEqual(row["total_received_stems"], 150)
@@ -2926,7 +2933,8 @@ class ApiTests(TestCase):
         listed = self.client.get(f"/api/supplier-payments/?supplier={supplier.id}")
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.data["count"], 2)
-        detail = self.client.get(f"/api/suppliers/{supplier.id}/")
+        # Standart davr joriy oy, to'lovlar esa iyulda — oraliq ochib beriladi
+        detail = self.client.get(f"/api/suppliers/{supplier.id}/?date_from=2026-07-01")
         self.assertEqual(detail.status_code, 200)
         # 100*7000 + 50*8000 = 1 100 000
         self.assertEqual(Decimal(detail.data["purchase_total"]), Decimal("1100000.00"))
@@ -6842,7 +6850,8 @@ class PaginationTotalsTests(TestCase):
         FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("60000"), source="catalog", work_date="2026-08-01")
         FloristSalaryEntry.objects.create(florist=self.florist, amount=Decimal("40000"), source="manual", work_date="2026-08-02")
         FloristStockBalance.objects.create(florist=self.florist, batch=self.batches[0], remaining_stems=25)
-        totals = self.client.get("/api/florists/").json()["totals"]
+        # Standart davr joriy oy, ish haqi esa avgustda — oraliq ochib beriladi
+        totals = self.client.get("/api/florists/?date_from=2026-08-01").json()["totals"]
         self.assertEqual(totals["florists"], 1)
         self.assertEqual(totals["active"], 1)
         self.assertEqual(totals["by_staff_type"], {"florist": 1})
