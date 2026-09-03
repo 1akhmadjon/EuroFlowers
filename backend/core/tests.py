@@ -11997,6 +11997,160 @@ class AnAdOpeningAlwaysShowsTheCatalogTests(TestCase):
         notify.assert_called_once()
 
 
+class OneAlbumPerReplyTests(TestCase):
+    """Bitta javobda katalog ikki marta yuborilmaydi.
+
+    Real suhbat 2581 va 2571: match_ai_catalog_by_media albomni yubordi,
+    keyin model send_catalog_album ni ham chaqirdi. Mijoz bir xil rasmlarni
+    ketma-ket ikki marta oldi. Uch kunda o'n uch marta takrorlangan.
+    """
+
+    def setUp(self):
+        self.migration = importlib.import_module("core.migrations.0168_ai_prompt_one_album_per_reply")
+
+    def test_the_rule_names_the_tool_that_sends_the_album_itself(self):
+        block = self.migration.ALBUM_BLOCK
+        self.assertIn("match_ai_catalog_by_media", block)
+        self.assertIn("send_catalog_album CHAQIRMAYSAN", block)
+        self.assertIn("ALLAQACHON yuborildi", block)
+
+    def test_the_rule_explains_that_the_state_is_from_before_the_reply(self):
+        block = self.migration.ALBUM_BLOCK
+        self.assertIn("already_sent.whole_catalog = false", block)
+        self.assertIn("KO'RINMAYDI", block)
+
+    def test_the_rule_carries_the_real_conversations(self):
+        self.assertIn("2581", self.migration.ALBUM_BLOCK)
+        self.assertIn("2571", self.migration.ALBUM_BLOCK)
+
+    def test_a_question_never_forces_the_catalog(self):
+        block = self.migration.QUESTION_BLOCK
+        self.assertIn("hali yuborilmagan bo'lsa ham albom YUBORILMAYDI", block)
+        self.assertIn("reklama katalogni majburiy qilmaydi", block)
+        self.assertIn("dastafka 7 ciga", block)
+        self.assertIn("2556", block)
+
+    def test_applying_it_twice_changes_nothing(self):
+        from django.apps import apps as installed_apps
+        row = AISettings.objects.get_or_create(pk=1)[0]
+        row.system_prompt = (self.migration.ALBUM_ANCHOR + "\n\nqolgani\n\n"
+                             + self.migration.QUESTION_ANCHOR + "\noxiri")
+        row.save()
+        for _ in range(2):
+            self.migration.apply_prompt(installed_apps, None)
+        row.refresh_from_db()
+        self.assertEqual(row.system_prompt.count(self.migration.ALBUM_MARKER), 1)
+        self.assertEqual(row.system_prompt.count(self.migration.QUESTION_MARKER), 1)
+
+    def test_the_live_prompt_carries_both_rules(self):
+        prompt = AISettings.objects.get(pk=1).system_prompt
+        self.assertIn(self.migration.ALBUM_MARKER, prompt)
+        self.assertIn(self.migration.QUESTION_MARKER, prompt)
+
+    def test_the_matcher_counts_as_having_sent_a_photo(self):
+        rows = [{"name": "match_ai_catalog_by_media",
+                 "output": {"ok": True, "detail": "ad_catalog_sent",
+                            "album": {"ok": True, "whole_catalog": True,
+                                      "items": [{"catalog_id": 1, "delivered": True}]}}}]
+        self.assertTrue(services.tool_results_sent_any_photo(rows))
+
+    def test_a_matcher_that_sent_nothing_does_not_count(self):
+        rows = [{"name": "match_ai_catalog_by_media",
+                 "output": {"ok": False, "detail": "media_match_not_confident"}}]
+        self.assertFalse(services.tool_results_sent_any_photo(rows))
+
+    def test_the_claim_safeguard_stays_quiet_after_the_matcher_album(self):
+        from unittest.mock import patch
+        AICatalogItem.objects.create(name="Buket Bir", arrangement_type="bouquet", price=199000,
+                                     quantity=1, image_url="https://cdn.example.com/1.jpg")
+        conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-one-album"))
+        tool_results = [{"name": "match_ai_catalog_by_media",
+                         "arguments": {},
+                         "output": {"ok": True, "detail": "ad_catalog_sent",
+                                    "album": {"ok": True, "whole_catalog": True,
+                                              "items": [{"catalog_id": 1, "delivered": True}]}}}]
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as chunk:
+            result = services.apply_sent_photo_claim_safeguard(
+                conversation, {"reply": "Hozirda bizda bor gullarimiz shular"}, tool_results)
+        chunk.assert_not_called()
+        self.assertEqual([row["name"] for row in result.get("tool_results") or tool_results],
+                         ["match_ai_catalog_by_media"])
+
+    def test_the_claim_safeguard_still_fires_when_nothing_was_sent(self):
+        from unittest.mock import patch
+        AICatalogItem.objects.create(name="Buket Bir", arrangement_type="bouquet", price=199000,
+                                     quantity=1, image_url="https://cdn.example.com/1.jpg")
+        conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-one-album-2"))
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as chunk:
+            result = services.apply_sent_photo_claim_safeguard(
+                conversation, {"reply": "Hozirda bizda bor gullarimiz shular"}, tool_results)
+        chunk.assert_called()
+        self.assertEqual([row["name"] for row in result["tool_results"]], ["send_catalog_album"])
+
+
+class TheAdCatalogOnlyAnswersTheOpeningMessageTests(TestCase):
+    """Reklama qorovuli faqat suhbat ochilish xabariga javob berganda ishlaydi.
+
+    Real suhbat 2556: reklamadan kelgan mijozga operator qo'lda javob berdi,
+    yigirma besh daqiqadan keyin mijoz "Tumanlarga dastafka bormii" deb
+    so'radi. Suhbatda bitta ham AI xabari yo'q edi, shuning uchun qorovul
+    o'sha savolga butun katalogni yubordi.
+    Real suhbat 954: eski mijoz "Dastafka 7 ciga" dedi — xuddi shu holat.
+    """
+
+    def setUp(self):
+        AICatalogItem.objects.create(name="Buket Bir", arrangement_type="bouquet", price=199000,
+                                     quantity=1, image_url="https://cdn.example.com/1.jpg")
+        self.conversation = Conversation.objects.create(
+            customer=Customer.objects.create(instagram_user_id="ig-ad-later"))
+
+    def _ad_message(self, text="Buyurtma bermoqchi edim"):
+        return self.conversation.messages.create(
+            sender="customer", text=text, metadata={
+                "attachments": [{"kind": "photo", "url": "https://www.facebook.com/ads/image/?d=AQK4"}],
+                "instagram_referral": {"type": "OPEN_THREAD", "source": "ADS",
+                                       "ad_id": "120240146122130452"},
+                "instagram_ad_id": "120240146122130452"})
+
+    def _run(self):
+        from unittest.mock import patch
+        tool_results = []
+        with patch("core.services.send_catalog_album_chunk", return_value=(True, "mocked", None)) as chunk:
+            services.apply_ad_opening_safeguard(self.conversation, {"reply": "ok"}, tool_results)
+        return chunk, tool_results
+
+    def test_an_operator_answer_closes_the_opening_moment(self):
+        self._ad_message()
+        self.conversation.messages.create(sender="operator", text="Bobur ko'chasi 10")
+        self.conversation.messages.create(sender="customer", text="Tumanlarga dastafka bormii")
+        chunk, tool_results = self._run()
+        chunk.assert_not_called()
+        self.assertEqual(tool_results, [])
+
+    def test_a_later_customer_question_gets_no_catalog(self):
+        self._ad_message()
+        self.conversation.messages.create(sender="customer", text="Dastafka 7 ciga")
+        chunk, tool_results = self._run()
+        chunk.assert_not_called()
+        self.assertEqual(tool_results, [])
+
+    def test_a_budget_question_is_left_to_get_catalog(self):
+        self._ad_message()
+        self._ad_message("200-250 dan qanaqa gul bor?")
+        chunk, _ = self._run()
+        chunk.assert_not_called()
+
+    def test_the_opening_message_itself_still_shows_the_catalog(self):
+        self._ad_message()
+        chunk, tool_results = self._run()
+        chunk.assert_called()
+        self.assertEqual([row["name"] for row in tool_results], ["send_catalog_album"])
+        self.assertTrue(tool_results[0]["output"]["whole_catalog"])
+
+
 class TheOperatorIsOfferedBeforeBeingCalledTests(TestCase):
     """Operatorga bog'lash oldidan mijozdan rozilik so'raladi.
 

@@ -149,6 +149,7 @@ MEDIA_MATCHING_PRIORITY_INSTRUCTION = """
 MEDIA MATCHING FIRST:
 Before writing a single word of a reply, look at REAL_CONTEXT_JSON.conversation.customer_attachments. If it holds any customer image, story, post or reel whose kind is not "ad", and the customer's latest message is about that media, you MUST call match_ai_catalog_by_media first. Nothing in the backend will call it for you, and no reply you write without it can be trusted: naming a flower or a price you did not get from that tool is the worst mistake you can make here. When in doubt, call it — calling it needlessly costs nothing, skipping it invents a product the shop does not sell.
 An attachment whose kind is "ad" is the banner of the Instagram ad this conversation started from. The customer did not send it. Never run the photo matcher because of it.
+Whenever a match_ai_catalog_by_media result carries an album field, that tool ALREADY sent the album to the customer. You write the reply and nothing else: do not call send_catalog_album, do not call send_catalog_image. detail "ad_catalog_sent" is exactly this case — the ad banner is linked to no catalog item, so the whole catalog went out with that one call. A second album delivers the very same pictures a second time, which is what happened in real conversations 2581 and 2571.
 A question about the address, opening hours, delivery or payment is not a question about the photo. Answer it, and leave the matcher alone even when a photo is sitting in the conversation.
 Never skip media matching for "shu nechpul", "shundan bormi", "rasmdagi", "storydagi", "reeldagi", "tepadan 2chisi", "qizili", or circled/marked flower requests.
 The tool result field allow_send is the only thing that decides what you may do next.
@@ -159,7 +160,7 @@ When the flower under discussion came from one of our own stories, "send me the 
 detail "own_story_matched": the customer sent one of our own stories and the shop wrote its name and price into the system when the story was posted. That is the answer — give the story.title and the story.price_text, ask one next question, and send no catalog image. Do not say "similar" and do not name any other product. If they ask to see the flower again, call send_post_image with story.social_post_id.
 allow_group true: call send_catalog_album with exactly the group_matches catalog_ids, then ask which one the customer means. Do not pick one of them yourself and do not quote a single price. The detail field says what the group is: "several_look_the_same" means these catalog items are indistinguishable in a photo and differ only in size and price; "instagram_link_group" and "instagram_link_fallback" mean these are the items posted on the reel or story the customer shared, so say that these are the ones from their reel that the shop has right now; "similar_only" (with show_whole_catalog) means the exact flower is NOT in the catalog and nothing on the shelf is close enough to offer as a substitute: call send_catalog_album with an empty catalog_ids to send the whole catalog, say these are the flowers available and they are welcome to pick one, and offer to have an operator price the flower they actually sent if they leave a number; "close_matches" means one of these probably IS it but the check was not conclusive, so offer them as the closest matches and let the customer confirm — do not tell them the flower is unavailable.
 ask_for_crop true: the photo holds several arrangements and the customer pointed at one, but it could not be told apart. Do not send any catalog image, do not name an item, do not quote a price and do not hand off yet. Ask the customer to crop that one flower out of the photo and send it again, warmly and in one sentence. Ask this only once in a conversation.
-allow_send false, allow_group false and ask_for_crop false: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent an operator will answer them precisely — follow section 00H: first OFFER to connect them ("Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.") and call call_operator only after they agree. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
+allow_send false, allow_group false, ask_for_crop false and no album in the result: you have NOT identified the flower. Do not send a single catalog image on its own, do not name a catalog item, do not quote a price, and do not describe near_matches to the customer — near_matches is internal information for the operator only. Instead call send_catalog_album with an empty catalog_ids so the customer sees everything the shop actually has, say these are the flowers available and they are welcome to pick one, and tell them that for the flower they actually sent an operator will answer them precisely — follow section 00H: first OFFER to connect them ("Sizni operatorlarimizga bog'laymizmi? Ular sizga aniq javob berishadi.") and call call_operator only after they agree. Do not ask for a phone number and do not create a lead: a lead is for an order, and they have not ordered anything yet.
 Never send a catalog image and then say the operator will confirm. Those two things contradict each other. Either you identified it, or you hand it over.
 """
 
@@ -2438,7 +2439,19 @@ def budget_ids_from_reply(text):
 
 def tool_results_sent_any_photo(tool_results):
     for row in tool_results or []:
-        if row.get("name") in PHOTO_SENDING_TOOLS and (row.get("output") or {}).get("ok"):
+        output = row.get("output") or {}
+        if not isinstance(output, dict):
+            continue
+        if row.get("name") in PHOTO_SENDING_TOOLS and output.get("ok"):
+            return True
+        # match_ai_catalog_by_media rasmni O'ZI yuboradi: reklama katalogga
+        # ulanmagan bo'lsa yoki mahsulot rasmi allaqachon ketgan bo'lsa butun
+        # katalog albomi shu chaqiruvning ichida yuboriladi va natijaga album
+        # bo'lib yoziladi. Buni hisobga olmasak "yubordim" qorovuli o'sha
+        # albomni ikkinchi marta yuborib qo'yadi — real suhbat 2581 va 2571,
+        # uch kunda o'n uch marta.
+        album = output.get("album")
+        if isinstance(album, dict) and album.get("ok"):
             return True
     return False
 
@@ -2575,8 +2588,16 @@ def apply_ad_opening_safeguard(conversation, result, tool_results):
     faqat "operatorlarimiz bog'lanadi" degan javob bordi.
 
     Bannerdan gul nomini taxmin qilmaymiz — mijoz o'zi tanlaydi.
+
+    Faqat suhbatning ochilish xabariga javob berilayotganda ishlaydi. Real
+    suhbat 2556 va 954: reklamadan kelgan mijozga operator qo'lda javob berdi,
+    mijoz keyinroq "Tumanlarga dastafka bormii" va "Dastafka 7 ciga" deb
+    yozdi — hali bitta ham AI xabari bo'lmagani uchun qorovul o'sha savolga
+    butun katalogni yubordi.
     """
-    if conversation.messages.filter(sender="ai").exists():
+    if conversation.messages.filter(sender__in=("ai", "operator")).exists():
+        return result
+    if conversation.messages.filter(sender="customer").count() > 1:
         return result
     if not conversation_started_from_an_ad(conversation):
         return result
