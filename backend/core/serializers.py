@@ -2931,6 +2931,10 @@ class CatalogSaleRestoreRequestSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
 
 
+class CatalogCustomReturnRequestSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
 class CatalogRestoreFlowersSerializer(serializers.Serializer):
     florist = serializers.PrimaryKeyRelatedField(queryset=FloristProfile.objects.all())
     old_batch = serializers.PrimaryKeyRelatedField(queryset=StockBatch.objects.all())

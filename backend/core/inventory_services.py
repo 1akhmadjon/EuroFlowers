@@ -1,6 +1,7 @@
 import re
 from decimal import Decimal
 from django.db import transaction
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from .models import AuditLog, Branch, Debt, FlowerVariant, LeadStockUsage, CatalogComposition, CatalogHistory, CatalogItem, CatalogMaterialUsage, CatalogRework, CatalogReworkOutput, CatalogReworkSource, CatalogReworkStockInput, CatalogTransfer, FloristSalaryEntry, FloristStockBalance, FloristStockIssue, FloristVolumeRate, Lead, Notification, Packaging, PackagingMovement, Reservation, StockBatch, StockMovement
 
@@ -1773,6 +1774,42 @@ def restore_catalog_sale(item, user, quantity=None, sale_history=None, reason=""
             history.save(update_fields=["quantity", "discount_amount", "discount_percent", "snapshot", "updated_at"])
         AuditLog.objects.create(user=user if getattr(user, "is_authenticated", False) else None, action="catalog_sale_restored", summary=f"{item.name_uz} katalog sotuvdan qaytarildi", entity_type="CatalogItem", entity_id=str(item.id), before=before, after={"status": item.status, "quantity": restore_quantity, "quantity_sold": item.quantity_sold, "restored_history": restore_history.id, "reason": reason})
     return item
+
+
+def return_custom_catalog(item, user, reason=""):
+    with transaction.atomic():
+        item = CatalogItem.objects.select_for_update().get(pk=item.pk)
+        if item.catalog_kind != "custom":
+            raise ValueError("Faqat mahsus katalog qaytariladi")
+        if int(item.quantity_sold or 0) or int(item.quantity_wasted or 0) or int(item.quantity_reworked or 0):
+            raise ValueError("Sotilgan, chiqitga chiqarilgan yoki restavratsiya qilingan mahsus katalogni bu yerdan qaytarib bo‘lmaydi")
+        if item.lead_usages.exists() or item.rework_sources.exists() or item.rework_outputs.exists() or item.transfers_in.exists() or item.transfers_out.exists():
+            raise ValueError("Bu mahsus katalog boshqa hujjatlarga bog‘langan, avval bog‘langan hujjatlarni tekshiring")
+        before = catalog_snapshot(item)
+        before.update({
+            "id": item.id,
+            "quantity_total": item.quantity_total,
+            "quantity_stock_deducted": item.quantity_stock_deducted,
+            "status": item.status,
+            "reason": reason,
+        })
+        restore_catalog_inventory(item, user, item.quantity_stock_deducted)
+        item.refresh_from_db()
+        FloristSalaryEntry.objects.filter(catalog_item=item).delete()
+        AuditLog.objects.create(
+            user=user if getattr(user, "is_authenticated", False) else None,
+            action="custom_catalog_returned",
+            summary=f"{item.name_uz} mahsus katalog qaytarildi",
+            entity_type="CatalogItem",
+            entity_id=str(item.id),
+            before=before,
+            after={"deleted": True, "reason": reason},
+        )
+        try:
+            item.delete()
+        except ProtectedError as exc:
+            raise ValueError("Bu mahsus katalog bog‘langan ma’lumotlar sabab o‘chirilmadi") from exc
+    return before
 
 
 def deduct_catalog_stock(item, user, quantity=None):
