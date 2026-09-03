@@ -5100,7 +5100,6 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_delivery_fee_is_subtracted_from_sale(self):
-        # mijoz 300 000 to'laydi, shundan 20 000 kuryerga ketadi
         item = self._debt_catalog(name="Dastafkali", price="300000", quantity=1)
         before = self.client.get("/api/accounting/").data["summary"]
         response = self.client.post(f"/api/catalog/{item.id}/sell/", {
@@ -5108,11 +5107,12 @@ class ApiTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 200, response.data)
         after = self.client.get("/api/accounting/").data["summary"]
-        # savdoga dastafkasiz 280 000 kiradi
         self.assertEqual(Decimal(after["total_sales"]) - Decimal(before["total_sales"]), Decimal("280000.00"))
         self.assertEqual(Decimal(after["delivery_total"]) - Decimal(before["delivery_total"]), Decimal("20000.00"))
-        # kassaga mijoz bergan 300 000 tushadi
-        self.assertEqual(Decimal(after["cash_total"]) - Decimal(before["cash_total"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(after["delivery_cash_out_total"]) - Decimal(before["delivery_cash_out_total"]), Decimal("20000.00"))
+        self.assertEqual(Decimal(after["cash_collected_total"]) - Decimal(before["cash_collected_total"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(after["cash_total"]) - Decimal(before["cash_total"]), Decimal("280000.00"))
+        self.assertEqual(Decimal(after["cash_net_total"]) - Decimal(before["cash_net_total"]), Decimal("280000.00"))
         self.assertEqual(Decimal(after["received_total"]),
                          Decimal(after["total_sales"]) + Decimal(after["delivery_total"]))
         self.assertEqual(after["delivery_count"] - before["delivery_count"], 1)
@@ -5134,6 +5134,9 @@ class ApiTests(TestCase):
         cost_gain = Decimal(after["cost_total"]) - Decimal(before["cost_total"])
         self.assertEqual(sale_gain, Decimal("275000.00"))
         self.assertEqual(gain, sale_gain - cost_gain)
+        self.assertEqual(Decimal(after["card_total"]) - Decimal(before["card_total"]), Decimal("300000.00"))
+        self.assertEqual(Decimal(after["cash_total"]) - Decimal(before["cash_total"]), Decimal("-25000.00"))
+        self.assertEqual(Decimal(after["owner_take_home"]) - Decimal(before["owner_take_home"]), sale_gain)
 
     def test_delivery_fee_with_mixed_payment(self):
         item = self._debt_catalog(name="Aralash dastafka", price="300000", quantity=1)
@@ -5148,6 +5151,15 @@ class ApiTests(TestCase):
         self.assertEqual(row["sale_total"], Decimal("280000.00"))
         self.assertEqual(row["payment_breakdown"]["cash"], Decimal("100000.00"))
         self.assertEqual(row["payment_breakdown"]["card"], Decimal("200000.00"))
+        summary = self.client.get("/api/accounting/").data["summary"]
+        self.assertEqual(Decimal(summary["cash_collected_total"]), Decimal("100000.00"))
+        self.assertEqual(Decimal(summary["cash_total"]), Decimal("80000.00"))
+        self.assertEqual(Decimal(summary["card_total"]), Decimal("200000.00"))
+        totals = self.client.get("/api/catalog/sales/").data["totals"]
+        self.assertEqual(totals["cash_collected_total"], Decimal("100000.00"))
+        self.assertEqual(totals["cash_total"], Decimal("80000.00"))
+        self.assertEqual(totals["cash_net_total"], Decimal("80000.00"))
+        self.assertEqual(totals["delivery_cash_out_total"], Decimal("20000.00"))
 
     def test_mixed_payment_must_equal_received_total(self):
         item = self._debt_catalog(name="Yig‘indi to‘g‘ri kelmadi", price="300000", quantity=1)
