@@ -6344,21 +6344,20 @@ class SaleGroupMessageTests(TestCase):
         self.assertIn("100 000", args[3])
         self.assertIn("200 000", args[3])
 
-    def test_custom_catalog_image_is_sent_when_sale_photo_is_missing(self):
+    def test_custom_catalog_sends_text_when_sale_photo_is_missing(self):
         from unittest.mock import patch
         self._configure_group()
         item = self._item(catalog_kind="custom", image_url="https://example.com/custom.jpg")
         with patch("core.platform_services.telegram_send_photo_with") as photo_sender, \
                 patch("core.platform_services.telegram_send_message_with") as text_sender:
-            photo_sender.return_value = {"ok": True}
+            text_sender.return_value = {"ok": True}
             response = self.client.post(f"/api/catalog/{item.id}/sell/", {
                 "quantity": 1,
                 "payment_type": "cash",
             }, format="json")
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(photo_sender.call_count, 1)
-        self.assertEqual(text_sender.call_count, 0)
-        self.assertEqual(photo_sender.call_args[0][2], "https://example.com/custom.jpg")
+        self.assertEqual(photo_sender.call_count, 0)
+        self.assertEqual(text_sender.call_count, 1)
 
     def test_nothing_is_sent_without_token(self):
         from unittest.mock import patch
