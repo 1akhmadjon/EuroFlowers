@@ -3689,6 +3689,8 @@ class CatalogItemViewSet(TotalsListMixin, ScopedViewSet):
                 sale_group_photo = uploaded_sale_image.read()
             except Exception:
                 sale_group_photo = image_url
+        if not sale_group_photo and item.catalog_kind == "custom":
+            sale_group_photo = item.image_url
         history = CatalogHistory.objects.filter(catalog_item=item, action="sold").order_by("-created_at", "-id").first()
         if history:
             if image_url:
