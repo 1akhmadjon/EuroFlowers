@@ -6344,6 +6344,63 @@ class SaleGroupMessageTests(TestCase):
         self.assertIn("100 000", args[3])
         self.assertIn("200 000", args[3])
 
+    def test_sale_photo_and_accessory_images_are_sent_as_media_group(self):
+        from unittest.mock import patch
+        self._configure_group()
+        accessory = Packaging.objects.create(
+            packaging_type="other",
+            name_uz="Shokolad",
+            quantity=5,
+            sale_price=Decimal("50000"),
+            image_url="https://example.com/shokolad.jpg",
+        )
+        item = self._item(image_url="")
+        with patch("core.platform_services.telegram_send_media_group_with") as media_sender, \
+                patch("core.platform_services.telegram_send_photo_with") as photo_sender, \
+                patch("core.platform_services.telegram_send_message_with") as text_sender:
+            media_sender.return_value = {"ok": True}
+            response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+                "quantity": 1,
+                "payment_type": "cash",
+                "sale_image_url": "https://example.com/sale.jpg",
+                "materials": [{"packaging": accessory.id, "quantity": 1}],
+            }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(media_sender.call_count, 1)
+        self.assertEqual(photo_sender.call_count, 0)
+        self.assertEqual(text_sender.call_count, 0)
+        media = media_sender.call_args[0][2]
+        self.assertEqual(media[0]["url"], "https://example.com/sale.jpg")
+        self.assertIn("Qizil buket", media[0]["caption"])
+        self.assertEqual(media[1]["url"], "https://example.com/shokolad.jpg")
+        history = CatalogHistory.objects.filter(catalog_item=item, action="sold").first()
+        self.assertEqual(history.snapshot["sale_materials"][0]["image_url"], "https://example.com/shokolad.jpg")
+
+    def test_accessory_image_is_sent_when_sale_photo_is_missing(self):
+        from unittest.mock import patch
+        self._configure_group()
+        accessory = Packaging.objects.create(
+            packaging_type="other",
+            name_uz="Oyinchoq",
+            quantity=5,
+            sale_price=Decimal("50000"),
+            image_url="https://example.com/oyinchoq.jpg",
+        )
+        item = self._item(image_url="")
+        with patch("core.platform_services.telegram_send_photo_with") as photo_sender, \
+                patch("core.platform_services.telegram_send_message_with") as text_sender:
+            photo_sender.return_value = {"ok": True}
+            response = self.client.post(f"/api/catalog/{item.id}/sell/", {
+                "quantity": 1,
+                "payment_type": "cash",
+                "materials": [{"packaging": accessory.id, "quantity": 1}],
+            }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(photo_sender.call_count, 1)
+        self.assertEqual(text_sender.call_count, 0)
+        self.assertEqual(photo_sender.call_args[0][2], "https://example.com/oyinchoq.jpg")
+        self.assertIn("Qizil buket", photo_sender.call_args[0][3])
+
     def test_custom_catalog_sends_text_when_sale_photo_is_missing(self):
         from unittest.mock import patch
         self._configure_group()

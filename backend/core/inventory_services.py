@@ -284,7 +284,7 @@ def deduct_catalog_sale_materials(item, materials, quantity, history, user, paym
             reason=f"{item.name_uz} sotuviga ishlatildi",
             performed_by=user if getattr(user, "is_authenticated", False) else None,
         )
-        snapshot_rows.append({"material": packaging.name_uz, "type": packaging.packaging_type, "quantity": amount, "unit_cost": str(packaging.cost_price), "sale_price": str(packaging.sale_price)})
+        snapshot_rows.append({"material": packaging.name_uz, "type": packaging.packaging_type, "quantity": amount, "unit_cost": str(packaging.cost_price), "sale_price": str(packaging.sale_price), "image_url": packaging.image_url})
     return snapshot_rows
 
 
@@ -2434,7 +2434,7 @@ def sale_group_target(item):
 
 
 def notify_sale_to_group(item, history, payment_type, image_url="", photo_override=None):
-    from .platform_services import telegram_send_message_with, telegram_send_photo_with
+    from .platform_services import telegram_send_media_group_with, telegram_send_message_with, telegram_send_photo_with
 
     photo = photo_override or image_url
     token, chat_id = sale_group_target(item)
@@ -2443,6 +2443,26 @@ def notify_sale_to_group(item, history, payment_type, image_url="", photo_overri
         return None
     caption = sale_group_caption(item, history, payment_type, photo)
     try:
+        media = []
+        if photo:
+            if isinstance(photo, (bytes, bytearray)):
+                media.append({"bytes": photo, "caption": caption})
+            else:
+                media.append({"url": photo, "caption": caption})
+        for row in (history.snapshot or {}).get("sale_materials", []) or []:
+            material_image = (row.get("image_url") or "").strip()
+            if material_image:
+                media.append({"url": material_image})
+        if media and not media[0].get("caption"):
+            media[0]["caption"] = caption
+        if len(media) > 1:
+            result = telegram_send_media_group_with(token, chat_id, media[:10])
+            print(f"SALE_GROUP_SENT_MEDIA_GROUP catalog={item.id} chat_id={chat_id} media={len(media[:10])}", flush=True)
+            return result
+        if media and not photo:
+            result = telegram_send_photo_with(token, chat_id, media[0]["url"], caption)
+            print(f"SALE_GROUP_SENT_PHOTO catalog={item.id} chat_id={chat_id}", flush=True)
+            return result
         if photo:
             result = telegram_send_photo_with(token, chat_id, photo, caption)
             print(f"SALE_GROUP_SENT_PHOTO catalog={item.id} chat_id={chat_id}", flush=True)

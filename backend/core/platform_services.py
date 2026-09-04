@@ -1,3 +1,4 @@
+import json
 import requests
 from urllib.parse import parse_qs, urlparse
 from django.conf import settings
@@ -417,16 +418,50 @@ def telegram_send_media_group(chat_id, media):
 
 
 def telegram_send_media_group_with(token, chat_id, media, message_thread_id=""):
-    payload = {
-        "chat_id": chat_id,
-        "media": [
-            {"type": row.get("type") or "photo", "media": row.get("url") or "", "caption": (row.get("caption") or "")[:1024]}
-            for row in media
-        ],
-    }
-    if message_thread_id:
-        payload["message_thread_id"] = message_thread_id
-    return telegram_api_with_token(token, "sendMediaGroup", payload)
+    if not token:
+        return {"skipped": True, "reason": "token yo‘q"}
+    variants = telegram_chat_id_variants(chat_id)
+    if not variants:
+        return {"skipped": True, "reason": "chat_id yo‘q"}
+    media_payload = []
+    files = {}
+    for index, row in enumerate(media):
+        key = f"photo{index}"
+        payload_row = {
+            "type": row.get("type") or "photo",
+            "media": row.get("url") or row.get("image_url") or "",
+        }
+        if row.get("bytes") is not None:
+            payload_row["media"] = f"attach://{key}"
+            files[key] = (row.get("filename") or f"photo{index}.jpg", row.get("bytes"))
+        caption = (row.get("caption") or "")[:1024]
+        if caption:
+            payload_row["caption"] = caption
+            payload_row["parse_mode"] = row.get("parse_mode") or "Markdown"
+        media_payload.append(payload_row)
+    last_error = None
+    for target in variants:
+        url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
+        try:
+            if files:
+                if outbound_blocked():
+                    return BlockedResponse().json()
+                data = {"chat_id": target, "media": json.dumps(media_payload)}
+                if message_thread_id:
+                    data["message_thread_id"] = message_thread_id
+                response = requests.post(url, data=data, files=files, timeout=30)
+            else:
+                if outbound_blocked():
+                    return BlockedResponse().json()
+                payload = {"chat_id": target, "media": media_payload}
+                if message_thread_id:
+                    payload["message_thread_id"] = message_thread_id
+                response = requests.post(url, json=payload, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as exc:
+            last_error = exc
+    raise last_error
 
 
 def telegram_send_rich_message_with(token, chat_id, rich_message, reply_markup=None, message_thread_id=""):
